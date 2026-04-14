@@ -1,0 +1,34 @@
+# ── Core / UI ────────────────────────────────────────────────────────────────
+pywebview>=4.4.1
+requests>=2.31.0
+psutil>=5.9.0
+numpy>=1.26.0
+
+# ── Anthropic ─────────────────────────────────────────────────────────────────
+anthropic>=0.40.0
+
+# ── Resilience ────────────────────────────────────────────────────────────────
+tenacity>=8.3.0
+pydantic>=2.7.0
+
+# ── Force CPU-only PyTorch to avoid 2GB+ CUDA download ───────────────────────
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+
+# ── RAG / Embedding / Semantic Search ─────────────────────────────────────────
+sentence-transformers>=2.7.0
+chromadb>=0.5.0
+
+# ── Priority 2: Hybrid BM25 + vector search ───────────────────────────────────
+rank-bm25>=0.2.2
+
+# ── Channels: Telegram ────────────────────────────────────────────────────────
+python-telegram-bot>=21.0.0
+
+# ── Safety: NeMo Guardrails (optional — app works without it) ─────────────────
+# Install for full content safety rails (jailbreak detection, PII masking, etc.)
+# nemoguardrails>=0.9.0
+
+# ── Priority 5: Input sanitization (optional — app works without it) ──────────
+# llamafirewall>=0.1.0
+
