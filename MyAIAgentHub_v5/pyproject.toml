@@ -1,8 +1,8 @@
 [tool.briefcase]
-project_name = "MyAI Agent Hub"
-bundle = "com.myaiagenthub"
-version = "1.0.0"
-url = "https://myaiagenthub.app"
+project_name = "iMakeAiTeams"
+bundle = "com.imakeaiteams"
+version = "5.0.2"
+url = "https://github.com/zasonic/iMakeAiTeams"
 license = "Proprietary"
 sources = ["app"]
 main_module = "app.main"
@@ -20,8 +20,8 @@ requires = [
 ]
 
 [tool.briefcase.app.myaiagenthub]
-formal_name = "MyAI Agent Hub"
-description = "Local-first desktop AI platform with Claude and free local models"
+formal_name = "iMakeAiTeams"
+description = "Local-first desktop AI platform where Claude and local models work as a coordinated team"
 icon = "icons/AppIcon"
 
 [tool.briefcase.app.myaiagenthub.macOS]

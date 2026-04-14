@@ -1,5 +1,5 @@
 """
-models.py — Typed data contracts for MyAI Agent Hub.
+models.py — Typed data contracts for iMakeAiTeams.
 
 All core data structures are frozen dataclasses. Internal code passes these
 typed objects. Only api.py converts to dicts at the JS boundary.

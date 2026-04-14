@@ -87,7 +87,7 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
 
     # Misc
     "default_agent_id":            ((str, type(None)),  None),
-    "app_version":                 (str,   "1.0.0"),
+    "app_version":                 (str,   "5.0.2"),
 }
 
 

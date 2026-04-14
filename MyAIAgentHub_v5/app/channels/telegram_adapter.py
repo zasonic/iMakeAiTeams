@@ -236,7 +236,7 @@ class TelegramAdapter:
             await update.message.reply_text("⛔ You are not authorised to use this bot.")
             return
         await update.message.reply_text(
-            "👋 *MyAI Agent Hub* connected!\n\n"
+            "👋 *iMakeAiTeams* connected!\n\n"
             "Commands:\n"
             "• Just type to chat\n"
             "• `/run <task>` — start agentic coding task\n"
@@ -255,7 +255,7 @@ class TelegramAdapter:
         if not self._ac.is_allowed(Channel.TELEGRAM, str(update.effective_user.id)):
             return
         await update.message.reply_text(
-            "✅ MyAI Agent Hub is running.\nUse `/run <task>` to start an agentic task.",
+            "✅ iMakeAiTeams is running.\nUse `/run <task>` to start an agentic task.",
             parse_mode="Markdown",
         )
 

@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 :: ═══════════════════════════════════════════════════════════════════
-::  START HERE — MyAI Agent Hub (Windows)
+::  START HERE — iMakeAiTeams (Windows)
 ::  Double-click this file. Everything else is automatic.
 :: ═══════════════════════════════════════════════════════════════════
 

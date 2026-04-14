@@ -1,5 +1,5 @@
 /**
- * app.js — MyAI Agent Hub v4.0
+ * app.js — iMakeAiTeams v5.0.2
  * Complete frontend logic. No build tools, no frameworks — vanilla JS.
  * Backend: window.pywebview.api.*   Events: window.__emit → handleEvent()
  *
@@ -1630,7 +1630,7 @@ document.getElementById("wz-finish-btn").addEventListener("click", async () => {
   document.getElementById("first-run").classList.remove("visible");
   navigate("chat");
   newConversation();
-  showToast("Welcome to MyAI Agent Hub", "success");
+  showToast("Welcome to iMakeAiTeams", "success");
 });
 
 // ── Wizard event bridge (called from backend) ──

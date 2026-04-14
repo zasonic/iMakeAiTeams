@@ -1,6 +1,16 @@
-# MyAI Agent Hub — Changelog
+# iMakeAiTeams — Changelog
 
-## v4.0.0 (2025 — current)
+## v5.0.2 (2026 — current)
+
+### Bug Fixes
+- Fix 11 settings keys missing from schema — feature toggles now persist correctly
+- Fix IndexError crash in fact extraction when local model returns malformed JSON
+- Fix active memory (OpenClaw) lost during system prompt rebuilds
+- Fix race condition in task lock acquisition (atomic UPDATE)
+- Fix duplicate streaming tokens on local-to-Claude escalation
+- Fix pre-existing SyntaxError in validation gate
+
+## v4.0.0 (2025)
 
 ### New Features
 - **Goal Decomposition Engine** — complex multi-part requests are automatically split into sequential steps, each executed with prior context. Step tracker renders inline in chat between your message and the response.

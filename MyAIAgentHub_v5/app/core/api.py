@@ -199,7 +199,7 @@ class API:
                         nodes = tmpl.get_elements_by_tag_name("text")
                         nodes[0].append_child(tmpl.create_text_node(title))
                         nodes[1].append_child(tmpl.create_text_node(message))
-                        notifier = mgr.create_toast_notifier("MyAI Agent Hub")
+                        notifier = mgr.create_toast_notifier("iMakeAiTeams")
                         notifier.show(win_notif.ToastNotification(tmpl))
                     except Exception:
                         ctypes.windll.user32.MessageBeep(0)
@@ -1093,7 +1093,7 @@ class API:
                     env_info = {
                         "python_version": sys.version,
                         "platform": platform.platform(),
-                        "app_version": "MyAI Agent Hub v1.0",
+                        "app_version": "iMakeAiTeams v5.0.2",
                     }
                     try:
                         pip_out = subprocess.run(

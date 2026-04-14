@@ -33,7 +33,7 @@ bus = EventBus()
 api = API(settings, bus, APP_ROOT, log)
 
 window = webview.create_window(
-    title="MyAI Agent Hub",
+    title="iMakeAiTeams",
     url=str(APP_ROOT / "frontend" / "index.html"),
     js_api=api,
     width=1280,

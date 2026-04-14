@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════
-#  START HERE — MyAI Agent Hub (macOS)
+#  START HERE — iMakeAiTeams (macOS)
 #  Double-click this file in Finder.
 #  First time: right-click → Open  (to bypass Gatekeeper).
 # ═══════════════════════════════════════════════════════════════════
@@ -25,7 +25,7 @@ fi
 
 if [ -z "$PYEXE" ]; then
     osascript -e '
-    set theChoice to button returned of (display dialog "Python 3 is not installed.\n\nClick \"Install\" to set up the Xcode command line tools (includes Python 3), or download from python.org." buttons {"Open python.org", "Install"} default button "Install" with title "MyAI Agent Hub" with icon caution)
+    set theChoice to button returned of (display dialog "Python 3 is not installed.\n\nClick \"Install\" to set up the Xcode command line tools (includes Python 3), or download from python.org." buttons {"Open python.org", "Install"} default button "Install" with title "iMakeAiTeams" with icon caution)
     if theChoice is "Install" then
         do shell script "xcode-select --install"
     else
@@ -39,7 +39,7 @@ fi
 # ── Verify minimum version (3.10) ─────────────────────────────────
 VERSION_OK=$($PYEXE -c "import sys; print(1 if sys.version_info >= (3,10) else 0)" 2>/dev/null)
 if [ "$VERSION_OK" != "1" ]; then
-    osascript -e 'display dialog "Python 3.10 or newer is required.\n\nPlease update from python.org." buttons {"Open python.org"} default button 1 with title "MyAI Agent Hub" with icon caution'
+    osascript -e 'display dialog "Python 3.10 or newer is required.\n\nPlease update from python.org." buttons {"Open python.org"} default button 1 with title "iMakeAiTeams" with icon caution'
     open "https://www.python.org/downloads/"
     exit 1
 fi

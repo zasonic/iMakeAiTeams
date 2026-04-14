@@ -68,7 +68,7 @@ else:
 
 # ── Root window ────────────────────────────────────────────────────────────────
 root = tk.Tk()
-root.title("MyAI Agent Hub")
+root.title("iMakeAiTeams")
 root.geometry(f"{WIN_W}x{WIN_H}")
 root.resizable(False, False)
 root.configure(bg=BG)
@@ -104,7 +104,7 @@ for i in range(3):
 # App name — centered, clean
 c.create_text(
     WIN_W // 2, 50,
-    text="MyAI Agent Hub",
+    text="iMakeAiTeams",
     fill=TEXT, font=(FONT, 20, "bold"), anchor="center",
 )
 c.create_text(

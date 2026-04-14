@@ -1,5 +1,5 @@
 """
-db.py — SQLite database manager for MyAI Agent Hub.
+db.py — SQLite database manager for iMakeAiTeams.
 
 Single source of truth for the persistent database. All modules
 import from here and never touch sqlite3 directly.

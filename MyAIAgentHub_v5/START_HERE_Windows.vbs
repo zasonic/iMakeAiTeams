@@ -1,5 +1,5 @@
 ' ═══════════════════════════════════════════════════════════════════
-'  START HERE — MyAI Agent Hub (Windows)
+'  START HERE — iMakeAiTeams (Windows)
 '  Double-click this file. No console window will appear.
 ' ═══════════════════════════════════════════════════════════════════
 
@@ -71,5 +71,5 @@ Else
            "Please install Python 3.10 or newer from:" & vbCrLf & _
            "https://www.python.org/downloads/" & vbCrLf & vbCrLf & _
            "Make sure to check 'Add Python to PATH' during installation.", _
-           vbExclamation, "MyAI Agent Hub"
+           vbExclamation, "iMakeAiTeams"
 End If
