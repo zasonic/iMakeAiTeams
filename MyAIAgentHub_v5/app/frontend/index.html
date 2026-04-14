@@ -486,45 +486,102 @@ button{cursor:pointer;}
 .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:20px;}
 
 /* ── First-run wizard ── */
-#first-run{position:fixed;inset:0;background:var(--bg);z-index:1000;display:none;align-items:center;justify-content:center;padding:20px;}
+#first-run{position:fixed;inset:0;background:var(--bg);z-index:1000;display:none;flex-direction:column;align-items:center;justify-content:center;padding:0;overflow:hidden;}
 #first-run.visible{display:flex;}
-.wz-shell{width:100%;max-width:500px;background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:36px 38px 30px;box-shadow:var(--shadow-lg);}
-.wz-progress{display:flex;align-items:center;margin-bottom:34px;}
-.wz-dot{width:26px;height:26px;border-radius:50%;background:var(--bg3);border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--text3);transition:all .25s;flex-shrink:0;}
-.wz-dot.active{background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:0 0 0 4px rgba(139,124,246,.2);}
-.wz-dot.done{background:var(--green);border-color:var(--green);color:#fff;}
-.wz-line{height:2px;flex:1;background:var(--border);transition:background .25s;}
-.wz-line.done{background:var(--green);}
+#first-run::before{content:'';position:absolute;width:600px;height:600px;border-radius:50%;background:radial-gradient(circle,rgba(139,124,246,.06) 0%,transparent 70%);top:-100px;right:-100px;pointer-events:none;}
+#first-run::after{content:'';position:absolute;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,rgba(61,214,140,.04) 0%,transparent 70%);bottom:-80px;left:-60px;pointer-events:none;}
+
+.wz-outer{position:relative;z-index:1;width:100%;max-width:560px;padding:0 24px;}
+
+/* Top progress bar */
+.wz-topbar{display:flex;align-items:center;gap:6px;margin-bottom:40px;}
+.wz-topbar-seg{flex:1;height:4px;border-radius:2px;background:var(--bg4);transition:background .4s ease,box-shadow .4s ease;}
+.wz-topbar-seg.done{background:var(--green);}
+.wz-topbar-seg.active{background:var(--accent);box-shadow:0 0 12px rgba(139,124,246,.35);}
+
+/* Card */
+.wz-card{background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:40px 36px 32px;box-shadow:0 8px 40px rgba(0,0,0,.25);animation:wzFadeUp .35s ease;}
+@keyframes wzFadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}
+
+/* Step label */
+.wz-step-tag{font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px;display:flex;align-items:center;gap:8px;}
+.wz-step-tag::before{content:'';width:20px;height:1px;background:var(--accent);}
+
+/* Headings */
+.wz-h{font-size:26px;font-weight:800;letter-spacing:-.03em;margin-bottom:10px;line-height:1.2;}
+.wz-sub{font-size:14px;color:var(--text2);margin-bottom:28px;line-height:1.65;}
+.wz-sub strong{color:var(--text);font-weight:600;}
+
+/* Panels */
 .wz-panel{display:none;}
 .wz-panel.active{display:block;}
-.wz-step-tag{font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px;}
-.wz-h{font-size:22px;font-weight:800;letter-spacing:-.02em;margin-bottom:8px;}
-.wz-body{font-size:13px;color:var(--text2);margin-bottom:22px;line-height:1.7;}
-.wz-body strong{color:var(--text);}
-.wz-cost-tag{display:inline-flex;align-items:center;gap:6px;background:var(--green-s);border:1px solid rgba(61,214,140,.2);border-radius:20px;padding:4px 14px;font-size:12px;color:var(--green);font-weight:600;}
-.wz-input-row{display:flex;gap:8px;margin-bottom:10px;}
-.wz-input-row input{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:9px 13px;color:var(--text);font-size:13px;}
-.wz-input-row input:focus{outline:none;border-color:var(--accent);}
-.wz-verify-msg{font-size:12px;min-height:18px;margin-top:6px;padding:0 2px;}
-.wz-verify-msg.ok{color:var(--green);}
-.wz-verify-msg.fail{color:var(--red);}
-.wz-hint{font-size:11px;color:var(--text3);margin-top:6px;}
-.wz-hint a{color:var(--accent);}
-.local-row{display:flex;align-items:center;gap:12px;padding:12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;}
-.local-icon{font-size:24px;}
-.local-info{flex:1;}
-.local-name{font-size:13px;font-weight:600;}
-.local-sub{font-size:11px;color:var(--text3);margin-top:2px;}
-.local-status{font-size:12px;font-weight:600;}
-.local-status.ok{color:var(--green);}
-.local-status.miss{color:var(--text3);}
-.wz-nav{display:flex;align-items:center;gap:10px;margin-top:22px;}
-.wz-nav .btn-primary{flex:1;}
-.wz-skip{font-size:12px;color:var(--text3);text-decoration:underline;padding:4px 8px;}
-.wz-skip:hover{color:var(--text2);}
-.wz-ready-stats{display:flex;gap:18px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:18px;}
-.wz-stat-val{font-size:20px;font-weight:700;color:var(--accent);}
-.wz-stat-lbl{font-size:11px;color:var(--text3);margin-top:2px;}
+
+/* Input area */
+.wz-input-group{margin-bottom:16px;}
+.wz-input-group label{display:block;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em;}
+.wz-input-row{display:flex;gap:8px;}
+.wz-input-row input{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:12px 16px;color:var(--text);font-size:14px;font-family:var(--mono);transition:border-color .2s;}
+.wz-input-row input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(139,124,246,.12);}
+.wz-input-row input::placeholder{color:var(--text3);}
+.wz-input-row .btn{white-space:nowrap;padding:12px 20px;font-size:13px;font-weight:600;}
+
+/* Feedback messages */
+.wz-msg{font-size:13px;min-height:20px;margin-top:10px;padding:0 2px;display:flex;align-items:center;gap:6px;transition:opacity .2s;}
+.wz-msg.ok{color:var(--green);}
+.wz-msg.fail{color:var(--red);}
+.wz-msg.loading{color:var(--text3);}
+.wz-msg.loading::before{content:'';width:14px;height:14px;border:2px solid var(--text3);border-top-color:transparent;border-radius:50%;animation:wzSpin .6s linear infinite;flex-shrink:0;}
+@keyframes wzSpin{to{transform:rotate(360deg);}}
+
+.wz-hint{font-size:12px;color:var(--text3);margin-top:10px;}
+.wz-hint a{color:var(--accent);text-decoration:none;font-weight:500;}
+.wz-hint a:hover{text-decoration:underline;}
+
+/* Cost badge */
+.wz-badge{display:inline-flex;align-items:center;gap:6px;background:var(--green-s);border:1px solid rgba(61,214,140,.15);border-radius:20px;padding:6px 16px;font-size:12px;color:var(--green);font-weight:600;margin-bottom:20px;}
+
+/* Service status card */
+.wz-svc{display:flex;align-items:center;gap:14px;padding:16px;background:var(--bg3);border:1px solid var(--border);border-radius:14px;margin-bottom:14px;transition:border-color .3s;}
+.wz-svc.detected{border-color:rgba(61,214,140,.3);}
+.wz-svc-icon{width:40px;height:40px;border-radius:10px;background:var(--bg4);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;}
+.wz-svc-info{flex:1;min-width:0;}
+.wz-svc-name{font-size:14px;font-weight:600;}
+.wz-svc-detail{font-size:12px;color:var(--text3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.wz-svc-badge{font-size:11px;font-weight:700;padding:4px 12px;border-radius:20px;flex-shrink:0;text-transform:uppercase;letter-spacing:.04em;}
+.wz-svc-badge.ok{background:var(--green-s);color:var(--green);}
+.wz-svc-badge.miss{background:var(--bg4);color:var(--text3);}
+.wz-svc-badge.checking{background:var(--accent-s);color:var(--accent);}
+
+/* Folder/index area */
+.wz-drop{border:2px dashed var(--border);border-radius:14px;padding:28px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:14px;}
+.wz-drop:hover{border-color:var(--accent);background:var(--accent-s);}
+.wz-drop-icon{font-size:28px;margin-bottom:8px;}
+.wz-drop-text{font-size:13px;color:var(--text2);}
+.wz-drop-hint{font-size:11px;color:var(--text3);margin-top:4px;}
+
+/* Progress bar */
+.wz-progress-bar{height:6px;background:var(--bg4);border-radius:3px;overflow:hidden;margin-top:12px;}
+.wz-progress-fill{height:100%;background:var(--accent-g);border-radius:3px;width:0%;transition:width .3s ease;}
+.wz-progress-label{display:flex;justify-content:space-between;margin-top:8px;font-size:12px;color:var(--text3);}
+
+/* Nav buttons */
+.wz-nav{display:flex;align-items:center;gap:10px;margin-top:28px;}
+.wz-nav .btn-primary{flex:1;padding:14px;font-size:14px;font-weight:600;border-radius:12px;}
+.wz-skip{font-size:12px;color:var(--text3);cursor:pointer;padding:6px 10px;border-radius:8px;transition:color .2s,background .2s;text-decoration:none;}
+.wz-skip:hover{color:var(--text2);background:var(--bg3);}
+
+/* Ready state */
+.wz-checklist{display:flex;flex-direction:column;gap:10px;margin-bottom:24px;}
+.wz-check-item{display:flex;align-items:center;gap:12px;padding:12px 16px;background:var(--bg3);border-radius:12px;font-size:13px;}
+.wz-check-icon{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;}
+.wz-check-icon.ok{background:var(--green-s);color:var(--green);}
+.wz-check-icon.skip{background:var(--bg4);color:var(--text3);}
+.wz-check-label{flex:1;color:var(--text);}
+.wz-check-detail{font-size:11px;color:var(--text3);}
+
+.wz-cta{width:100%;padding:16px;font-size:15px;font-weight:700;border-radius:14px;background:var(--accent-g);color:#fff;border:none;cursor:pointer;transition:transform .15s,box-shadow .15s;box-shadow:0 4px 20px rgba(139,124,246,.3);}
+.wz-cta:hover{transform:translateY(-1px);box-shadow:0 6px 28px rgba(139,124,246,.4);}
+.wz-cta:active{transform:translateY(0);}
 
 /* Scrollbar */
 ::-webkit-scrollbar{width:5px;height:5px;}
@@ -767,48 +824,91 @@ button{cursor:pointer;}
 
 <!-- First-Run Wizard -->
 <div id="first-run">
-  <div class="wz-shell">
-    <div class="wz-progress">
-      <div class="wz-dot active" id="wz-dot-1">1</div><div class="wz-line" id="wz-line-1"></div>
-      <div class="wz-dot" id="wz-dot-2">2</div><div class="wz-line" id="wz-line-2"></div>
-      <div class="wz-dot" id="wz-dot-3">3</div><div class="wz-line" id="wz-line-3"></div>
-      <div class="wz-dot" id="wz-dot-4">4</div>
+  <div class="wz-outer">
+    <!-- Segmented progress bar -->
+    <div class="wz-topbar">
+      <div class="wz-topbar-seg active" id="wz-seg-1"></div>
+      <div class="wz-topbar-seg" id="wz-seg-2"></div>
+      <div class="wz-topbar-seg" id="wz-seg-3"></div>
+      <div class="wz-topbar-seg" id="wz-seg-4"></div>
     </div>
-    <!-- Step 1 -->
+
+    <!-- Step 1: Claude API key -->
     <div class="wz-panel active" id="wz-panel-1">
-      <div class="wz-step-tag">Step 1 of 4</div>
-      <div class="wz-h">Connect your AI</div>
-      <div class="wz-body">Claude is Anthropic's AI — brilliant at writing, analysis, coding, and deep reasoning.<br><br><span class="wz-cost-tag">💰 Most conversations cost less than a penny</span><br><br>Enter your API key below. <strong>No subscription required</strong> — pay only for what you use.</div>
-      <div class="wz-input-row"><input type="password" id="wz-api-key" placeholder="sk-ant-api03-…"><button class="btn btn-primary" id="wz-verify-btn">Verify →</button></div>
-      <div class="wz-verify-msg" id="wz-verify-msg"></div>
-      <div class="wz-hint">Get your key free at <a href="#" id="wz-console-link">console.anthropic.com</a></div>
-      <div class="wz-nav"><button class="btn btn-primary" id="wz-next-1" disabled>Continue →</button></div>
+      <div class="wz-card">
+        <div class="wz-step-tag">Step 1 of 4</div>
+        <div class="wz-h">Connect to Claude</div>
+        <div class="wz-sub">Claude is your AI brain — it handles writing, analysis, coding, and deep reasoning. No subscription needed, <strong>you only pay for what you use</strong>.</div>
+        <div class="wz-badge">Most conversations cost less than a penny</div>
+        <div class="wz-input-group">
+          <label>API Key</label>
+          <div class="wz-input-row">
+            <input type="password" id="wz-api-key" placeholder="sk-ant-api03-...">
+            <button class="btn btn-primary" id="wz-verify-btn">Verify</button>
+          </div>
+        </div>
+        <div class="wz-msg" id="wz-verify-msg"></div>
+        <div class="wz-hint">Get your key free at <a href="#" id="wz-console-link">console.anthropic.com</a></div>
+        <div class="wz-nav"><button class="btn btn-primary" id="wz-next-1" disabled>Continue</button></div>
+      </div>
     </div>
-    <!-- Step 2 -->
+
+    <!-- Step 2: Local AI -->
     <div class="wz-panel" id="wz-panel-2">
-      <div class="wz-step-tag">Step 2 of 4</div>
-      <div class="wz-h">Want free AI for simple tasks?</div>
-      <div class="wz-body">Ollama runs AI models locally — completely <strong>free</strong> and <strong>private</strong>. Simple questions route there automatically, saving Claude for the hard stuff.</div>
-      <div class="local-row" id="wz-local-row"><div class="local-icon">🖥️</div><div class="local-info"><div class="local-name">Ollama</div><div class="local-sub" id="wz-local-sub">Checking…</div></div><div class="local-status" id="wz-local-status"></div></div>
-      <div id="wz-install-row" style="display:none;margin-bottom:12px;"><button class="btn" style="width:100%;" id="wz-ollama-link">Download Ollama (free) →</button></div>
-      <div class="wz-nav"><span class="wz-skip" id="wz-skip-2">No thanks, Claude handles everything</span><button class="btn btn-primary" id="wz-next-2">Continue →</button></div>
+      <div class="wz-card">
+        <div class="wz-step-tag">Step 2 of 4</div>
+        <div class="wz-h">Free local AI</div>
+        <div class="wz-sub">Ollama runs AI models on your machine — <strong>completely free</strong> and private. Simple questions route there automatically, so Claude only handles the hard stuff.</div>
+        <div class="wz-svc" id="wz-ollama-svc">
+          <div class="wz-svc-icon">&#x1F9E0;</div>
+          <div class="wz-svc-info">
+            <div class="wz-svc-name">Ollama</div>
+            <div class="wz-svc-detail" id="wz-local-detail">Detecting...</div>
+          </div>
+          <div class="wz-svc-badge checking" id="wz-local-badge">Checking</div>
+        </div>
+        <div id="wz-ollama-action" style="display:none;margin-bottom:8px;">
+          <button class="btn" style="width:100%;" id="wz-ollama-link">Download Ollama (free)</button>
+        </div>
+        <div id="wz-ram-hint" class="wz-hint" style="display:none;"></div>
+        <div class="wz-nav">
+          <span class="wz-skip" id="wz-skip-2">Skip, Claude handles everything</span>
+          <button class="btn btn-primary" id="wz-next-2">Continue</button>
+        </div>
+      </div>
     </div>
-    <!-- Step 3 -->
+
+    <!-- Step 3: Documents -->
     <div class="wz-panel" id="wz-panel-3">
-      <div class="wz-step-tag">Step 3 of 4</div>
-      <div class="wz-h">Add your files</div>
-      <div class="wz-body">Point the AI at your documents — PDFs, notes, code, spreadsheets. It will search them instantly whenever they're relevant.</div>
-      <button class="btn" style="width:100%;margin-bottom:10px;" id="wz-folder-btn">📂 Choose a folder to index</button>
-      <div id="wz-index-msg" style="font-size:12px;color:var(--text3);text-align:center;min-height:18px;"></div>
-      <div class="wz-nav"><span class="wz-skip" id="wz-skip-3">Skip for now</span><button class="btn btn-primary" id="wz-next-3">Continue →</button></div>
+      <div class="wz-card">
+        <div class="wz-step-tag">Step 3 of 4</div>
+        <div class="wz-h">Add your documents</div>
+        <div class="wz-sub">Point the AI at your files — PDFs, notes, code, spreadsheets. It searches them instantly whenever they're relevant to your question.</div>
+        <div class="wz-drop" id="wz-folder-btn">
+          <div class="wz-drop-icon">&#x1F4C2;</div>
+          <div class="wz-drop-text">Choose a folder to index</div>
+          <div class="wz-drop-hint">You can always add more folders later in Settings</div>
+        </div>
+        <div id="wz-index-progress" style="display:none;">
+          <div class="wz-progress-bar"><div class="wz-progress-fill" id="wz-progress-fill"></div></div>
+          <div class="wz-progress-label"><span id="wz-index-status">Scanning files...</span><span id="wz-index-pct">0%</span></div>
+        </div>
+        <div class="wz-msg" id="wz-index-msg"></div>
+        <div class="wz-nav">
+          <span class="wz-skip" id="wz-skip-3">Skip for now</span>
+          <button class="btn btn-primary" id="wz-next-3">Continue</button>
+        </div>
+      </div>
     </div>
-    <!-- Step 4 -->
+
+    <!-- Step 4: Ready -->
     <div class="wz-panel" id="wz-panel-4">
-      <div class="wz-step-tag">You're ready!</div>
-      <div class="wz-h">Let's go 🎉</div>
-      <div class="wz-ready-stats"><div><div class="wz-stat-val" id="wz-stat-chunks">0</div><div class="wz-stat-lbl">Document chunks</div></div><div><div class="wz-stat-val" id="wz-stat-model">Claude</div><div class="wz-stat-lbl">AI connected</div></div></div>
-      <div class="wz-body" id="wz-ready-msg">I'm ready to help. Ask me anything — I'll search your documents, remember what we discuss, and think step-by-step through complex problems.</div>
-      <div class="wz-nav"><button class="btn btn-primary" style="width:100%;font-size:15px;padding:13px;" id="wz-finish-btn">Start chatting →</button></div>
+      <div class="wz-card" style="text-align:center;">
+        <div class="wz-h" style="font-size:30px;margin-bottom:6px;">You're all set</div>
+        <div class="wz-sub" style="margin-bottom:24px;">Here's what we configured:</div>
+        <div class="wz-checklist" id="wz-checklist"></div>
+        <button class="wz-cta" id="wz-finish-btn">Start chatting</button>
+      </div>
     </div>
   </div>
 </div>
