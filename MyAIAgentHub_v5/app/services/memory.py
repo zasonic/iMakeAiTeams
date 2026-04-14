@@ -535,7 +535,8 @@ class MemoryManager:
     ) -> list | None:
         raw = raw.strip()
         if raw.startswith("```"):
-            raw = raw.split("```")[1]
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
             if raw.startswith("json"):
                 raw = raw[4:]
         try:
@@ -560,7 +561,8 @@ class MemoryManager:
                 )
                 retry_raw = retry_result.strip()
                 if retry_raw.startswith("```"):
-                    retry_raw = retry_raw.split("```")[1]
+                    parts = retry_raw.split("```")
+                    retry_raw = parts[1] if len(parts) > 1 else retry_raw
                     if retry_raw.startswith("json"):
                         retry_raw = retry_raw[4:]
                 parsed = json.loads(retry_raw)

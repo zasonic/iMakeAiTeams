@@ -497,6 +497,8 @@ class ChatOrchestrator:
 
         # ── Active Memory retrieval (OpenClaw pattern) ────────────────────────
         # Auto-query RAG for relevant prior context before every reply.
+        # Stored in _active_mem_suffix so it survives system prompt rebuilds.
+        _active_mem_suffix = ""
         try:
             from services.project_memory import get_active_memory, should_inject_private_memory
             # Only inject private memory in direct/GUI chats, not group channels
@@ -507,6 +509,7 @@ class ChatOrchestrator:
                     semantic_search_mod=self.memory.semantic if hasattr(self.memory, "semantic") else None,
                 )
                 if active_mem:
+                    _active_mem_suffix = active_mem
                     full_system += "\n\n" + active_mem
         except Exception:
             pass  # active memory is best-effort
@@ -595,6 +598,8 @@ class ChatOrchestrator:
                     full_system = system_prompt
                     if mem_suffix:
                         full_system = system_prompt + "\n\n" + mem_suffix
+                    if _active_mem_suffix:
+                        full_system += "\n\n" + _active_mem_suffix
                     if _allowed_tools:
                         tool_names = ", ".join(_allowed_tools)
                         full_system += (
@@ -626,6 +631,8 @@ class ChatOrchestrator:
             full_system = system_prompt
             if mem_suffix:
                 full_system = system_prompt + "\n\n" + mem_suffix
+            if _active_mem_suffix:
+                full_system += "\n\n" + _active_mem_suffix
             if _allowed_tools:
                 tool_names = ", ".join(_allowed_tools)
                 full_system += (
@@ -887,6 +894,10 @@ class ChatOrchestrator:
                             log.info("Local response scored %s — escalating to Claude", quality.get("score"))
                             try:
                                 if on_token:
+                                    # Clear the frontend stream buffer before
+                                    # re-streaming from Claude — prevents the
+                                    # user seeing both responses concatenated.
+                                    on_token("\x00__CLEAR__")
                                     response_text, usage = self.claude.stream_multi_turn(
                                         full_system, messages, on_token,
                                         max_tokens=target.max_tokens,

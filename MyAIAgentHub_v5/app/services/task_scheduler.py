@@ -29,7 +29,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import db
@@ -54,28 +54,30 @@ def acquire_task_lock(task_id: str, agent_id: str, ttl: int = _LOCK_TTL_SECONDS)
     """
     Acquire an exclusive lock on a task. Returns True if acquired.
     Expired locks are automatically released.
+    Uses a single atomic UPDATE to avoid TOCTOU race conditions.
     """
     now = datetime.now(timezone.utc).isoformat()
-    expiry = datetime.now(timezone.utc).isoformat()  # will set properly below
-    from datetime import timedelta
     expiry = (datetime.now(timezone.utc) + timedelta(seconds=ttl)).isoformat()
 
-    # Check if already locked by someone else (and not expired)
-    row = db.fetchone(
-        "SELECT locked_by, locked_until FROM tasks WHERE id = ?", (task_id,)
-    )
-    if row and row["locked_by"] and row["locked_until"]:
-        if row["locked_until"] > now and row["locked_by"] != agent_id:
-            log.debug("Task %s already locked by %s until %s",
-                      task_id, row["locked_by"], row["locked_until"])
-            return False
-
+    # Atomic check-and-update: only succeeds if unlocked, expired, or already ours
     db.execute(
-        "UPDATE tasks SET locked_by = ?, locked_until = ?, updated_at = ? WHERE id = ?",
-        (agent_id, expiry, now, task_id),
+        "UPDATE tasks SET locked_by = ?, locked_until = ?, updated_at = ? "
+        "WHERE id = ? AND (locked_by IS NULL OR locked_until < ? OR locked_by = ?)",
+        (agent_id, expiry, now, task_id, now, agent_id),
     )
-    log.debug("Task %s locked by %s until %s", task_id, agent_id, expiry)
-    return True
+    db.commit()
+
+    # Verify we hold the lock
+    row = db.fetchone(
+        "SELECT locked_by FROM tasks WHERE id = ? AND locked_by = ?",
+        (task_id, agent_id),
+    )
+    acquired = row is not None
+    if acquired:
+        log.debug("Task %s locked by %s until %s", task_id, agent_id, expiry)
+    else:
+        log.debug("Task %s lock acquisition failed for %s", task_id, agent_id)
+    return acquired
 
 
 def release_task_lock(task_id: str, agent_id: str) -> None:
@@ -332,28 +334,29 @@ def _run_validation_gate(
     )
 
     # Try local model first (free)
-    from services.task_artifacts import local_first_call
-    raw = local_first_call(local_client, claude_client, system, prompt, max_tokens=512)
+    try:
+        from services.task_artifacts import local_first_call
+        raw = local_first_call(local_client, claude_client, system, prompt, max_tokens=512)
 
-    if raw:
-        try:
-            raw = raw.strip()
-            if raw.startswith("```"):
-                raw = "\n".join(raw.split("\n")[1:])
-            if raw.endswith("```"):
-                raw = raw.rsplit("```", 1)[0].strip()
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start != -1 and end != -1:
-                data = json.loads(raw[start:end + 1])
-                return {
-                    "passed":     bool(data.get("passed", False)),
-                    "confidence": float(data.get("confidence", 0.5)),
-                    "reasoning":  str(data.get("reasoning", "")),
-                    "gaps":       [str(g) for g in data.get("gaps", []) if g],
-                }
-        except Exception as exc:
-            log.debug("Validation gate JSON parse failed: %s", exc)
+        if raw:
+            try:
+                raw = raw.strip()
+                if raw.startswith("```"):
+                    raw = "\n".join(raw.split("\n")[1:])
+                if raw.endswith("```"):
+                    raw = raw.rsplit("```", 1)[0].strip()
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start != -1 and end != -1:
+                    data = json.loads(raw[start:end + 1])
+                    return {
+                        "passed":     bool(data.get("passed", False)),
+                        "confidence": float(data.get("confidence", 0.5)),
+                        "reasoning":  str(data.get("reasoning", "")),
+                        "gaps":       [str(g) for g in data.get("gaps", []) if g],
+                    }
+            except Exception as exc:
+                log.debug("Validation gate JSON parse failed: %s", exc)
     except Exception as exc:
         log.warning("Validation gate error: %s — auto-passing", exc)
         return {"passed": True, "confidence": 0.5, "reasoning": f"Gate failed ({exc}) — auto-passed.", "gaps": ["Validation gate unavailable"]}

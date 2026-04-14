@@ -68,6 +68,23 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     "max_conversation_budget_usd":  (float, 5.0),    # stop sending if cumulative cost exceeds this
     "budget_warning_threshold_pct": (float, 80.0),    # warn frontend at this % of budget
 
+    # Feature flags (v4.0+)
+    "goal_decomposition_enabled":    (bool,  True),
+    "interleaved_reasoning_enabled": (bool,  True),
+    "knowledge_graph_enabled":       (bool,  True),
+    "studio_mode":                   (bool,  False),
+    "firewall_enabled":              (bool,  True),
+    "debate_enabled":                (bool,  True),
+    "guardrails_enabled":            (bool,  False),
+
+    # Agent / project
+    "agent_project_root":            (str,   ""),
+
+    # Advanced (complex types)
+    "model_prices":                  ((dict, type(None)),  None),
+    "hooks":                         ((list, type(None)),  None),
+    "channel_allowlist":             ((dict, type(None)),  None),
+
     # Misc
     "default_agent_id":            ((str, type(None)),  None),
     "app_version":                 (str,   "1.0.0"),

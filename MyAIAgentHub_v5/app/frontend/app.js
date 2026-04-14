@@ -90,6 +90,12 @@ function handleEvent(event, payload) {
   switch(event) {
     case "chat_token":
       if(payload.conversation_id === state.activeConvoId) {
+        // Sentinel token: clear buffer when backend escalates to a different model
+        if(payload.token === "\x00__CLEAR__") {
+          state.streamBuffer = "";
+          updateStreamingBubble("");
+          break;
+        }
         state.streamBuffer += payload.token;
         updateStreamingBubble(state.streamBuffer);
       }
