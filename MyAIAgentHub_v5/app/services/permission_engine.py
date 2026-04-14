@@ -117,6 +117,7 @@ class PermissionEngine:
         self._session_allowlist: set[str] = set()  # tools auto-approved this session
         self._pending: dict[str, threading.Event] = {}  # request_id -> Event
         self._decisions: dict[str, bool] = {}          # request_id -> approved?
+        self._tool_names: dict[str, str] = {}          # request_id -> tool name
         self._lock = threading.Lock()
 
     # ── Public API ─────────────────────────────────────────────────────────
@@ -144,6 +145,8 @@ class PermissionEngine:
         result = PermissionResult(tier=tier, tool_call=tool_call, reason=reason)
 
         if tier == PermissionTier.CONFIRM and self._on_confirm:
+            with self._lock:
+                self._tool_names[tool_call.request_id] = tool_call.tool
             self._on_confirm(tool_call)
 
         log.info(
@@ -169,6 +172,7 @@ class PermissionEngine:
         with self._lock:
             decision = self._decisions.pop(request_id, False)
             self._pending.pop(request_id, None)
+            self._tool_names.pop(request_id, None)
 
         return decision if approved else False
 
@@ -177,9 +181,9 @@ class PermissionEngine:
         with self._lock:
             self._decisions[request_id] = True
             if allow_session:
-                # Find the tool name for this request and allowlist it
-                # (stored by the check() call — we record it in decisions meta)
-                pass
+                tool_name = self._tool_names.get(request_id)
+                if tool_name:
+                    self._session_allowlist.add(tool_name)
             evt = self._pending.get(request_id)
         if evt:
             evt.set()

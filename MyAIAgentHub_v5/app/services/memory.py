@@ -326,10 +326,11 @@ class MemoryManager:
                 f"Conversation to summarize:\n\n{messages_text}",
                 max_tokens=300,
             )
+            original_count = len(list(buf))
             buf.clear()
             buf.append({"role": "system", "content": f"[Earlier conversation summary: {summary}]"})
             hist = self._get_history(conversation_id)
-            hist.add("summarized", f"Summarized {len(list(buf))} messages into compact form")
+            hist.add("summarized", f"Summarized {original_count} messages into compact form")
             return summary
         except Exception as exc:
             log.debug("Buffer summarization failed: %s", exc)

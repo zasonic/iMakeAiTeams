@@ -165,6 +165,50 @@ class ClaudeClient:
                 pass  # usage unavailable — caller handles gracefully
         return full_text, usage
 
+    # ── Tool use (agentic loop) ─────────────────────────────────────────────
+
+    def call_with_tools(
+        self,
+        system: str,
+        messages: list,
+        tools: list,
+        max_tokens: int = 8192,
+    ) -> dict:
+        """
+        Call the Messages API with tool definitions.
+        Returns a dict matching the Anthropic response shape:
+          {"content": [...], "stop_reason": "end_turn"|"tool_use", ...}
+        Each content block is {"type":"text","text":...} or
+        {"type":"tool_use","id":...,"name":...,"input":...}.
+        """
+        kwargs = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": messages,
+            "tools": tools,
+        }
+        response = self._client.messages.create(**kwargs)
+        content = []
+        for block in response.content:
+            if block.type == "text":
+                content.append({"type": "text", "text": block.text})
+            elif block.type == "tool_use":
+                content.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+        return {
+            "content": content,
+            "stop_reason": response.stop_reason,
+            "usage": {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+            },
+        }
+
     # ── File upload ───────────────────────────────────────────────────────────
 
     def upload_file(self, file_path: Path, mime_type: str) -> str:

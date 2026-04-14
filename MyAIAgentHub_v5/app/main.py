@@ -57,11 +57,11 @@ def _start_channel_manager():
         cm = ChannelManager(
             settings=settings,
             bus=bus,
-            chat_orchestrator=api._orchestrator if hasattr(api, '_orchestrator') else None,
+            chat_orchestrator=api._chat if hasattr(api, '_chat') else None,
             claude_client=api._claude if hasattr(api, '_claude') else None,
             local_client=api._local if hasattr(api, '_local') else None,
             memory=api._memory if hasattr(api, '_memory') else None,
-            safety_gate=api._safety if hasattr(api, '_safety') else None,
+            safety_gate=None,
             guardrails_gate=guardrails,
             project_root=APP_ROOT,
         )

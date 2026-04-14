@@ -1170,7 +1170,7 @@ async function doDocSearch() {
   let results = [];
   if(state._searchMethod==="hybrid") results = await api("rag_search_hybrid", q, 8) || [];
   else if(state._searchMethod==="semantic") results = await api("rag_search", q, 8) || [];
-  else results = (await api("rag_search_hybrid", q, 8, true)) || [];
+  else results = (await api("rag_search_hybrid", q, 8, "bm25")) || [];
 
   const el = document.getElementById("doc-results");
   if(!results.length) { el.innerHTML = '<div style="color:var(--text3);font-size:13px;text-align:center;padding:16px;">No results</div>'; return; }

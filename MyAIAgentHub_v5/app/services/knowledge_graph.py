@@ -143,7 +143,7 @@ def extract_triples(
     for subj, pred, obj in triples:
         # Deduplicate: check for existing (subject, predicate, object) combo
         existing = _db.fetchone(
-            "SELECT id FROM knowledge_triples WHERE subject=? AND predicate=? AND object=? COLLATE NOCASE",
+            "SELECT id FROM knowledge_triples WHERE subject=? COLLATE NOCASE AND predicate=? COLLATE NOCASE AND object=? COLLATE NOCASE",
             (subj, pred, obj),
         )
         if existing:
@@ -220,7 +220,7 @@ def _fetch_triples_for_entity(entity: str, limit: int = 5) -> list[dict]:
         """
         SELECT id, subject, predicate, object, confidence, created_at, last_accessed_at
         FROM knowledge_triples
-        WHERE subject=? OR object=? COLLATE NOCASE
+        WHERE subject=? COLLATE NOCASE OR object=? COLLATE NOCASE
         ORDER BY last_accessed_at DESC
         LIMIT ?
         """,

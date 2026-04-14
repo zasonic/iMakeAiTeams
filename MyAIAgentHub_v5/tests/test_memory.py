@@ -66,7 +66,7 @@ class TestBufferPreWarm:
         # Buffer should start empty
         assert conv_id not in mem._buffers
 
-        ctx = mem.recall("anything", conv_id)
+        ctx = mem.get_context(conv_id, "anything")
 
         # Buffer should now be populated
         assert conv_id in mem._buffers
@@ -80,7 +80,7 @@ class TestBufferPreWarm:
         _seed_messages(in_memory_db, conv_id, count=40)
 
         mem = _make_mem(in_memory_db)
-        mem.recall("anything", conv_id)
+        mem.get_context(conv_id, "anything")
 
         assert len(mem._buffers[conv_id]) <= 20
 
@@ -94,7 +94,7 @@ class TestBufferPreWarm:
         mem._buffers[conv_id] = deque(maxlen=100)
         mem._buffers[conv_id].append({"role": "user", "content": "already here"})
 
-        ctx = mem.recall("anything", conv_id)
+        ctx = mem.get_context(conv_id, "anything")
         # Should see the manually added message, not DB messages
         assert ctx.recent_messages[0]["content"] == "already here"
 
@@ -117,7 +117,7 @@ class TestFactExtraction:
         )
         in_memory_db.commit()
 
-        mem._extract_facts(conv_id, "I prefer dark mode.", "Got it!")
+        mem.extract_facts(conv_id, "I prefer dark mode.", "Got it!")
         rows = in_memory_db.fetchall(
             "SELECT fact FROM session_facts WHERE conversation_id = ?", (conv_id,)
         )
@@ -140,7 +140,7 @@ class TestFactExtraction:
         in_memory_db.commit()
 
         # Should not raise
-        mem._extract_facts(conv_id, "hello", "world")
+        mem.extract_facts(conv_id, "hello", "world")
         rows = in_memory_db.fetchall(
             "SELECT fact FROM session_facts WHERE conversation_id = ?", (conv_id,)
         )
@@ -161,7 +161,7 @@ class TestFactExtraction:
         )
         in_memory_db.commit()
 
-        mem._extract_facts(conv_id, "hello", "world")
+        mem.extract_facts(conv_id, "hello", "world")
         rows = in_memory_db.fetchall(
             "SELECT fact FROM session_facts WHERE conversation_id = ?", (conv_id,)
         )
@@ -173,7 +173,7 @@ class TestFactExtraction:
 
         mem = _make_mem(in_memory_db, local_client=local)
         conv_id = str(uuid.uuid4())
-        mem._extract_facts(conv_id, "hello", "world")
+        mem.extract_facts(conv_id, "hello", "world")
         # No DB writes attempted
         local.chat.assert_not_called()
 
@@ -192,7 +192,7 @@ class TestFactExtraction:
         )
         in_memory_db.commit()
 
-        mem._extract_facts(conv_id, "hi", "hello")
+        mem.extract_facts(conv_id, "hi", "hello")
         rows = in_memory_db.fetchall(
             "SELECT fact FROM session_facts WHERE conversation_id = ?", (conv_id,)
         )
@@ -208,7 +208,7 @@ class TestRecallAssembly:
         _seed_messages(in_memory_db, conv_id)
 
         mem = _make_mem(in_memory_db)
-        ctx = mem.recall("test query", conv_id)
+        ctx = mem.get_context(conv_id, "test query")
         assert isinstance(ctx, MemoryContext)
 
     def test_recall_includes_session_facts(self, in_memory_db):
@@ -226,7 +226,7 @@ class TestRecallAssembly:
         in_memory_db.commit()
 
         mem = _make_mem(in_memory_db)
-        ctx = mem.recall("programming question", conv_id)
+        ctx = mem.get_context(conv_id, "programming question")
         assert any("Python" in f for f in ctx.session_facts)
 
     def test_recall_with_rag_above_threshold(self, in_memory_db):
@@ -238,7 +238,7 @@ class TestRecallAssembly:
         ]
         conv_id = str(uuid.uuid4())
         mem = _make_mem(in_memory_db, rag_index=mock_rag)
-        ctx = mem.recall("relevant query", conv_id)
+        ctx = mem.get_context(conv_id, "relevant query")
         assert len(ctx.rag_chunks) == 2
 
     def test_recall_filters_rag_below_threshold(self, in_memory_db):
@@ -250,7 +250,7 @@ class TestRecallAssembly:
         ]
         conv_id = str(uuid.uuid4())
         mem = _make_mem(in_memory_db, rag_index=mock_rag)
-        ctx = mem.recall("query", conv_id)
+        ctx = mem.get_context(conv_id, "query")
         # Only the chunk above 0.5 should be included
         assert len(ctx.rag_chunks) == 1
         assert "High relevance" in ctx.rag_chunks[0]
@@ -265,7 +265,7 @@ class TestRecallAssembly:
         ]
         conv_id = str(uuid.uuid4())
         mem = _make_mem(in_memory_db, semantic=mock_semantic)
-        ctx = mem.recall("query", conv_id)
+        ctx = mem.get_context(conv_id, "query")
         assert len(ctx.memories) == 1
         assert "Very relevant" in ctx.memories[0]
 
@@ -275,7 +275,7 @@ class TestRecallAssembly:
         mock_rag.search.return_value = ["Plain string chunk A", "Plain string chunk B"]
         conv_id = str(uuid.uuid4())
         mem = _make_mem(in_memory_db, rag_index=mock_rag)
-        ctx = mem.recall("query", conv_id)
+        ctx = mem.get_context(conv_id, "query")
         # Both included since no score information means threshold doesn't apply
         assert len(ctx.rag_chunks) == 2
 
@@ -344,7 +344,7 @@ class TestSessionHistory:
         conv_id = str(uuid.uuid4())
         _seed_messages(in_memory_db, conv_id, count=4)
         mem = _make_mem(in_memory_db)
-        mem.recall("query", conv_id)
+        mem.get_context(conv_id, "query")
 
         history = mem.get_session_history(conv_id)
         assert len(history) >= 1
@@ -366,7 +366,7 @@ class TestSessionHistory:
         )
         in_memory_db.commit()
 
-        mem._extract_facts(conv_id, "I like cats", "Noted!")
+        mem.extract_facts(conv_id, "I like cats", "Noted!")
 
         history = mem.get_session_history(conv_id)
         fact_events = [e for e in history if e["event_type"] == "fact_extracted"]
@@ -378,7 +378,7 @@ class TestSessionHistory:
         conv_id = str(uuid.uuid4())
         _seed_messages(in_memory_db, conv_id, count=2)
         mem = _make_mem(in_memory_db)
-        mem.recall("test", conv_id)
+        mem.get_context(conv_id, "test")
         history = mem.get_session_history(conv_id)
         assert isinstance(history, list)
         for event in history:
@@ -411,7 +411,7 @@ class TestHardTrimFallback:
         original_len = len(buf)
         assert original_len > _SUMMARIZE_LENGTH_TRIGGER * 2
 
-        mem.summarize_old_messages(conv_id)
+        mem.summarize_buffer(conv_id)
 
         # Buffer should have been trimmed down
         assert len(mem._buffers[conv_id]) <= _SUMMARIZE_LENGTH_TRIGGER
@@ -430,7 +430,7 @@ class TestHardTrimFallback:
             buf.append({"role": "user", "content": f"msg {i}"})
         mem._buffers[conv_id] = buf
 
-        mem.summarize_old_messages(conv_id)
+        mem.summarize_buffer(conv_id)
 
         # Should not have changed
         assert len(mem._buffers[conv_id]) == 20
@@ -454,7 +454,7 @@ class TestHardTrimFallback:
                          "content": f"message {i}"})
         mem._buffers[conv_id] = buf
 
-        mem.summarize_old_messages(conv_id)
+        mem.summarize_buffer(conv_id)
 
         # Hard-trim should have kicked in
         assert len(mem._buffers[conv_id]) <= _SUMMARIZE_LENGTH_TRIGGER

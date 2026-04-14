@@ -110,6 +110,25 @@ class EventBus:
             except Exception:
                 pass
 
+    def emit(self, event_name: str, data: Any = None) -> None:
+        """String-keyed convenience method for lightweight events.
+
+        Dispatches to handlers registered under the string key (not a class).
+        Used by ChannelManager for channel_response / channel_status events.
+        """
+        with self._lock:
+            handlers = list(self._handlers.get(event_name, []))
+        for h in handlers:
+            try:
+                h(data)
+            except Exception:
+                pass
+
+    def subscribe_event(self, event_name: str, handler: Callable) -> None:
+        """Subscribe to a string-keyed event emitted via emit()."""
+        with self._lock:
+            self._handlers.setdefault(event_name, []).append(handler)
+
     def attach(self, obj: Any) -> None:
         """Store a reference to an object (e.g. the main window) for later use."""
         self._attached.append(obj)

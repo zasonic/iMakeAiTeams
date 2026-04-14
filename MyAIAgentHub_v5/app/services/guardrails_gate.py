@@ -176,7 +176,7 @@ class GuardrailsGate:
             # Use sync wrapper; NeMo supports both sync and async
             response = self._rails.generate(messages=messages)
             # If NeMo modified or blocked the text, it returns a refusal
-            if response and "cannot" in response.lower() or "i'm not able" in response.lower():
+            if response and ("cannot" in response.lower() or "i'm not able" in response.lower()):
                 return GuardrailVerdict.block(f"Content policy violation (NeMo): {response[:100]}")
             return GuardrailVerdict.safe(text)
         except Exception as exc:
