@@ -443,6 +443,9 @@ class AgentLoop:
             args=args,
         )
         result = self._perms.check(tc)
+        if result.tier == PermissionTier.DENY:
+            from services.tools.bash_tool import ToolResult
+            return ToolResult(ok=False, error="File edit denied by policy.")
         if result.tier == PermissionTier.CONFIRM:
             self._emit("confirm_needed", tc.description, meta={"request_id": tc.request_id, "tool": "file_edit"})
             approved = self._perms.wait_for_confirm(tc.request_id, timeout=120)
@@ -466,6 +469,9 @@ class AgentLoop:
         command = args["command"]
         tc = ToolCall(tool="bash", description=f"Run: {command[:80]}", args=args)
         result = self._perms.check(tc)
+        if result.tier == PermissionTier.DENY:
+            from services.tools.bash_tool import ToolResult
+            return ToolResult(ok=False, error="Bash execution denied by policy.")
         if result.tier == PermissionTier.CONFIRM:
             self._emit("confirm_needed", f"Run bash command: {command}", meta={"request_id": tc.request_id, "tool": "bash", "command": command})
             approved = self._perms.wait_for_confirm(tc.request_id, timeout=120)
@@ -488,6 +494,9 @@ class AgentLoop:
         paths = args.get("paths", ".")
         tc = ToolCall(tool="git_add", description=f"git add {paths}", args=args)
         result = self._perms.check(tc)
+        if result.tier == PermissionTier.DENY:
+            from services.tools.bash_tool import ToolResult
+            return ToolResult(ok=False, error="git add denied by policy.")
         if result.tier == PermissionTier.CONFIRM:
             self._emit("confirm_needed", tc.description, meta={"request_id": tc.request_id, "tool": "git_add"})
             approved = self._perms.wait_for_confirm(tc.request_id, timeout=120)
@@ -501,6 +510,9 @@ class AgentLoop:
         msg = args.get("message", "")
         tc = ToolCall(tool="git_commit", description=f"git commit: {msg[:60]}", args=args)
         result = self._perms.check(tc)
+        if result.tier == PermissionTier.DENY:
+            from services.tools.bash_tool import ToolResult
+            return ToolResult(ok=False, error="git commit denied by policy.")
         if result.tier == PermissionTier.CONFIRM:
             self._emit("confirm_needed", tc.description, meta={"request_id": tc.request_id, "tool": "git_commit"})
             approved = self._perms.wait_for_confirm(tc.request_id, timeout=120)

@@ -171,7 +171,6 @@ class GuardrailsGate:
     def _nemo_check(self, text: str, role: str) -> GuardrailVerdict:
         """Run text through NeMo rails."""
         try:
-            import asyncio
             messages = [{"role": role, "content": text}]
             # Use sync wrapper; NeMo supports both sync and async
             response = self._rails.generate(messages=messages)

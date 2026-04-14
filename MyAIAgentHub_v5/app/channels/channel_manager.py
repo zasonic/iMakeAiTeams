@@ -240,9 +240,9 @@ class ChannelManager:
                         chat_id=int(chat_id),
                         request_id=tool_call.request_id,
                         description=tool_call.description,
-                        callback=lambda approved: perms.approve(tool_call.request_id)
-                                                  if approved
-                                                  else perms.deny(tool_call.request_id),
+                        callback=lambda approved, rid=tool_call.request_id: (
+                        perms.approve(rid) if approved else perms.deny(rid)
+                    ),
                     )
                 else:
                     # GUI mode or no adapter — auto-approve for now, GUI handles it
