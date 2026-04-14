@@ -341,7 +341,7 @@ class ChatOrchestrator:
 
     def _resolve_target(self, route_model: str, agent: dict | None) -> ExecutionTarget:
         """Resolve the execution target from the route decision and agent config."""
-        agent_max_tokens = int(agent["max_tokens"]) if agent else 4096
+        agent_max_tokens = int(agent.get("max_tokens", 4096)) if agent else 4096
         if route_model == "claude":
             return ExecutionTarget(
                 backend="claude",
@@ -412,7 +412,7 @@ class ChatOrchestrator:
             if row:
                 agent = dict(row)
         system_prompt = (
-            agent["system_prompt"] if agent
+            agent.get("system_prompt", "You are a helpful AI assistant.") if agent
             else self._settings.get("system_prompt", "You are a helpful AI assistant.")
         )
 
@@ -511,7 +511,7 @@ class ChatOrchestrator:
         })
 
         # Route: Claude or local?
-        model_pref = agent["model_preference"] if agent else "auto"
+        model_pref = agent.get("model_preference", "auto") if agent else "auto"
         complexity = "complex"
         route_confidence = 1.0
         route_needs_context = False
