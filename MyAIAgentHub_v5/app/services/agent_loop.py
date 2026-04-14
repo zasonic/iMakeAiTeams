@@ -279,6 +279,8 @@ class AgentLoop:
         """
         self._stop = False
         messages: list[dict] = [{"role": "user", "content": task}]
+        tools_called: list[str] = []
+        files_modified: list[str] = []
 
         self._emit("thinking", f"Starting agent loop for task: {task[:100]}")
 
@@ -287,6 +289,9 @@ class AgentLoop:
                 return "Task stopped by user."
 
             log.info("Agent loop turn %d/%d", turn + 1, MAX_TURNS)
+
+            # Write progress artifact
+            self._write_progress(task, turn, tools_called, files_modified)
 
             # Call Claude with tools
             try:
@@ -321,6 +326,17 @@ class AgentLoop:
             # No tool calls → loop ends
             if not tool_calls:
                 final_text = "\n".join(text_parts).strip()
+
+                # Self-verification: run tests if files were modified
+                test_passed = self._auto_verify(files_modified)
+
+                # Write final progress
+                self._write_progress(
+                    task, turn + 1, tools_called, files_modified,
+                    tests_run=test_passed is not None,
+                    test_passed=test_passed,
+                )
+
                 self._emit("done", final_text)
                 log.info("Agent loop completed in %d turns", turn + 1)
                 return final_text
@@ -331,6 +347,14 @@ class AgentLoop:
             # Execute tools and collect results
             tool_results: list[dict] = []
             for tc in tool_calls:
+                name = tc.get("name", "")
+                tools_called.append(name)
+                # Track file modifications
+                if name in ("file_write", "file_edit"):
+                    path = tc.get("input", {}).get("path", "")
+                    if path:
+                        files_modified.append(path)
+
                 result = self._execute_tool(tc)
                 tool_results.append({
                     "type":        "tool_result",
@@ -344,6 +368,42 @@ class AgentLoop:
         # Max turns reached
         self._emit("error", f"Reached maximum of {MAX_TURNS} turns without completing.")
         return f"I reached the maximum turn limit ({MAX_TURNS}) without finishing the task. Please try breaking it into smaller steps."
+
+    def _write_progress(self, task, turn, tools_called, files_modified,
+                        tests_run=False, test_passed=None):
+        """Write progress artifact to disk."""
+        try:
+            from services.task_artifacts import write_agent_progress
+            write_agent_progress(
+                self._files.root, task, turn, MAX_TURNS,
+                tools_called, files_modified, tests_run, test_passed,
+            )
+        except Exception:
+            pass  # progress tracking is best-effort
+
+    def _auto_verify(self, files_modified):
+        """
+        Run project tests if files were modified. Returns True/False/None.
+        None = no test command found or no files modified.
+        """
+        if not files_modified:
+            return None
+        try:
+            from services.task_artifacts import discover_test_command
+            test_cmd = discover_test_command(self._files.root)
+            if not test_cmd:
+                return None
+            self._emit("thinking", f"Running tests: {test_cmd}")
+            result = self._bash.run(test_cmd)
+            passed = result.ok if hasattr(result, "ok") else True
+            if passed:
+                self._emit("thinking", "Tests passed")
+            else:
+                self._emit("thinking", f"Tests failed: {(result.error or '')[:200]}")
+            return passed
+        except Exception as exc:
+            log.debug("Auto-verify failed: %s", exc)
+            return None
 
     def stop(self) -> None:
         """Request the loop to stop after the current turn."""

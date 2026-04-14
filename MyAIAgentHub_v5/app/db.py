@@ -551,6 +551,23 @@ _MIGRATIONS = [
         "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('knowledge_graph_enabled', '1', datetime('now'))",
         "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('interleaved_reasoning_enabled', '1', datetime('now'))",
     ]),
+
+    # ── v5.0: Task locking + artifact versioning for agent teams ─────────────
+    ("5.0.0", [
+        "ALTER TABLE tasks ADD COLUMN locked_by TEXT",
+        "ALTER TABLE tasks ADD COLUMN locked_until TEXT",
+        """CREATE TABLE IF NOT EXISTS artifact_versions (
+            id                TEXT PRIMARY KEY,
+            task_id           TEXT REFERENCES tasks(id),
+            version           INTEGER NOT NULL DEFAULT 1,
+            parent_version    INTEGER,
+            content_hash      TEXT,
+            content_preview   TEXT,
+            validation_status TEXT DEFAULT 'pending',
+            author_agent_id   TEXT,
+            created_at        TEXT
+        )""",
+    ]),
 ]
 
 

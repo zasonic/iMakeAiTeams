@@ -829,8 +829,58 @@ class ChatOrchestrator:
                 response_text = f"[Error: {exc}]"
                 had_error = True
 
-        # Quality signals for router feedback
+        # ── Local response quality gate ─────────────────────────────────────
+        # If response came from local and looks weak, escalate to Claude
         response_empty = len((response_text or "").strip()) < 20
+        if (
+            not had_error
+            and target.backend == "local"
+            and not response_empty
+            and self.local and self.local.is_available()
+            and len(user_message.split()) >= 5  # skip for trivial messages
+        ):
+            try:
+                from services.task_artifacts import local_first_call
+                quality_raw = local_first_call(
+                    self.local, None,  # local only, no Claude fallback
+                    "Rate this response's relevance and completeness for the given question. "
+                    "Respond with ONLY a JSON: {\"score\": 0-10, \"reason\": \"...\"}",
+                    f"QUESTION: {user_message[:300]}\nRESPONSE: {(response_text or '')[:500]}",
+                    max_tokens=100,
+                )
+                if quality_raw:
+                    import json as _json
+                    _qstart = quality_raw.find("{")
+                    _qend = quality_raw.rfind("}")
+                    if _qstart != -1 and _qend != -1:
+                        quality = _json.loads(quality_raw[_qstart:_qend + 1])
+                        if quality.get("score", 10) < 4:
+                            log.info("Local response scored %s — escalating to Claude", quality.get("score"))
+                            try:
+                                if on_token:
+                                    response_text, usage = self.claude.stream_multi_turn(
+                                        full_system, messages, on_token,
+                                        max_tokens=target.max_tokens,
+                                    )
+                                    if usage:
+                                        tokens_in = getattr(usage, "input_tokens", 0) or 0
+                                        tokens_out = getattr(usage, "output_tokens", 0) or 0
+                                else:
+                                    result = self.claude.chat_multi_turn(
+                                        full_system, messages,
+                                        max_tokens=target.max_tokens,
+                                    )
+                                    response_text = result["text"]
+                                    tokens_in = result.get("input_tokens", 0)
+                                    tokens_out = result.get("output_tokens", 0)
+                                route_model = "claude"
+                                model_name = self.claude._model
+                            except Exception as esc_exc:
+                                log.debug("Escalation to Claude failed: %s", esc_exc)
+            except Exception:
+                pass  # quality check is best-effort, never block response
+
+        # Quality signals for router feedback
 
         # ── Hook: post_response ──────────────────────────────────────────────
         self.hooks.fire("post_response", {

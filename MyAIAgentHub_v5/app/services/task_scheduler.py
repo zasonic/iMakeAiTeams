@@ -45,6 +45,49 @@ log = logging.getLogger("task_scheduler")
 _API_SEMAPHORE = threading.Semaphore(3)
 
 
+# ── Task locking (v5.0) ──────────────────────────────────────────────────────
+
+_LOCK_TTL_SECONDS = 300  # 5 minute default lock TTL
+
+
+def acquire_task_lock(task_id: str, agent_id: str, ttl: int = _LOCK_TTL_SECONDS) -> bool:
+    """
+    Acquire an exclusive lock on a task. Returns True if acquired.
+    Expired locks are automatically released.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    expiry = datetime.now(timezone.utc).isoformat()  # will set properly below
+    from datetime import timedelta
+    expiry = (datetime.now(timezone.utc) + timedelta(seconds=ttl)).isoformat()
+
+    # Check if already locked by someone else (and not expired)
+    row = db.fetchone(
+        "SELECT locked_by, locked_until FROM tasks WHERE id = ?", (task_id,)
+    )
+    if row and row["locked_by"] and row["locked_until"]:
+        if row["locked_until"] > now and row["locked_by"] != agent_id:
+            log.debug("Task %s already locked by %s until %s",
+                      task_id, row["locked_by"], row["locked_until"])
+            return False
+
+    db.execute(
+        "UPDATE tasks SET locked_by = ?, locked_until = ?, updated_at = ? WHERE id = ?",
+        (agent_id, expiry, now, task_id),
+    )
+    log.debug("Task %s locked by %s until %s", task_id, agent_id, expiry)
+    return True
+
+
+def release_task_lock(task_id: str, agent_id: str) -> None:
+    """Release a task lock (only if held by this agent)."""
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        "UPDATE tasks SET locked_by = NULL, locked_until = NULL, updated_at = ? "
+        "WHERE id = ? AND locked_by = ?",
+        (now, task_id, agent_id),
+    )
+
+
 # ── Agent role helpers (unchanged) ────────────────────────────────────────────
 
 def get_available_roles() -> list[str]:
@@ -262,17 +305,22 @@ def _run_validation_gate(
     agent_name:       str,
     artifact:         str,
     success_criteria: str,
+    local_client=None,
 ) -> dict:
     """
-    Lightweight Haiku-tier check: does artifact satisfy success_criteria?
+    Lightweight validation check: does artifact satisfy success_criteria?
     Returns {"passed": bool, "confidence": float, "reasoning": str, "gaps": [str]}.
-    Falls back to auto-pass if criteria is empty or call fails.
+
+    Uses local model first (free) with Claude as fallback, following the
+    worker-judge pattern from adversarial_debate.py.
+    Falls back to auto-pass if criteria is empty or both calls fail.
     """
     if not success_criteria.strip():
         return {"passed": True, "confidence": 1.0, "reasoning": "No criteria defined — auto-passed.", "gaps": []}
 
+    system = "You are a precise quality validator. Respond ONLY with valid JSON."
     prompt = (
-        f"You are a quality validator. Check whether this agent's output satisfies the stated criteria.\n\n"
+        f"Check whether this agent's output satisfies the stated criteria.\n\n"
         f"SUCCESS CRITERIA:\n{success_criteria}\n\n"
         f"AGENT: {agent_name}\n"
         f"OUTPUT (truncated):\n{artifact[:2000]}\n\n"
@@ -283,20 +331,29 @@ def _run_validation_gate(
         "Rules: passed=true only if ALL criteria are met. gaps must be specific — never vague."
     )
 
-    try:
-        raw = claude_client.chat("You are a precise quality validator.", "", prompt, max_tokens=512)
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = "\n".join(raw.split("\n")[1:])
-        if raw.endswith("```"):
-            raw = raw.rsplit("```", 1)[0].strip()
-        data = json.loads(raw)
-        return {
-            "passed":     bool(data.get("passed", False)),
-            "confidence": float(data.get("confidence", 0.5)),
-            "reasoning":  str(data.get("reasoning", "")),
-            "gaps":       [str(g) for g in data.get("gaps", []) if g],
-        }
+    # Try local model first (free)
+    from services.task_artifacts import local_first_call
+    raw = local_first_call(local_client, claude_client, system, prompt, max_tokens=512)
+
+    if raw:
+        try:
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = "\n".join(raw.split("\n")[1:])
+            if raw.endswith("```"):
+                raw = raw.rsplit("```", 1)[0].strip()
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1:
+                data = json.loads(raw[start:end + 1])
+                return {
+                    "passed":     bool(data.get("passed", False)),
+                    "confidence": float(data.get("confidence", 0.5)),
+                    "reasoning":  str(data.get("reasoning", "")),
+                    "gaps":       [str(g) for g in data.get("gaps", []) if g],
+                }
+        except Exception as exc:
+            log.debug("Validation gate JSON parse failed: %s", exc)
     except Exception as exc:
         log.warning("Validation gate error: %s — auto-passing", exc)
         return {"passed": True, "confidence": 0.5, "reasoning": f"Gate failed ({exc}) — auto-passed.", "gaps": ["Validation gate unavailable"]}
@@ -401,7 +458,20 @@ def _run_task(
     handoff_context_str = ""
     if upstream_packets:
         blocks = [p.to_context_block() for p in upstream_packets]
-        handoff_context_str = "## Context from upstream agents:\n\n" + "\n\n".join(blocks) + "\n\n"
+        # Add confidence warnings for low-confidence upstream outputs
+        warnings = []
+        for p in upstream_packets:
+            if p.confidence < 0.5:
+                warnings.append(
+                    f"WARNING: Upstream step '{p.subtask_completed}' by {p.agent_name} "
+                    f"reported LOW CONFIDENCE ({p.confidence:.0%}). "
+                    f"Uncertainties: {', '.join(p.uncertainties) if p.uncertainties else 'unspecified'}. "
+                    f"Verify these assumptions before proceeding."
+                )
+        warning_block = ""
+        if warnings:
+            warning_block = "## Upstream Confidence Warnings\n" + "\n".join(warnings) + "\n\n"
+        handoff_context_str = warning_block + "## Context from upstream agents:\n\n" + "\n\n".join(blocks) + "\n\n"
 
     user_msg_parts = [json.dumps(input_d, indent=2)]
     if upstream_context:
@@ -517,6 +587,24 @@ def _run_task(
         )
         _log_handoff_packet(packet)
 
+        # Write progress artifact to disk
+        try:
+            from services.task_artifacts import write_workflow_progress
+            from pathlib import Path as _WP
+            write_workflow_progress(
+                _WP.cwd(), workflow_id, packet.step_index,
+                {
+                    "agent_name": packet.agent_name,
+                    "subtask": packet.subtask_completed,
+                    "artifact_preview": (packet.artifact or "")[:500],
+                    "confidence": packet.confidence,
+                    "assumptions": packet.assumptions,
+                    "uncertainties": packet.uncertainties,
+                },
+            )
+        except Exception:
+            pass  # progress tracking is best-effort
+
         if on_event:
             try:
                 on_event("handoff", packet.to_dict())
@@ -547,7 +635,8 @@ def _run_task(
 
         if success_criteria.strip() and not use_local:
             validation = _run_validation_gate(
-                claude_client, name, packet.artifact or str(output_data), success_criteria
+                claude_client, name, packet.artifact or str(output_data), success_criteria,
+                local_client=local_client,
             )
             if validation["passed"]:
                 _commit_checkpoint(checkpoint_id, validation)
@@ -774,6 +863,43 @@ def run_workflow(
     failed = db.fetchall(
         "SELECT id FROM tasks WHERE workflow_id = ? AND status = 'failed'", (workflow_id,)
     )
+
+    # ── Coordinator synthesis step ───────────────────────────────────────────
+    # If workflow succeeded and has multiple completed tasks, run a final
+    # synthesis step that assembles all handoff artifacts into a coherent output.
+    if not failed and len(completed_packets) > 1:
+        try:
+            all_packets = list(completed_packets.values())
+            blocks = [p.to_context_block() for p in all_packets]
+            synthesis_prompt = (
+                "You are the coordinator synthesizing a multi-agent workflow.\n\n"
+                "## All Agent Outputs\n\n" + "\n\n".join(blocks) + "\n\n"
+                "## Instructions\n"
+                "Combine all outputs into one coherent, well-structured final answer. "
+                "Resolve any conflicts between agents. Preserve all key findings. "
+                "Note any unresolved uncertainties. Do NOT repeat redundant information."
+            )
+            from services.task_artifacts import local_first_call
+            synthesis = local_first_call(
+                local_client, claude_client,
+                synthesis_prompt,
+                "Synthesize the workflow results into a final answer.",
+                max_tokens=2048,
+            )
+            if synthesis:
+                db.execute(
+                    "UPDATE workflows SET output_data = ?, updated_at = ? WHERE id = ?",
+                    (synthesis[:5000], _now(), workflow_id),
+                )
+                if on_event:
+                    on_event("coordinator_synthesis", {
+                        "workflow_id": workflow_id,
+                        "synthesis_preview": synthesis[:300],
+                    })
+                log.info("Coordinator synthesis completed for workflow %s", workflow_id[:8])
+        except Exception as exc:
+            log.debug("Coordinator synthesis skipped: %s", exc)
+
     final_status = "failed" if failed else "succeeded"
     _mark_workflow(workflow_id, final_status)
     return get_workflow_status(workflow_id)
