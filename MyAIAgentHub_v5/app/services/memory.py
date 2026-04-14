@@ -522,8 +522,9 @@ class MemoryManager:
             )
             if n_triples:
                 log.debug("KG: extracted %d triple(s)", n_triples)
-        except Exception as exc:
+        except Exception as exc:  # noqa: F841
             log.debug("KG triple extraction skipped: %s", exc)
+            n_triples = 0
 
     def _parse_facts_json(
         self,
