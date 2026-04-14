@@ -80,6 +80,12 @@ class ChannelManager:
         self._active_loops: dict[str, object] = {}  # conv_id -> AgentLoop
         self._lock = threading.Lock()
 
+        # Message coalescing (OpenClaw "collect" mode)
+        # Buffer rapid-fire messages per conversation, debounce 300ms
+        self._msg_buffer: dict[str, list] = {}     # conv_id -> [InboundMessage, ...]
+        self._msg_timers: dict[str, threading.Timer] = {}  # conv_id -> Timer
+        self._coalesce_delay = 0.3  # seconds
+
         # Access control shared across all adapters
         from channels.access_control import AccessControl
         self._ac = AccessControl(settings)
@@ -139,7 +145,9 @@ class ChannelManager:
     def on_message(self, msg: "InboundMessage") -> None:
         """
         Entry point for all inbound messages from any adapter.
-        Runs in the adapter's thread — spawns worker threads for processing.
+        Agent triggers process immediately. Normal chat messages are
+        coalesced (OpenClaw "collect" mode) — rapid-fire messages within
+        300ms are merged into one agent turn to avoid wasted API calls.
         """
         log.info("ChannelManager: received %r", msg)
 
@@ -151,11 +159,61 @@ class ChannelManager:
                 name=f"agent-{msg.conversation_id}",
             ).start()
         else:
+            self._coalesce_message(msg)
+
+    def _coalesce_message(self, msg: "InboundMessage") -> None:
+        """Buffer rapid-fire messages and process as one after a short delay."""
+        conv_id = msg.conversation_id
+        with self._lock:
+            # Cancel existing timer for this conversation
+            timer = self._msg_timers.pop(conv_id, None)
+            if timer:
+                timer.cancel()
+            # Add to buffer
+            self._msg_buffer.setdefault(conv_id, []).append(msg)
+            # Start new timer
+            t = threading.Timer(self._coalesce_delay, self._flush_coalesced, args=(conv_id,))
+            t.daemon = True
+            self._msg_timers[conv_id] = t
+            t.start()
+
+    def _flush_coalesced(self, conv_id: str) -> None:
+        """Process all buffered messages for a conversation as one."""
+        with self._lock:
+            messages = self._msg_buffer.pop(conv_id, [])
+            self._msg_timers.pop(conv_id, None)
+        if not messages:
+            return
+        if len(messages) == 1:
+            # Single message — process normally
             threading.Thread(
                 target=self._handle_chat_message,
-                args=(msg,),
+                args=(messages[0],),
                 daemon=True,
-                name=f"chat-{msg.conversation_id}",
+                name=f"chat-{conv_id}",
+            ).start()
+        else:
+            # Multiple messages — combine text and process as one
+            combined_text = "\n".join(m.text for m in messages if m.text)
+            merged = messages[-1]  # use the last message as the base
+            # Create a copy-like message with combined text
+            from channels.inbound_message import InboundMessage
+            merged_msg = InboundMessage(
+                channel=merged.channel,
+                chat_type=merged.chat_type,
+                user_id=merged.user_id,
+                username=merged.username,
+                text=combined_text,
+                conversation_id=merged.conversation_id,
+                agent_mode=merged.agent_mode,
+                raw_meta=merged.raw_meta,
+            )
+            log.info("Coalesced %d messages for %s", len(messages), conv_id[:12])
+            threading.Thread(
+                target=self._handle_chat_message,
+                args=(merged_msg,),
+                daemon=True,
+                name=f"chat-{conv_id}",
             ).start()
 
     # ── Chat message handler ───────────────────────────────────────────────

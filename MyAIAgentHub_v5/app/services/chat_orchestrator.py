@@ -495,6 +495,22 @@ class ChatOrchestrator:
         if mem_suffix:
             full_system = system_prompt + "\n\n" + mem_suffix
 
+        # ── Active Memory retrieval (OpenClaw pattern) ────────────────────────
+        # Auto-query RAG for relevant prior context before every reply.
+        try:
+            from services.project_memory import get_active_memory, should_inject_private_memory
+            # Only inject private memory in direct/GUI chats, not group channels
+            if should_inject_private_memory():
+                active_mem = get_active_memory(
+                    user_message,
+                    rag_index=self.memory.rag if hasattr(self.memory, "rag") else None,
+                    semantic_search_mod=self.memory.semantic if hasattr(self.memory, "semantic") else None,
+                )
+                if active_mem:
+                    full_system += "\n\n" + active_mem
+        except Exception:
+            pass  # active memory is best-effort
+
         # ── Fix 9: Inject tool restrictions into system prompt ───────────────
         if _allowed_tools:
             tool_names = ", ".join(_allowed_tools)

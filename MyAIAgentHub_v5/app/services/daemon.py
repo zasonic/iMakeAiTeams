@@ -91,12 +91,16 @@ class BackgroundDaemon:
                 log.debug("Heartbeat error: %s", exc)
 
     def _run_heartbeat(self) -> None:
-        """Check system health: local model, API key, disk space."""
+        """
+        Check system health + run user-defined HEARTBEAT.md checklist.
+        Inspired by OpenClaw: HEARTBEAT_OK = silent. Only report issues.
+        """
         health = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "local_model": False,
             "api_key_set": False,
             "disk_ok": True,
+            "heartbeat_tasks": [],
         }
 
         # Local model reachable?
@@ -118,6 +122,25 @@ class BackgroundDaemon:
             health["disk_ok"] = free_mb > 500
         except (OSError, AttributeError):
             pass  # statvfs not available on all platforms
+
+        # HEARTBEAT.md checklist (OpenClaw pattern)
+        # Read user-defined tasks from .myai/HEARTBEAT.md
+        heartbeat_file = self._root / ".myai" / "HEARTBEAT.md"
+        if heartbeat_file.exists():
+            try:
+                content = heartbeat_file.read_text(encoding="utf-8")
+                tasks = [
+                    line.strip().lstrip("- ").strip()
+                    for line in content.splitlines()
+                    if line.strip() and line.strip().startswith("- ")
+                ]
+                health["heartbeat_tasks"] = tasks
+                # If any tasks require attention, log them
+                issues = [t for t in tasks if "check" in t.lower() or "warn" in t.lower()]
+                if issues:
+                    log.info("Heartbeat: %d tasks need attention", len(issues))
+            except Exception:
+                pass
 
         self._last_heartbeat = health
 

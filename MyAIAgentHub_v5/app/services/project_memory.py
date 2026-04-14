@@ -174,3 +174,63 @@ def generate_starter_claude_md(project_root: Path) -> Optional[Path]:
     target.write_text(content, encoding="utf-8")
     log.info("Generated starter CLAUDE.md at %s", target)
     return target
+
+
+# ── Active Memory (OpenClaw pattern) ─────────────────────────────────────────
+
+def get_active_memory(
+    query: str,
+    rag_index=None,
+    semantic_search_mod=None,
+    top_k: int = 3,
+    threshold: float = 0.5,
+) -> str:
+    """
+    Auto-query RAG and semantic search for relevant prior context.
+    Called before every reply — the user never has to ask for it.
+    Returns a formatted string of relevant memories, or empty string.
+    """
+    chunks: list[str] = []
+
+    if rag_index and hasattr(rag_index, "search"):
+        try:
+            results = rag_index.search(query, top_k=top_k)
+            for item in results:
+                if isinstance(item, tuple) and len(item) == 2:
+                    text, score = item
+                    if score >= threshold:
+                        chunks.append(text[:300])
+                elif isinstance(item, str):
+                    chunks.append(item[:300])
+        except Exception:
+            pass
+
+    if semantic_search_mod and hasattr(semantic_search_mod, "search_memories"):
+        try:
+            memories = semantic_search_mod.search_memories(query, top_k=top_k)
+            for mem in memories:
+                if isinstance(mem, dict) and mem.get("score", 0) >= threshold:
+                    chunks.append(mem.get("content", "")[:300])
+        except Exception:
+            pass
+
+    if not chunks:
+        return ""
+
+    seen = set()
+    unique = []
+    for c in chunks:
+        key = c[:50].lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+
+    return "## Relevant prior context\n" + "\n".join(f"- {c}" for c in unique[:5])
+
+
+def should_inject_private_memory(chat_type: str = "direct") -> bool:
+    """
+    Returns True if private long-term memory should be injected.
+    Never inject private memory into group/channel chat sessions.
+    """
+    return chat_type in ("direct", "private", "gui", "")
