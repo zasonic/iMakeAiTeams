@@ -68,6 +68,22 @@ def _start_channel_manager():
         cm.start()
         api.set_channel_manager(cm)
         log.info("Channel manager started and wired into API")
+
+        # Start background daemon (heartbeat, idle compaction, Dream consolidation)
+        try:
+            from services.daemon import BackgroundDaemon
+            daemon = BackgroundDaemon(
+                settings=settings,
+                local_client=getattr(api, '_local', None),
+                claude_client=getattr(api, '_claude', None),
+                memory_manager=getattr(api, '_memory', None),
+                project_root=APP_ROOT,
+            )
+            daemon.start()
+            log.info("Background daemon started")
+        except Exception as daemon_exc:
+            log.warning("Background daemon failed to start: %s", daemon_exc)
+
     except Exception as exc:
         log.error("Channel manager failed to start: %s", exc, exc_info=True)
 

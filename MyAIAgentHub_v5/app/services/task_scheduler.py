@@ -1036,3 +1036,150 @@ def get_success_criteria_map(workflow_id: str) -> dict[str, str]:
         except Exception:
             pass
     return result
+
+
+# ── P6: Conditional routing ──────────────────────────────────────────────────
+
+ROUTE_PROCEED_THRESHOLD  = 0.7
+ROUTE_REVIEW_THRESHOLD   = 0.3
+
+
+def route_after_validation(
+    validation: dict,
+    task: dict,
+    workflow_id: str,
+    on_event=None,
+) -> str:
+    """
+    Decide what to do after a validation gate based on confidence.
+    Returns: "proceed" | "review" | "halt"
+
+    Inspired by LangGraph conditional edges — inspect state and decide
+    the next step dynamically instead of following linear dependencies.
+    """
+    confidence = validation.get("confidence", 0.5)
+    task_name = task.get("name", "unknown")
+
+    if confidence >= ROUTE_PROCEED_THRESHOLD:
+        return "proceed"
+
+    if confidence >= ROUTE_REVIEW_THRESHOLD:
+        log.info("[%s] Task '%s' confidence %.0f%% — inserting review step",
+                 workflow_id[:8], task_name, confidence * 100)
+        if on_event:
+            try:
+                on_event("route_review", {
+                    "workflow_id": workflow_id,
+                    "task_name": task_name,
+                    "confidence": confidence,
+                    "gaps": validation.get("gaps", []),
+                })
+            except Exception:
+                pass
+        return "review"
+
+    log.warning("[%s] Task '%s' confidence %.0f%% — halting for human decision",
+                workflow_id[:8], task_name, confidence * 100)
+    if on_event:
+        try:
+            on_event("route_halt", {
+                "workflow_id": workflow_id,
+                "task_name": task_name,
+                "confidence": confidence,
+                "gaps": validation.get("gaps", []),
+                "action_needed": "Human review required",
+            })
+        except Exception:
+            pass
+    return "halt"
+
+
+# ── P6: Interrupt / Resume ───────────────────────────────────────────────────
+
+_workflow_interrupts: dict[str, threading.Event] = {}
+_interrupt_decisions: dict[str, str] = {}
+_interrupt_lock = threading.Lock()
+
+
+def interrupt_workflow(workflow_id: str, reason: str) -> None:
+    """Pause a running workflow for human decision."""
+    evt = threading.Event()
+    with _interrupt_lock:
+        _workflow_interrupts[workflow_id] = evt
+    log.info("[%s] Workflow interrupted: %s", workflow_id[:8], reason)
+    _mark_workflow(workflow_id, "interrupted")
+
+
+def resume_workflow_decision(workflow_id: str, decision: str = "proceed") -> bool:
+    """
+    Resume an interrupted workflow. decision: "proceed" | "halt" | "retry"
+    Returns True if workflow was interrupted and is now resuming.
+    """
+    with _interrupt_lock:
+        evt = _workflow_interrupts.pop(workflow_id, None)
+        _interrupt_decisions[workflow_id] = decision
+    if evt:
+        evt.set()
+        if decision == "proceed":
+            _mark_workflow(workflow_id, "running")
+        return True
+    return False
+
+
+def wait_for_resume(workflow_id: str, timeout: float = 600.0) -> str:
+    """Block until resume_workflow_decision() is called. Returns decision or 'timeout'."""
+    with _interrupt_lock:
+        evt = _workflow_interrupts.get(workflow_id)
+    if not evt:
+        return "proceed"
+    if evt.wait(timeout=timeout):
+        with _interrupt_lock:
+            return _interrupt_decisions.pop(workflow_id, "proceed")
+    with _interrupt_lock:
+        _workflow_interrupts.pop(workflow_id, None)
+        _interrupt_decisions.pop(workflow_id, None)
+    return "timeout"
+
+
+# ── P6: Replay from checkpoint ───────────────────────────────────────────────
+
+def replay_workflow_from_checkpoint(
+    workflow_id: str,
+    checkpoint_id: str,
+    claude_client,
+    local_client=None,
+    on_status=None,
+    on_event=None,
+) -> dict:
+    """Resume a workflow from a specific checkpoint (time-travel)."""
+    cp = db.fetchone(
+        "SELECT * FROM workflow_checkpoints WHERE checkpoint_id = ? AND workflow_id = ?",
+        (checkpoint_id, workflow_id),
+    )
+    if not cp:
+        return {"error": f"Checkpoint {checkpoint_id} not found"}
+
+    task_id = cp["task_id"]
+    all_tasks = db.fetchall(
+        "SELECT id, name FROM tasks WHERE workflow_id = ? ORDER BY created_at",
+        (workflow_id,),
+    )
+    task_ids = [t["id"] for t in all_tasks]
+    try:
+        start_idx = task_ids.index(task_id)
+    except ValueError:
+        return {"error": f"Task {task_id} not found in workflow"}
+
+    for t in all_tasks[start_idx:]:
+        db.execute(
+            "UPDATE tasks SET status='pending', output_data='{}', "
+            "error_message=NULL, updated_at=? WHERE id=?",
+            (_now(), t["id"]),
+        )
+    db.commit()
+
+    log.info("[%s] Replaying from checkpoint %s", workflow_id[:8], checkpoint_id[:8])
+    return run_workflow(
+        workflow_id, claude_client, local_client,
+        on_status=on_status, on_event=on_event,
+    )
