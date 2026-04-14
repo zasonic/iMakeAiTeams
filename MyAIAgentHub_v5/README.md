@@ -22,7 +22,7 @@ A local-first desktop AI platform where Claude and local models work as a team.
 3. Run:
    ```bash
    # Windows — double-click:
-   START_HERE_Windows.bat
+   START_HERE_Windows.vbs
 
    # Mac — double-click:
    START_HERE_Mac.command
