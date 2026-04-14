@@ -55,7 +55,18 @@ try:
     log.info("NeMo Guardrails available — safety rails enabled")
 except ImportError:
     _NEMO_AVAILABLE = False
-    log.info("NeMo Guardrails not installed — safety gate running in passthrough mode")
+    log.info("NeMo Guardrails not installed")
+
+# Try to import llm-guard — provides ML-based scanners when NeMo is unavailable
+try:
+    import llm_guard
+    from llm_guard.input_scanners import PromptInjection, Toxicity, BanSubstrings
+    from llm_guard.output_scanners import Toxicity as OutputToxicity
+    _LLM_GUARD_AVAILABLE = True
+    log.info("LLM Guard available — ML-based security scanners enabled")
+except ImportError:
+    _LLM_GUARD_AVAILABLE = False
+    log.info("LLM Guard not installed — using pattern-based fallback")
 
 
 @dataclass
@@ -95,37 +106,66 @@ class GuardrailsGate:
         self._settings = settings
         self._local = local_client
         self._rails = None
+        self._llm_guard_input = None
+        self._llm_guard_output = None
         self._enabled = settings.get("guardrails_enabled", True)
 
         if _NEMO_AVAILABLE and self._enabled:
+            # Auto-detect config directory if not specified
+            if config_dir is None:
+                _auto_dir = Path(__file__).parent.parent / "config" / "guardrails"
+                if _auto_dir.exists() and (_auto_dir / "config.yml").exists():
+                    config_dir = _auto_dir
+                    log.info("Auto-detected guardrails config at %s", _auto_dir)
             self._rails = self._init_rails(config_dir)
+
+        if _LLM_GUARD_AVAILABLE and self._enabled:
+            self._init_llm_guard()
 
     # ── Public API ─────────────────────────────────────────────────────────
 
     def check_input(self, text: str) -> GuardrailVerdict:
         """
         Check a user input before sending to the LLM.
-        Returns a verdict — blocked=True means reject the message.
+        Three-tier fallback: NeMo Colang → LLM Guard → regex patterns.
         """
         if not self._enabled:
             return GuardrailVerdict.safe(text)
 
+        # Tier 1: NeMo Colang (if installed + configured)
         if self._rails is not None:
-            return self._nemo_check(text, role="user")
+            verdict = self._nemo_check(text, role="user")
+            if verdict.blocked:
+                return verdict
 
-        # Lightweight fallback: pattern-based check only
+        # Tier 2: LLM Guard ML scanners (if installed)
+        if self._llm_guard_input is not None:
+            verdict = self._llm_guard_check_input(text)
+            if verdict.blocked:
+                return verdict
+
+        # Tier 3: Pattern-based check (always available)
         return self._pattern_check(text)
 
     def check_output(self, text: str) -> GuardrailVerdict:
         """
         Check LLM output before returning to the user.
-        Returns a verdict — blocked=True means suppress the response.
+        Three-tier fallback: NeMo Colang → LLM Guard → passthrough.
         """
         if not self._enabled:
             return GuardrailVerdict.safe(text)
 
+        # Tier 1: NeMo
         if self._rails is not None:
-            return self._nemo_check(text, role="assistant")
+            verdict = self._nemo_check(text, role="assistant")
+            if verdict.blocked:
+                return verdict
+
+        # Tier 2: LLM Guard output scanners
+        if self._llm_guard_output is not None:
+            verdict = self._llm_guard_check_output(text)
+            if verdict.blocked:
+                return verdict
 
         return GuardrailVerdict.safe(text)
 
@@ -137,16 +177,88 @@ class GuardrailsGate:
         self._settings.set("guardrails_enabled", enabled)
 
     def status(self) -> dict:
+        if self._rails:
+            mode = "nemo"
+        elif self._llm_guard_input:
+            mode = "llm_guard"
+        elif self._enabled:
+            mode = "pattern"
+        else:
+            mode = "passthrough"
         return {
-            "enabled":         self._enabled,
-            "nemo_available":  _NEMO_AVAILABLE,
-            "rails_loaded":    self._rails is not None,
-            "mode":            (
-                "nemo"        if self._rails else
-                "pattern"     if self._enabled else
-                "passthrough"
-            ),
+            "enabled":            self._enabled,
+            "nemo_available":     _NEMO_AVAILABLE,
+            "llm_guard_available": _LLM_GUARD_AVAILABLE,
+            "rails_loaded":       self._rails is not None,
+            "llm_guard_loaded":   self._llm_guard_input is not None,
+            "mode":               mode,
         }
+
+    # ── LLM Guard integration (Tier 2) ──────────────────────────────────────
+
+    def _init_llm_guard(self) -> None:
+        """Initialize LLM Guard scanners. Graceful — never crashes init."""
+        try:
+            use_onnx = False
+            try:
+                import onnxruntime  # noqa: F401
+                use_onnx = True
+            except ImportError:
+                pass
+
+            self._llm_guard_input = [
+                PromptInjection(threshold=0.92, use_onnx=use_onnx),
+                Toxicity(threshold=0.7, use_onnx=use_onnx),
+                BanSubstrings(
+                    substrings=self._BLOCK_PATTERNS,
+                    match_type="str",
+                    case_sensitive=False,
+                ),
+            ]
+            self._llm_guard_output = [
+                OutputToxicity(threshold=0.7, use_onnx=use_onnx),
+            ]
+            log.info("LLM Guard scanners initialised (%d input, %d output, onnx=%s)",
+                     len(self._llm_guard_input), len(self._llm_guard_output), use_onnx)
+        except Exception as exc:
+            log.warning("LLM Guard init failed (%s) — skipping ML scanners", exc)
+            self._llm_guard_input = None
+            self._llm_guard_output = None
+
+    def _llm_guard_check_input(self, text: str) -> GuardrailVerdict:
+        """Run input through LLM Guard scanners."""
+        try:
+            sanitized, results_valid, results_score = llm_guard.scan_prompt(
+                self._llm_guard_input, text, fail_fast=True,
+            )
+            for scanner_name, is_valid in results_valid.items():
+                if not is_valid:
+                    score = results_score.get(scanner_name, 0.0)
+                    reason = f"Blocked by {scanner_name} (score={score:.2f})"
+                    log.warning("LLM Guard input: %s", reason)
+                    return GuardrailVerdict.block(reason)
+            # Return sanitized text (may have modifications from BanSubstrings)
+            return GuardrailVerdict.safe(sanitized)
+        except Exception as exc:
+            log.debug("LLM Guard input scan error: %s — failing open", exc)
+            return GuardrailVerdict.safe(text)
+
+    def _llm_guard_check_output(self, text: str) -> GuardrailVerdict:
+        """Run output through LLM Guard scanners."""
+        try:
+            sanitized, results_valid, results_score = llm_guard.scan_output(
+                self._llm_guard_output, "", text, fail_fast=True,
+            )
+            for scanner_name, is_valid in results_valid.items():
+                if not is_valid:
+                    score = results_score.get(scanner_name, 0.0)
+                    reason = f"Output blocked by {scanner_name} (score={score:.2f})"
+                    log.warning("LLM Guard output: %s", reason)
+                    return GuardrailVerdict.block(reason)
+            return GuardrailVerdict.safe(sanitized)
+        except Exception as exc:
+            log.debug("LLM Guard output scan error: %s — failing open", exc)
+            return GuardrailVerdict.safe(text)
 
     # ── NeMo integration ───────────────────────────────────────────────────
 

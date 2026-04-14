@@ -478,6 +478,19 @@ class ChatOrchestrator:
             mem.rag_chunks = refinement.texts
 
         mem_suffix = mem.to_system_suffix()
+
+        # ── Inject project memory (CLAUDE.md) into system prompt ───────────
+        # This goes between the base prompt and memory suffix so it's part
+        # of the cacheable prefix (static across turns).
+        try:
+            from services.project_memory import load_project_memory
+            project_root = Path(self._settings.get("agent_project_root", "."))
+            project_mem = load_project_memory(project_root)
+            if project_mem:
+                system_prompt = system_prompt + "\n\n" + project_mem
+        except Exception as _pm_exc:
+            log.debug("Project memory load skipped: %s", _pm_exc)
+
         full_system = system_prompt
         if mem_suffix:
             full_system = system_prompt + "\n\n" + mem_suffix

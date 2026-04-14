@@ -25,9 +25,19 @@ rank-bm25>=0.2.2
 # ── Channels: Telegram ────────────────────────────────────────────────────────
 python-telegram-bot>=21.0.0
 
-# ── Safety: NeMo Guardrails (optional — app works without it) ─────────────────
-# Install for full content safety rails (jailbreak detection, PII masking, etc.)
+# ── Safety: ML-based security scanners (optional — app works without them) ────
+# LLM Guard: prompt injection detection, toxicity, secrets, PII (MIT license)
+# Install for ML-based security: pip install llm-guard
+# For faster inference: pip install llm-guard[onnxruntime]
+# llm-guard>=0.3.0
+
+# NeMo Guardrails: full Colang rail definitions (Apache 2.0)
+# Install for programmable dialog rails: pip install nemoguardrails
 # nemoguardrails>=0.9.0
+
+# ── Context compression: tree-sitter (optional — fallback to regex) ──────────
+# Install for AST-based repo map: pip install tree-sitter tree-sitter-python
+# tree-sitter>=0.24.0
 
 # ── Priority 5: Input sanitization (optional — app works without it) ──────────
 # llamafirewall>=0.1.0

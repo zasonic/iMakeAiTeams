@@ -282,6 +282,23 @@ class AgentLoop:
         tools_called: list[str] = []
         files_modified: list[str] = []
 
+        # Build system prompt with project memory + repo map
+        system = SYSTEM_PROMPT
+        try:
+            from services.project_memory import load_project_memory
+            project_mem = load_project_memory(self._files.root)
+            if project_mem:
+                system = system + "\n\n" + project_mem
+        except Exception:
+            pass
+        try:
+            from services.repo_map import build_repo_map_for_task
+            repo_map = build_repo_map_for_task(self._files.root, task, token_budget=1024)
+            if repo_map:
+                system = system + "\n\n" + repo_map
+        except Exception:
+            pass
+
         self._emit("thinking", f"Starting agent loop for task: {task[:100]}")
 
         for turn in range(MAX_TURNS):
@@ -296,7 +313,7 @@ class AgentLoop:
             # Call Claude with tools
             try:
                 response = self._claude.call_with_tools(
-                    system=SYSTEM_PROMPT,
+                    system=system,
                     messages=messages,
                     tools=TOOL_SCHEMAS,
                     max_tokens=MAX_OUTPUT_TOKENS,
