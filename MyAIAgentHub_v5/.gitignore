@@ -1,0 +1,32 @@
+# Runtime artifacts
+.myai/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# Environment
+.env
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# RAG cache
+rag_cache/
+
+# Sentence transformers model cache
+.cache/
