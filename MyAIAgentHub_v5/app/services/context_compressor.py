@@ -330,34 +330,49 @@ class ContextCompressor:
 
         # Tier 2: session compact
         if msg_count > SESSION_COMPACT_TRIGGER:
+            # Pre-compaction memory flush (OpenClaw pattern):
+            # Extract durable facts BEFORE summarization destroys them
+            if self.local_client and hasattr(self.local_client, "is_available"):
+                try:
+                    if self.local_client.is_available():
+                        old_text = "\n".join(
+                            f"{m.get('role','?')}: {(m.get('content') or '')[:200]}"
+                            for m in messages[:SESSION_COMPACT_TRIGGER]
+                        )
+                        flush_result = self.local_client.chat(
+                            "Extract 1-3 important facts worth remembering from this conversation. "
+                            "Return ONLY a JSON array of short strings. If nothing notable, return [].",
+                            old_text[:3000],
+                            max_tokens=200,
+                        )
+                        if flush_result:
+                            log.debug("Pre-compaction flush: %s", flush_result[:100])
+                            # Facts will be picked up by memory.extract_facts on next turn
+                except Exception:
+                    pass  # best-effort, never block compaction
+
+            split = max(0, msg_count - SESSION_KEEP_RECENT)
+            old_msgs = messages[:split]
+            recent   = messages[split:]
+            lines = []
+            for m in old_msgs:
+                lines.append(f"{m.get('role','?').upper()}: {(m.get('content') or '')[:300]}")
             result = session_compact(messages, self.local_client)
             if result.success:
                 self._consecutive_failures = 0
                 self._last_compact_time = now
                 log.info("Session compact: %s", result.detail)
-                # session_compact returns info but we need the new list
-                # Re-run to get the actual new list
-                split = max(0, msg_count - SESSION_KEEP_RECENT)
-                old_msgs = messages[:split]
-                recent   = messages[split:]
-                # The summary was already generated successfully, rebuild
-                new_result = session_compact(messages, self.local_client)
-                if new_result.success:
-                    # Rebuild the list
-                    lines = []
-                    for m in old_msgs:
-                        lines.append(f"{m.get('role','?').upper()}: {(m.get('content') or '')[:300]}")
-                    try:
-                        summary = self.local_client.chat(
-                            _SESSION_SUMMARY_PROMPT,
-                            "\n".join(lines[:20]),
-                            max_tokens=400,
-                        )
-                        summary_msg = {"role": "system",
-                                       "content": f"[Earlier conversation summary: {summary.strip()}]"}
-                        return [summary_msg] + recent, result
-                    except Exception:
-                        pass
+                try:
+                    summary = self.local_client.chat(
+                        _SESSION_SUMMARY_PROMPT,
+                        "\n".join(lines[:20]),
+                        max_tokens=400,
+                    )
+                    summary_msg = {"role": "system",
+                                   "content": f"[Earlier conversation summary: {summary.strip()}]"}
+                    return [summary_msg] + recent, result
+                except Exception:
+                    pass
             else:
                 self._consecutive_failures += 1
 

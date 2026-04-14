@@ -189,22 +189,26 @@ class GoalDecomposer:
         if not _looks_multi_step(message):
             return DecompositionResult(was_decomposed=False)
 
-        # ── Step 1: Ask Claude to decompose the goal ──────────────────────────
+        # ── Step 1: Classify whether decomposition is needed ────────────────
+        # Use local model (free) for the classification step.
+        # Only call Claude for the actual step execution.
         _emit("goal_decomposing", {
-            "label": "Analyzing goal complexity…",
+            "label": "Analyzing goal complexity...",
             "message_preview": message[:80],
         })
 
         try:
-            decomp_result = self.claude.chat_multi_turn(
-                system=_DECOMPOSE_SYSTEM,
-                messages=[{"role": "user", "content": message}],
-                max_tokens=800,
+            from services.task_artifacts import local_first_call
+            decomp_text = local_first_call(
+                self.local, self.claude,
+                _DECOMPOSE_SYSTEM, message, max_tokens=800,
             )
-            decomp_text = decomp_result.get("text", "")
+            if not decomp_text:
+                log.warning("Goal decomposition: both local and Claude failed")
+                return DecompositionResult(was_decomposed=False, error="Classification unavailable")
             decomp_data = _parse_decomposition(decomp_text)
         except Exception as exc:
-            log.warning("Goal decomposition API call failed: %s", exc)
+            log.warning("Goal decomposition classification failed: %s", exc)
             return DecompositionResult(was_decomposed=False, error=str(exc))
 
         if not decomp_data:
@@ -228,6 +232,15 @@ class GoalDecomposer:
 
         log.info("Goal decomposed into %d steps: %s", total_steps, goal_summary)
 
+        # Write feature list artifact to disk
+        try:
+            from services.task_artifacts import write_feature_list
+            from pathlib import Path as _P
+            _project = _P.cwd()  # default to working directory
+            write_feature_list(_project, goal_summary, steps)
+        except Exception as _fl_exc:
+            log.debug("Feature list write skipped: %s", _fl_exc)
+
         # ── Step 2: Execute each step sequentially ────────────────────────────
         step_results: list[StepResult] = []
         total_tokens_in = 0
@@ -243,6 +256,14 @@ class GoalDecomposer:
                 "total": total_steps,
                 "task": task_desc,
             })
+
+            # Mark feature as in-progress on disk
+            try:
+                from services.task_artifacts import update_feature_status
+                from pathlib import Path as _P
+                update_feature_status(_P.cwd(), step_num, "in_progress")
+            except Exception:
+                pass
 
             # Build prior context from completed steps
             prior_parts = []
@@ -318,6 +339,13 @@ class GoalDecomposer:
                 "tokens_out": tokens_out,
                 "duration_ms": round(duration_ms),
             })
+
+            # Update feature list status on disk
+            try:
+                from services.task_artifacts import update_feature_status
+                update_feature_status(_P.cwd(), step_num, "done")
+            except Exception:
+                pass
 
             log.info("Step %d/%d completed: %s (%.0fms, %d tokens)",
                      step_num, total_steps, task_desc[:50], duration_ms, tokens_out)

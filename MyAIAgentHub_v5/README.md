@@ -21,11 +21,11 @@ A local-first desktop AI platform where Claude and local models work as a team.
    ```
 3. Run:
    ```bash
-   # Windows
+   # Windows — double-click:
    START_HERE_Windows.vbs
 
-   # Mac
-   ./START_HERE_Mac.command
+   # Mac — double-click:
+   START_HERE_Mac.command
    ```
 4. Enter your Anthropic API key in Settings or on first launch
 

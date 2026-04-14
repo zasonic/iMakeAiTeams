@@ -341,7 +341,7 @@ class ChatOrchestrator:
 
     def _resolve_target(self, route_model: str, agent: dict | None) -> ExecutionTarget:
         """Resolve the execution target from the route decision and agent config."""
-        agent_max_tokens = int(agent["max_tokens"]) if agent else 4096
+        agent_max_tokens = int(agent.get("max_tokens", 4096)) if agent else 4096
         if route_model == "claude":
             return ExecutionTarget(
                 backend="claude",
@@ -412,7 +412,7 @@ class ChatOrchestrator:
             if row:
                 agent = dict(row)
         system_prompt = (
-            agent["system_prompt"] if agent
+            agent.get("system_prompt", "You are a helpful AI assistant.") if agent
             else self._settings.get("system_prompt", "You are a helpful AI assistant.")
         )
 
@@ -478,9 +478,38 @@ class ChatOrchestrator:
             mem.rag_chunks = refinement.texts
 
         mem_suffix = mem.to_system_suffix()
+
+        # ── Inject project memory (CLAUDE.md) into system prompt ───────────
+        # This goes between the base prompt and memory suffix so it's part
+        # of the cacheable prefix (static across turns).
+        try:
+            from services.project_memory import load_project_memory
+            project_root = Path(self._settings.get("agent_project_root", "."))
+            project_mem = load_project_memory(project_root)
+            if project_mem:
+                system_prompt = system_prompt + "\n\n" + project_mem
+        except Exception as _pm_exc:
+            log.debug("Project memory load skipped: %s", _pm_exc)
+
         full_system = system_prompt
         if mem_suffix:
             full_system = system_prompt + "\n\n" + mem_suffix
+
+        # ── Active Memory retrieval (OpenClaw pattern) ────────────────────────
+        # Auto-query RAG for relevant prior context before every reply.
+        try:
+            from services.project_memory import get_active_memory, should_inject_private_memory
+            # Only inject private memory in direct/GUI chats, not group channels
+            if should_inject_private_memory():
+                active_mem = get_active_memory(
+                    user_message,
+                    rag_index=self.memory.rag if hasattr(self.memory, "rag") else None,
+                    semantic_search_mod=self.memory.semantic if hasattr(self.memory, "semantic") else None,
+                )
+                if active_mem:
+                    full_system += "\n\n" + active_mem
+        except Exception:
+            pass  # active memory is best-effort
 
         # ── Fix 9: Inject tool restrictions into system prompt ───────────────
         if _allowed_tools:
@@ -511,7 +540,7 @@ class ChatOrchestrator:
         })
 
         # Route: Claude or local?
-        model_pref = agent["model_preference"] if agent else "auto"
+        model_pref = agent.get("model_preference", "auto") if agent else "auto"
         complexity = "complex"
         route_confidence = 1.0
         route_needs_context = False
@@ -829,8 +858,58 @@ class ChatOrchestrator:
                 response_text = f"[Error: {exc}]"
                 had_error = True
 
-        # Quality signals for router feedback
+        # ── Local response quality gate ─────────────────────────────────────
+        # If response came from local and looks weak, escalate to Claude
         response_empty = len((response_text or "").strip()) < 20
+        if (
+            not had_error
+            and target.backend == "local"
+            and not response_empty
+            and self.local and self.local.is_available()
+            and len(user_message.split()) >= 5  # skip for trivial messages
+        ):
+            try:
+                from services.task_artifacts import local_first_call
+                quality_raw = local_first_call(
+                    self.local, None,  # local only, no Claude fallback
+                    "Rate this response's relevance and completeness for the given question. "
+                    "Respond with ONLY a JSON: {\"score\": 0-10, \"reason\": \"...\"}",
+                    f"QUESTION: {user_message[:300]}\nRESPONSE: {(response_text or '')[:500]}",
+                    max_tokens=100,
+                )
+                if quality_raw:
+                    import json as _json
+                    _qstart = quality_raw.find("{")
+                    _qend = quality_raw.rfind("}")
+                    if _qstart != -1 and _qend != -1:
+                        quality = _json.loads(quality_raw[_qstart:_qend + 1])
+                        if quality.get("score", 10) < 4:
+                            log.info("Local response scored %s — escalating to Claude", quality.get("score"))
+                            try:
+                                if on_token:
+                                    response_text, usage = self.claude.stream_multi_turn(
+                                        full_system, messages, on_token,
+                                        max_tokens=target.max_tokens,
+                                    )
+                                    if usage:
+                                        tokens_in = getattr(usage, "input_tokens", 0) or 0
+                                        tokens_out = getattr(usage, "output_tokens", 0) or 0
+                                else:
+                                    result = self.claude.chat_multi_turn(
+                                        full_system, messages,
+                                        max_tokens=target.max_tokens,
+                                    )
+                                    response_text = result["text"]
+                                    tokens_in = result.get("input_tokens", 0)
+                                    tokens_out = result.get("output_tokens", 0)
+                                route_model = "claude"
+                                model_name = self.claude._model
+                            except Exception as esc_exc:
+                                log.debug("Escalation to Claude failed: %s", esc_exc)
+            except Exception:
+                pass  # quality check is best-effort, never block response
+
+        # Quality signals for router feedback
 
         # ── Hook: post_response ──────────────────────────────────────────────
         self.hooks.fire("post_response", {

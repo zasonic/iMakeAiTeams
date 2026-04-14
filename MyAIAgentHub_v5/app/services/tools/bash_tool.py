@@ -71,20 +71,78 @@ _BLOCKED_PREFIXES: tuple[str, ...] = (
 )
 
 _BLOCKED_SUBSTRINGS: tuple[str, ...] = (
-    "&&rm ",
-    ";rm ",
-    "| rm",
+    # Chained destructive commands
+    "&&rm ", ";rm ", "| rm",
     "> /dev/sd",
-    "/etc/passwd",
-    "/etc/shadow",
-    "~/.ssh",
-    "~/.aws",
-    "~/.anthropic",
-    "settings.json",
-    ".env",
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
+    # Sensitive system files
+    "/etc/passwd", "/etc/shadow", "/etc/sudoers",
+    # Credential locations
+    "~/.ssh", "~/.aws", "~/.anthropic", "~/.config/gcloud",
+    "~/.netrc", "~/.npmrc", "~/.pypirc",
+    "settings.json", ".env",
+    # Known API key patterns
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY",
+    "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "HF_TOKEN",
+    # Credential exfiltration
+    "printenv", "env | grep", "env|grep", "set | grep",
+    "cat ~/.ssh", "cat ~/.aws", "cat ~/.env",
+    # Network abuse
+    "nc -l", "ncat -l", "nmap ", "masscan ",
+    # Privilege escalation
+    "sudo ", "su -", "su root", "doas ",
+    "chmod u+s", "chmod 4",
+    # Data exfiltration via network
+    "curl -d", "curl --data", "wget --post",
+    "curl -F", "curl --upload",
 )
+
+# ── Sensitive environment variable patterns ──────────────────────────────────
+# These are STRIPPED from the subprocess environment before execution.
+# Only a safe allowlist is passed through.
+_ENV_ALLOWLIST = {
+    "PATH", "HOME", "TERM", "LANG", "LC_ALL", "SHELL",
+    "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP",
+    "COLORTERM", "FORCE_COLOR", "NO_COLOR",
+    "VIRTUAL_ENV", "CONDA_DEFAULT_ENV",
+    "NODE_ENV", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE",
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+}
+
+_SECRET_PATTERNS = (
+    "KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL",
+    "AUTH", "PRIVATE", "APIKEY", "API_KEY",
+)
+
+
+def _make_safe_env(project_root: Path) -> dict[str, str]:
+    """Build a sanitized environment dict for subprocess execution."""
+    safe = {}
+    for key, val in os.environ.items():
+        if key in _ENV_ALLOWLIST:
+            safe[key] = val
+        elif not any(pat in key.upper() for pat in _SECRET_PATTERNS):
+            safe[key] = val
+    # Override HOME to project root to prevent access to user credentials
+    safe["HOME"] = str(project_root)
+    return safe
+
+
+def _sanitize_output(text: str) -> str:
+    """Scrub any accidentally leaked secrets from command output."""
+    import re
+    # Common API key patterns
+    patterns = [
+        (r'sk-ant-api03-[\w-]{80,}', '[REDACTED_ANTHROPIC_KEY]'),
+        (r'sk-[a-zA-Z0-9]{32,}', '[REDACTED_OPENAI_KEY]'),
+        (r'ghp_[a-zA-Z0-9]{36}', '[REDACTED_GITHUB_TOKEN]'),
+        (r'gho_[a-zA-Z0-9]{36}', '[REDACTED_GITHUB_TOKEN]'),
+        (r'hf_[a-zA-Z0-9]{34}', '[REDACTED_HF_TOKEN]'),
+        (r'AKIA[0-9A-Z]{16}', '[REDACTED_AWS_KEY]'),
+    ]
+    for pat, replacement in patterns:
+        text = re.sub(pat, replacement, text)
+    return text
 
 
 @dataclass
@@ -153,6 +211,21 @@ class BashTool:
         log.info("BashTool: executing: %s", command[:200])
 
         try:
+            safe_env = _make_safe_env(self.project_root)
+
+            # Resource limits via preexec_fn (Linux/macOS only)
+            def _set_limits():
+                try:
+                    import resource
+                    # 512 MB virtual memory
+                    resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+                    # 100 MB max file size
+                    resource.setrlimit(resource.RLIMIT_FSIZE, (100 * 1024 * 1024, 100 * 1024 * 1024))
+                    # 50 max child processes
+                    resource.setrlimit(resource.RLIMIT_NPROC, (50, 50))
+                except (ImportError, ValueError, OSError):
+                    pass  # resource module unavailable on Windows or limits not supported
+
             proc = subprocess.run(
                 command,
                 shell=True,
@@ -160,11 +233,16 @@ class BashTool:
                 text=True,
                 timeout=self.timeout,
                 cwd=str(self.project_root),
-                env={**os.environ, "HOME": str(self.project_root)},
+                env=safe_env,
+                preexec_fn=_set_limits if os.name != "nt" else None,
             )
 
             stdout = proc.stdout or ""
             stderr = proc.stderr or ""
+
+            # Sanitize output to remove any leaked secrets
+            stdout = _sanitize_output(stdout)
+            stderr = _sanitize_output(stderr)
 
             truncated = False
             if len(stdout) > MAX_OUTPUT_CHARS:

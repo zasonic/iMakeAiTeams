@@ -107,7 +107,7 @@ function handleEvent(event, payload) {
     case "chat_event": handleStructuredEvent(payload); break;
     case "rag_progress":
       document.getElementById("rag-subtitle").textContent = payload.status || "";
-      wizSetIndexMsg(payload.status || "");
+      wizUpdateProgress(payload.status, payload.pct);
       break;
     case "rag_done":
       state.ragChunks = payload.chunks || 0;
@@ -117,7 +117,7 @@ function handleEvent(event, payload) {
       break;
     case "rag_error":
       showToast("Index error: " + payload.error, "error");
-      wizSetIndexMsg("Error: " + payload.error);
+      wizIndexError(payload.error);
       break;
     case "health_check_done":
       renderHealthResults(payload.results || []);
@@ -1467,109 +1467,156 @@ function handleDebateRoundEvent(payload) {
 }
 
 // ── First-Run Wizard ──────────────────────────────────────────────────────────
-const wizard = { step:1, apiKeyVerified:false, folderIndexed:false, chunks:0 };
+const wizard = { step:1, apiKeyVerified:false, folderIndexed:false, chunks:0, localData:null, ollamaReady:false };
 
 window.showFirstRun = function() {
   document.getElementById("first-run").classList.add("visible");
   wizGoToStep(1);
-  // Background: detect local
+  // Background: detect local model setup while user enters API key
   api("detect_local_setup").then(data => {
-    wizard._localData = data;
+    wizard.localData = data;
     if(wizard.step === 2) wizPopulateLocalStep(data);
   });
 };
 
 function wizGoToStep(n) {
   wizard.step = n;
-  document.querySelectorAll(".wz-panel").forEach(p=>p.classList.remove("active"));
-  const panel = document.getElementById("wz-panel-"+n);
+  // Animate panel transition
+  document.querySelectorAll(".wz-panel").forEach(p => p.classList.remove("active"));
+  const panel = document.getElementById("wz-panel-" + n);
   if(panel) panel.classList.add("active");
-  // Update progress dots
-  for(let i=1;i<=4;i++) {
-    const dot = document.getElementById("wz-dot-"+i);
-    dot.classList.remove("active","done");
-    if(i===n) dot.classList.add("active");
-    else if(i<n) dot.classList.add("done");
+  // Update segmented progress bar
+  for(let i = 1; i <= 4; i++) {
+    const seg = document.getElementById("wz-seg-" + i);
+    seg.classList.remove("active", "done");
+    if(i === n) seg.classList.add("active");
+    else if(i < n) seg.classList.add("done");
   }
-  for(let i=1;i<=3;i++) {
-    const line = document.getElementById("wz-line-"+i);
-    line.classList.toggle("done", i<n);
-  }
-  if(n===2) wizPopulateLocalStep(wizard._localData);
-  if(n===4) wizPopulateReadyStep();
+  if(n === 2) wizPopulateLocalStep(wizard.localData);
+  if(n === 4) wizPopulateReadyStep();
 }
 
+// ── Step 1: API Key ──
 document.getElementById("wz-verify-btn").addEventListener("click", async () => {
   const key = document.getElementById("wz-api-key").value.trim();
   const btn = document.getElementById("wz-verify-btn");
   const msg = document.getElementById("wz-verify-msg");
-  if(!key) { msg.textContent="Please enter your API key"; msg.className="wz-verify-msg fail"; return; }
-  btn.disabled=true; btn.textContent="Checking…";
+  if(!key) { msg.textContent = "Please enter your API key"; msg.className = "wz-msg fail"; return; }
+  btn.disabled = true; btn.textContent = "Verifying...";
+  msg.innerHTML = ""; msg.className = "wz-msg loading"; msg.textContent = "Connecting to Anthropic...";
   const r = await api("verify_api_key", key);
-  btn.disabled=false; btn.textContent="Verify →";
+  btn.disabled = false; btn.textContent = "Verify";
   if(r && r.ok) {
     wizard.apiKeyVerified = true;
-    msg.textContent="✓ " + (r.message||"Verified!");
-    msg.className="wz-verify-msg ok";
+    msg.className = "wz-msg ok";
+    msg.textContent = "Connected to Claude successfully";
     document.getElementById("wz-next-1").disabled = false;
-    await api("save_setting","claude_api_key",key);
+    await api("save_setting", "claude_api_key", key);
   } else {
     wizard.apiKeyVerified = false;
-    msg.textContent="✗ " + (r?.message||"Verification failed");
-    msg.className="wz-verify-msg fail";
+    msg.className = "wz-msg fail";
+    msg.textContent = r?.message || "Verification failed — check your key";
     document.getElementById("wz-next-1").disabled = true;
   }
 });
-document.getElementById("wz-api-key").addEventListener("keydown", e => { if(e.key==="Enter") document.getElementById("wz-verify-btn").click(); });
+document.getElementById("wz-api-key").addEventListener("keydown", e => { if(e.key === "Enter") document.getElementById("wz-verify-btn").click(); });
 document.getElementById("wz-next-1").addEventListener("click", () => wizGoToStep(2));
-document.getElementById("wz-console-link").addEventListener("click", e => { e.preventDefault(); api("open_url","https://console.anthropic.com/"); });
+document.getElementById("wz-console-link").addEventListener("click", e => { e.preventDefault(); api("open_url", "https://console.anthropic.com/"); });
 
+// ── Step 2: Local AI ──
 function wizPopulateLocalStep(data) {
-  const sub = document.getElementById("wz-local-sub");
-  const status = document.getElementById("wz-local-status");
-  const installRow = document.getElementById("wz-install-row");
-  if(!data) { sub.textContent="Checking…"; status.textContent=""; return; }
-  if(data.ollama_available) {
-    sub.textContent = "Running · " + (data.models_available||[]).join(", ").substring(0,40);
-    status.textContent = "✓ Ready";
-    status.className = "local-status ok";
-    installRow.style.display = "none";
+  const detail = document.getElementById("wz-local-detail");
+  const badge = document.getElementById("wz-local-badge");
+  const actionRow = document.getElementById("wz-ollama-action");
+  const svc = document.getElementById("wz-ollama-svc");
+  const ramHint = document.getElementById("wz-ram-hint");
+  if(!data) { detail.textContent = "Detecting..."; badge.textContent = "Checking"; badge.className = "wz-svc-badge checking"; return; }
+  if(data.ollama_running) {
+    const models = (data.ollama_models || []).join(", ");
+    detail.textContent = models ? "Running: " + models.substring(0, 50) : "Running (no models pulled yet)";
+    badge.textContent = "Ready"; badge.className = "wz-svc-badge ok";
+    svc.classList.add("detected");
+    actionRow.style.display = "none";
+    wizard.ollamaReady = true;
   } else {
-    sub.textContent = "Not detected";
-    status.textContent = "Not installed";
-    status.className = "local-status miss";
-    installRow.style.display = "block";
+    detail.textContent = "Not running on this machine";
+    badge.textContent = "Not found"; badge.className = "wz-svc-badge miss";
+    svc.classList.remove("detected");
+    actionRow.style.display = "block";
+  }
+  if(data.ram_gb) {
+    ramHint.style.display = "block";
+    ramHint.textContent = "System RAM: " + data.ram_gb + " GB — recommended model: " + (data.recommended_model || "phi3:mini");
   }
 }
 document.getElementById("wz-next-2").addEventListener("click", () => wizGoToStep(3));
 document.getElementById("wz-skip-2").addEventListener("click", () => wizGoToStep(3));
-document.getElementById("wz-ollama-link").addEventListener("click", () => api("open_url","https://ollama.ai"));
+document.getElementById("wz-ollama-link").addEventListener("click", () => api("open_url", "https://ollama.ai"));
 
+// ── Step 3: Documents ──
 document.getElementById("wz-folder-btn").addEventListener("click", async () => {
   const folder = await api("pick_folder");
   if(!folder) return;
-  wizSetIndexMsg("Indexing…");
+  // Show progress bar
+  document.getElementById("wz-index-progress").style.display = "block";
+  document.getElementById("wz-index-msg").textContent = "";
+  document.getElementById("wz-index-msg").className = "wz-msg";
+  document.getElementById("wz-progress-fill").style.width = "2%";
+  document.getElementById("wz-index-status").textContent = "Scanning files...";
+  document.getElementById("wz-index-pct").textContent = "0%";
   api("build_rag_index", folder);
 });
 
-function wizSetIndexMsg(msg) { const el=document.getElementById("wz-index-msg"); if(el) el.textContent=msg; }
+function wizUpdateProgress(status, pct) {
+  const fill = document.getElementById("wz-progress-fill");
+  const statusEl = document.getElementById("wz-index-status");
+  const pctEl = document.getElementById("wz-index-pct");
+  if(fill) fill.style.width = Math.min(pct || 0, 100) + "%";
+  if(statusEl) statusEl.textContent = status || "Processing...";
+  if(pctEl) pctEl.textContent = Math.round(pct || 0) + "%";
+}
+
 function wizIndexDone(chunks) {
   wizard.chunks = chunks || 0;
   wizard.folderIndexed = true;
-  wizSetIndexMsg("✓ Indexed " + wizard.chunks.toLocaleString() + " chunks");
+  document.getElementById("wz-index-progress").style.display = "none";
+  const msg = document.getElementById("wz-index-msg");
+  msg.className = "wz-msg ok";
+  msg.textContent = "Indexed " + wizard.chunks.toLocaleString() + " document chunks";
 }
+
+function wizIndexError(err) {
+  document.getElementById("wz-index-progress").style.display = "none";
+  const msg = document.getElementById("wz-index-msg");
+  msg.className = "wz-msg fail";
+  msg.textContent = err || "Indexing failed";
+}
+
 document.getElementById("wz-next-3").addEventListener("click", () => wizGoToStep(4));
 document.getElementById("wz-skip-3").addEventListener("click", () => wizGoToStep(4));
 
+// ── Step 4: Ready checklist ──
 function wizPopulateReadyStep() {
-  document.getElementById("wz-stat-chunks").textContent = wizard.chunks.toLocaleString();
-  const model = state.settings.claude_model || "Claude Sonnet";
-  document.getElementById("wz-stat-model").textContent = model.includes("opus") ? "Opus" : model.includes("haiku") ? "Haiku" : "Sonnet";
-  const msgEl = document.getElementById("wz-ready-msg");
-  const parts = ["I'm connected to Claude"];
-  if(wizard.chunks > 0) parts.push("indexed " + wizard.chunks.toLocaleString() + " chunks from your documents");
-  parts.push("and ready to help. Ask me anything!");
-  msgEl.textContent = parts.join(", ");
+  const list = document.getElementById("wz-checklist");
+  const items = [];
+  // Claude connection
+  const modelName = (state.settings?.claude_model || "").includes("opus") ? "Opus" : (state.settings?.claude_model || "").includes("haiku") ? "Haiku" : "Sonnet";
+  items.push({ ok: wizard.apiKeyVerified, label: "Claude " + modelName + " connected", detail: "Paid (per-use)" });
+  // Local AI
+  items.push({ ok: wizard.ollamaReady, label: wizard.ollamaReady ? "Ollama local AI active" : "Local AI skipped", detail: wizard.ollamaReady ? "Free for simple tasks" : "Claude handles everything" });
+  // Documents
+  if(wizard.chunks > 0) {
+    items.push({ ok: true, label: wizard.chunks.toLocaleString() + " document chunks indexed", detail: "Searchable in every chat" });
+  } else {
+    items.push({ ok: false, label: "No documents added yet", detail: "Add anytime in Settings" });
+  }
+  list.innerHTML = items.map(it => `
+    <div class="wz-check-item">
+      <div class="wz-check-icon ${it.ok ? 'ok' : 'skip'}">${it.ok ? '&#10003;' : '&#8212;'}</div>
+      <div class="wz-check-label">${escHtml(it.label)}</div>
+      <div class="wz-check-detail">${escHtml(it.detail)}</div>
+    </div>
+  `).join("");
 }
 
 document.getElementById("wz-finish-btn").addEventListener("click", async () => {
@@ -1577,8 +1624,13 @@ document.getElementById("wz-finish-btn").addEventListener("click", async () => {
   document.getElementById("first-run").classList.remove("visible");
   navigate("chat");
   newConversation();
-  showToast("Welcome to MyAI Agent Hub 🎉","success");
+  showToast("Welcome to MyAI Agent Hub", "success");
 });
+
+// ── Wizard event bridge (called from backend) ──
+window.wizUpdateIndexProgress = function(status, pct) { wizUpdateProgress(status, pct); };
+window.wizIndexDone = wizIndexDone;
+window.wizIndexError = wizIndexError;
 
 // ── Modal helper ──────────────────────────────────────────────────────────────
 function showModal(title, bodyHtml, onConfirm) {
@@ -1627,11 +1679,6 @@ async function copyMessageText(text, btn) {
 
 function openUrl(url) { api("open_url", url); }
 window.openUrl = openUrl;
-
-// ── Wizard for index progress forwarding ──────────────────────────────────────
-window.wizUpdateIndexProgress = function(status) { wizSetIndexMsg(status); };
-window.wizIndexDone = wizIndexDone;
-window.wizIndexError = function(err) { wizSetIndexMsg("Error: " + err); };
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {

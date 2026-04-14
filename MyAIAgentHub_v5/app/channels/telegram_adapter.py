@@ -164,7 +164,7 @@ class TelegramAdapter:
         Send a Yes/No confirmation request to the user.
         callback(True) = approved, callback(False) = denied.
         """
-        self._confirm_callbacks[request_id] = callback
+        self._confirm_callbacks[request_id] = (callback, chat_id)
         text = (
             f"⚠️ *Agent wants to:*\n`{description}`\n\n"
             f"Reply *yes* or *no* (request ID: `{request_id}`)"
@@ -338,13 +338,27 @@ class TelegramAdapter:
         )
 
     def _handle_confirm_reply(self, user_id: int, approved: bool) -> bool:
-        """Process a yes/no reply for the most recent pending confirmation."""
+        """Process a yes/no reply for the most recent pending confirmation from this user."""
         if not self._confirm_callbacks:
             return False
-        # Take the most recent pending confirmation for this user
-        request_id = next(iter(self._confirm_callbacks))
-        cb = self._confirm_callbacks.pop(request_id)
-        threading.Thread(target=cb, args=(approved,), daemon=True).start()
+        # Find the most recent pending confirmation that belongs to this user
+        target_rid = None
+        for rid, meta in reversed(list(self._confirm_callbacks.items())):
+            if isinstance(meta, tuple) and len(meta) == 2:
+                cb, uid = meta
+                if uid == user_id:
+                    target_rid = rid
+                    break
+            else:
+                # Legacy format: callback only (no user tracking) — take first match
+                target_rid = rid
+                cb = meta
+                break
+        if target_rid is None:
+            return False
+        entry = self._confirm_callbacks.pop(target_rid)
+        callback = entry[0] if isinstance(entry, tuple) else entry
+        threading.Thread(target=callback, args=(approved,), daemon=True).start()
         return True
 
     @staticmethod
