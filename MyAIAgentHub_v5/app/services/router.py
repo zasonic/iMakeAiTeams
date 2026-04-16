@@ -19,6 +19,15 @@ v4.1 — Uncertainty-Aware Routing (inspired by AUQ/UAR research):
     signal that captures *epistemic uncertainty*, not just task type.
   - The confidence threshold adapts based on observed router error rates:
     if local routes are producing errors, the threshold tightens.
+
+Enhancement (research-driven, April 2026) — Model Tiering:
+  - When routing to Claude, complexity now maps to a specific model tier:
+      simple  → claude-haiku-4-5-20251001  (cheapest, fast)
+      medium  → claude-sonnet-4-6          (balanced)
+      complex → claude-sonnet-4-6          (default; user can set to opus)
+  - Inspired by RouteLLM (ICLR 2025): 95% GPT-4 quality at 48% cost by
+    routing simple queries to smaller models.
+  - Users can override tiers in Settings. Safe default: Sonnet for all.
 """
 
 import logging
@@ -72,12 +81,31 @@ conversations, stored knowledge, or domain facts that aren't general knowledge.
 # Legacy alias so any external code importing Route still works.
 Route = RouteDecision
 
+# Model tier defaults — user can override in Settings
+_DEFAULT_MODEL_TIERS = {
+    "simple":  "claude-haiku-4-5-20251001",
+    "medium":  "claude-sonnet-4-6",
+    "complex": "claude-sonnet-4-6",
+}
+
 
 class TaskRouter:
     def __init__(self, local_client, settings):
         self.local = local_client
         self._settings = settings
         self._enabled = True  # User can disable routing (always use Claude)
+
+    def get_claude_model_for_complexity(self, complexity: str) -> str:
+        """
+        Return the appropriate Claude model for a given complexity level.
+        Uses model tiering: simple→Haiku, medium→Sonnet, complex→Sonnet/Opus.
+        User can override each tier in Settings.
+        """
+        tiers = dict(_DEFAULT_MODEL_TIERS)
+        custom = self._settings.get("model_tiers", None)
+        if custom and isinstance(custom, dict):
+            tiers.update(custom)
+        return tiers.get(complexity, tiers["medium"])
 
     def classify(self, message: str, history: list | None = None,
                  memory_context=None) -> RouteDecision:

@@ -76,6 +76,65 @@ _STOPWORDS: frozenset[str] = frozenset({
 
 RRF_K = 60  # standard dampening constant (Cormack et al. 2009)
 
+# ── FlashRank reranker (research-driven enhancement, April 2026) ─────────────
+# Cross-encoder reranking after initial retrieval improves precision@K by
+# 10-30% (Pinecone benchmark, 2025). FlashRank is 4MB, CPU-only, sub-30ms.
+# Safe fallback: if not installed, reranking is silently skipped.
+_reranker = None
+_reranker_available = False
+
+try:
+    from flashrank import Ranker, RerankRequest  # type: ignore
+    _reranker_available = True
+except ImportError:
+    Ranker = None  # type: ignore
+    RerankRequest = None  # type: ignore
+    log.info(
+        "flashrank not installed — reranking disabled. "
+        "Install for better RAG quality: pip install flashrank"
+    )
+
+
+def _get_reranker():
+    global _reranker
+    if not _reranker_available:
+        return None
+    if _reranker is None:
+        try:
+            _reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir=".flashrank_cache")
+            log.info("FlashRank reranker loaded (ms-marco-MiniLM-L-12-v2)")
+        except Exception as exc:
+            log.warning("FlashRank init failed (non-fatal): %s", exc)
+            return None
+    return _reranker
+
+
+def rerank_results(query: str, results: list[dict], top_k: int = 10) -> list[dict]:
+    """
+    Rerank search results using FlashRank cross-encoder.
+    Falls back to returning results unchanged if reranker unavailable.
+    Each result dict must have a "content" key.
+    """
+    ranker = _get_reranker()
+    if not ranker or not results:
+        return results[:top_k]
+
+    try:
+        passages = [{"id": str(i), "text": r.get("content", "")[:2000]} for i, r in enumerate(results)]
+        request = RerankRequest(query=query, passages=passages)
+        ranked = ranker.rerank(request)
+
+        reranked = []
+        for item in ranked[:top_k]:
+            idx = int(item["id"])
+            entry = dict(results[idx])
+            entry["rerank_score"] = round(float(item["score"]), 4)
+            reranked.append(entry)
+        return reranked
+    except Exception as exc:
+        log.debug("Reranking failed (non-fatal, returning original order): %s", exc)
+        return results[:top_k]
+
 
 # ── Initialisation (unchanged) ────────────────────────────────────────────────
 
@@ -282,6 +341,7 @@ def search_documents_hybrid(
     top_k: int = 10,
     doc_type: str | None = None,
     method: str = "hybrid",
+    rerank: bool = True,
 ) -> list[dict]:
     """
     Hybrid document search: BM25 + ChromaDB vector search + Reciprocal Rank Fusion.
@@ -316,14 +376,17 @@ def search_documents_hybrid(
     if method in ("hybrid", "vector"):
         vector_results = search_documents(query_text, top_k=top_k * 5, doc_type=doc_type)
 
-    # ── Vector-only: return as-is ─────────────────────────────────────────────
+    # ── Vector-only: return as-is (with optional reranking) ─────────────────
     if method == "vector":
         for r in vector_results:
             r["result_source"] = "vector"
             r["bm25_rank"]     = None
             r["vector_rank"]   = r.get("vector_rank", None)
             r["rrf_score"]     = None
-        return vector_results[:top_k]
+        results = vector_results[:top_k * 2]
+        if rerank and _reranker_available:
+            results = rerank_results(query_text, results, top_k=top_k)
+        return results[:top_k]
 
     # ── BM25-only ─────────────────────────────────────────────────────────────
     if method == "bm25":
@@ -392,6 +455,9 @@ def search_documents_hybrid(
             "bm25_score":   bm25_score_map.get(doc_id),
             "vector_score": vscore,
         })
+
+    if rerank and _reranker_available and out:
+        out = rerank_results(query_text, out, top_k=top_k)
 
     return out
 

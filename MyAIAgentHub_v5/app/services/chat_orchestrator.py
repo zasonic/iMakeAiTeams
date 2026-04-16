@@ -337,15 +337,25 @@ class ChatOrchestrator:
                  sum(len(m.get("content", "")) for m in trimmed), budget_chars)
         return trimmed
 
-    # ── Execution target resolution (Improvement 6) ──────────────────────────
+    # ── Execution target resolution (Improvement 6 + model tiering) ─────────
 
-    def _resolve_target(self, route_model: str, agent: dict | None) -> ExecutionTarget:
-        """Resolve the execution target from the route decision and agent config."""
+    def _resolve_target(self, route_model: str, agent: dict | None,
+                        complexity: str = "complex") -> ExecutionTarget:
+        """
+        Resolve the execution target from the route decision and agent config.
+        When model tiering is enabled and routing to Claude, selects the
+        appropriate model tier based on complexity (Haiku/Sonnet/Opus).
+        """
         agent_max_tokens = int(agent.get("max_tokens", 4096)) if agent else 4096
         if route_model == "claude":
+            tiering_enabled = self._settings.get("model_tiering_enabled", True)
+            if tiering_enabled:
+                model_name = self.router.get_claude_model_for_complexity(complexity)
+            else:
+                model_name = self.claude._model
             return ExecutionTarget(
                 backend="claude",
-                model_name=self.claude._model,
+                model_name=model_name,
                 max_tokens=agent_max_tokens,
             )
         else:
@@ -649,8 +659,8 @@ class ChatOrchestrator:
             "reasoning": route_reason,
         })
 
-        # ── Improvement 6: Resolve execution target ──────────────────────────
-        target = self._resolve_target(route_model, agent)
+        # ── Improvement 6: Resolve execution target (with model tiering) ────
+        target = self._resolve_target(route_model, agent, complexity=complexity)
 
         # ── Hook: pre_send ───────────────────────────────────────────────────
         send_ctx = self.hooks.fire("pre_send", {
@@ -809,10 +819,11 @@ class ChatOrchestrator:
                     "label": "Extended reasoning…",
                     "detail": "Claude is thinking through your request",
                 })
+                thinking_budget = self._settings.get("extended_thinking_budget", 10000)
                 thinking_result = self.claude.extended_thinking_chat(
                     system=full_system,
                     user_message=user_message,
-                    budget_tokens=5000,
+                    budget_tokens=thinking_budget,
                 )
                 if thinking_result.get("thinking"):
                     _emit_event("reasoning_complete", {
@@ -837,6 +848,7 @@ class ChatOrchestrator:
                         response_text, usage = self.claude.stream_multi_turn(
                             full_system, messages, on_token,
                             max_tokens=target.max_tokens,
+                            model=target.model_name,
                         )
                         if usage is not None:
                             tokens_in = getattr(usage, "input_tokens", 0) or 0
@@ -845,6 +857,7 @@ class ChatOrchestrator:
                         result = self.claude.chat_multi_turn(
                             full_system, messages,
                             max_tokens=target.max_tokens,
+                            model=target.model_name,
                         )
                         response_text = result["text"]
                         tokens_in = result.get("input_tokens", 0)

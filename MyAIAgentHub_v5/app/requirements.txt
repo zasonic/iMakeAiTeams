@@ -22,6 +22,11 @@ chromadb>=0.5.0
 # ── Priority 2: Hybrid BM25 + vector search ───────────────────────────────────
 rank-bm25>=0.2.2
 
+# ── Reranking: FlashRank cross-encoder (4MB, CPU-only, sub-30ms) ─────────────
+# Improves RAG precision@K by 10-30% (Pinecone benchmark 2025).
+# Optional — app works without it, reranking silently skipped.
+flashrank>=0.2.0
+
 # ── Channels: Telegram ────────────────────────────────────────────────────────
 python-telegram-bot>=21.0.0
 

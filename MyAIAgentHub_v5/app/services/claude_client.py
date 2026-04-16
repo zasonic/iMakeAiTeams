@@ -8,13 +8,49 @@ Fixes applied:
   - Removed stale prompt-caching beta header (caching is now GA; cache_control
     blocks still work without it)
   - Files API beta header comment updated
+
+Enhancements (research-driven, April 2026):
+  - Prompt caching on system messages: cache_control ephemeral on static system
+    prompts cuts costs 60-80% on multi-turn sessions (Anthropic docs recommend
+    placing cacheable content first, dynamic content last).
+  - Retry with exponential backoff: API transient failures (rate limits, 500s)
+    are retried automatically via tenacity. Non-technical users see fewer
+    "connection error" messages.
+  - Extended thinking budget is now caller-configurable (was hardcoded to 5000).
+  - Friendly error classification: rate limits, auth, overload get distinct
+    messages so users know what to do.
 """
 
 import base64
+import logging
 from pathlib import Path
 from typing import Callable
 
-from anthropic import Anthropic
+from anthropic import Anthropic, APIError, RateLimitError, AuthenticationError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+
+log = logging.getLogger("MyAIEnv.claude_client")
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, RateLimitError):
+        return True
+    if isinstance(exc, APIError) and getattr(exc, "status_code", 0) >= 500:
+        return True
+    return False
+
+
+def _friendly_error(exc: Exception) -> str:
+    if isinstance(exc, AuthenticationError):
+        return "Invalid API key. Check your Anthropic API key in Settings."
+    if isinstance(exc, RateLimitError):
+        return "Rate limited by Anthropic. Wait a moment and try again, or reduce message frequency."
+    if isinstance(exc, APIError):
+        code = getattr(exc, "status_code", "")
+        if code == 529:
+            return "Anthropic API is temporarily overloaded. Try again in a few seconds."
+        return f"Anthropic API error ({code}). Try again shortly."
+    return f"Connection error: {exc}"
 
 
 class ClaudeClient:
@@ -52,6 +88,17 @@ class ClaudeClient:
             self._use_caching = use_caching
 
     # ── Content helpers ───────────────────────────────────────────────────────
+
+    def _build_system(self, system: str) -> list:
+        """
+        Build the system parameter as a list of content blocks.
+        When caching is enabled and the system prompt is long enough (>=1024
+        tokens ~= 4096 chars), apply cache_control so Anthropic caches it.
+        Cache hits cost 90% less and reduce latency up to 85%.
+        """
+        if self._use_caching and len(system) >= 2048:
+            return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+        return system
 
     def _build_content(self, project_summary: str, user_message: str) -> list:
         """
@@ -114,23 +161,34 @@ class ClaudeClient:
 
     # ── Multi-turn chat ───────────────────────────────────────────────────────
 
-    def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096) -> dict:
+    @retry(retry=retry_if_exception(_is_retryable), stop=stop_after_attempt(3),
+           wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
+    def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096,
+                        model: str | None = None) -> dict:
         """
         Send a multi-turn conversation. messages = [{"role":..., "content":...}]
         Returns dict with "text", "input_tokens", "output_tokens".
+        Accepts optional model override for tiered routing.
         """
-        kwargs = {
-            "model": self._model,
-            "max_tokens": max_tokens,
-            "system": system,
-            "messages": messages,
-        }
-        response = self._client.messages.create(**kwargs)
-        return {
-            "text": response.content[0].text,
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
-        }
+        try:
+            kwargs = {
+                "model": model or self._model,
+                "max_tokens": max_tokens,
+                "system": self._build_system(system),
+                "messages": messages,
+            }
+            response = self._client.messages.create(**kwargs)
+            return {
+                "text": response.content[0].text,
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+                "cache_read_tokens": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                "cache_creation_tokens": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+            }
+        except (RateLimitError, APIError) as exc:
+            if not _is_retryable(exc):
+                raise RuntimeError(_friendly_error(exc)) from exc
+            raise
 
     def stream_multi_turn(
         self,
@@ -138,35 +196,42 @@ class ClaudeClient:
         messages: list,
         on_token: Callable[[str], None],
         max_tokens: int = 4096,
+        model: str | None = None,
     ) -> tuple[str, object]:
         """
         Stream a multi-turn conversation with per-token callback.
         Returns (full_response_text, usage) where usage has .input_tokens
         and .output_tokens attributes (or None if unavailable).
+        Accepts optional model override for tiered routing.
 
         Callers must unpack the tuple:
             text, usage = claude.stream_multi_turn(...)
         """
-        kwargs = {
-            "model": self._model,
-            "max_tokens": max_tokens,
-            "system": system,
-            "messages": messages,
-        }
-        full_text = ""
-        usage = None
-        with self._client.messages.stream(**kwargs) as stream:
-            for token in stream.text_stream:
-                on_token(token)
-                full_text += token
-            try:
-                usage = stream.get_final_usage()
-            except Exception:
-                pass  # usage unavailable — caller handles gracefully
-        return full_text, usage
+        try:
+            kwargs = {
+                "model": model or self._model,
+                "max_tokens": max_tokens,
+                "system": self._build_system(system),
+                "messages": messages,
+            }
+            full_text = ""
+            usage = None
+            with self._client.messages.stream(**kwargs) as stream:
+                for token in stream.text_stream:
+                    on_token(token)
+                    full_text += token
+                try:
+                    usage = stream.get_final_usage()
+                except Exception:
+                    pass
+            return full_text, usage
+        except (AuthenticationError, RateLimitError, APIError) as exc:
+            raise RuntimeError(_friendly_error(exc)) from exc
 
     # ── Tool use (agentic loop) ─────────────────────────────────────────────
 
+    @retry(retry=retry_if_exception(_is_retryable), stop=stop_after_attempt(3),
+           wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
     def call_with_tools(
         self,
         system: str,
@@ -184,7 +249,7 @@ class ClaudeClient:
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._build_system(system),
             "messages": messages,
             "tools": tools,
         }
@@ -250,6 +315,8 @@ class ClaudeClient:
 
     # ── Extended thinking ─────────────────────────────────────────────────────
 
+    @retry(retry=retry_if_exception(_is_retryable), stop=stop_after_attempt(2),
+           wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
     def extended_thinking_chat(
         self,
         system: str,
@@ -259,24 +326,28 @@ class ClaudeClient:
     ) -> dict:
         """
         Run a chat with extended thinking enabled.
+        budget_tokens is now configurable via settings (default 10000).
         Returns a dict with keys "thinking" and "answer".
         """
         thinking_model = model or self._model
-        response = self._client.messages.create(
-            model=thinking_model,
-            max_tokens=16000,
-            system=system,
-            thinking={
-                "type": "enabled",
-                "budget_tokens": budget_tokens,
-            },
-            messages=[{"role": "user", "content": user_message}],
-        )
-        thinking_text = ""
-        answer_text = ""
-        for block in response.content:
-            if block.type == "thinking":
-                thinking_text = block.thinking
-            elif block.type == "text":
-                answer_text = block.text
-        return {"thinking": thinking_text, "answer": answer_text}
+        try:
+            response = self._client.messages.create(
+                model=thinking_model,
+                max_tokens=max(16000, budget_tokens + 6000),
+                system=self._build_system(system),
+                thinking={
+                    "type": "enabled",
+                    "budget_tokens": budget_tokens,
+                },
+                messages=[{"role": "user", "content": user_message}],
+            )
+            thinking_text = ""
+            answer_text = ""
+            for block in response.content:
+                if block.type == "thinking":
+                    thinking_text = block.thinking
+                elif block.type == "text":
+                    answer_text = block.text
+            return {"thinking": thinking_text, "answer": answer_text}
+        except (AuthenticationError, RateLimitError, APIError) as exc:
+            raise RuntimeError(_friendly_error(exc)) from exc

@@ -80,8 +80,18 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     # Agent / project
     "agent_project_root":            (str,   ""),
 
+    # Extended thinking
+    "extended_thinking_budget":      (int,   10000),
+
+    # Model tiering (research-driven: RouteLLM-inspired cost optimization)
+    "model_tiering_enabled":         (bool,  True),
+
+    # Reranking (FlashRank cross-encoder, CPU-only, sub-30ms)
+    "reranking_enabled":             (bool,  True),
+
     # Advanced (complex types)
     "model_prices":                  ((dict, type(None)),  None),
+    "model_tiers":                   ((dict, type(None)),  None),
     "hooks":                         ((list, type(None)),  None),
     "channel_allowlist":             ((dict, type(None)),  None),
 
