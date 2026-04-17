@@ -212,15 +212,16 @@ def full_compact(
     messages:      list[dict],
     claude_client  = None,
     local_client   = None,
-) -> CompactResult:
+) -> tuple[CompactResult, list[dict] | None]:
     """
     Generate a thorough summary using the best available model and
     replace the entire history with it.
+    Returns (result, new_messages) where new_messages is None on failure.
     """
     total = len(messages)
     if total <= SESSION_KEEP_RECENT:
         return CompactResult(CompactLayer.FULL, False, total, total,
-                             detail="too few messages")
+                             detail="too few messages"), None
 
     # Build conversation text (capped to avoid context overflow in the
     # summary call itself)
@@ -229,7 +230,7 @@ def full_compact(
     for m in messages:
         snippet = f"{m.get('role', '?').upper()}: {(m.get('content') or '')[:500]}"
         if char_count + len(snippet) > 12_000:
-            lines.append("… [earlier messages omitted for brevity] …")
+            lines.append("... [earlier messages omitted for brevity] ...")
             break
         lines.append(snippet)
         char_count += len(snippet)
@@ -261,7 +262,7 @@ def full_compact(
 
     if not summary:
         return CompactResult(CompactLayer.FULL, False, total, total,
-                             detail="all models failed")
+                             detail="all models failed"), None
 
     # Keep only the last 2 messages + the summary
     keep_last = messages[-2:] if len(messages) >= 2 else messages[-1:]
@@ -277,8 +278,8 @@ def full_compact(
         messages_before=total,
         messages_after=len(new_history),
         chars_saved=sum(len(m.get("content", "")) for m in messages),
-        detail=f"full-compacted {total} messages → {len(new_history)}",
-    )
+        detail=f"full-compacted {total} messages -> {len(new_history)}",
+    ), new_history
 
 
 # ── Orchestrator ──────────────────────────────────────────────────────────────
@@ -330,81 +331,71 @@ class ContextCompressor:
 
         # Tier 2: session compact
         if msg_count > SESSION_COMPACT_TRIGGER:
-            # Pre-compaction memory flush (OpenClaw pattern):
-            # Extract durable facts BEFORE summarization destroys them
-            if self.local_client and hasattr(self.local_client, "is_available"):
+            if not self.local_client or not self.local_client.is_available():
+                self._consecutive_failures += 1
+            else:
+                # Pre-compaction memory flush (OpenClaw pattern):
+                # Extract durable facts BEFORE summarization destroys them
                 try:
-                    if self.local_client.is_available():
-                        old_text = "\n".join(
-                            f"{m.get('role','?')}: {(m.get('content') or '')[:200]}"
-                            for m in messages[:SESSION_COMPACT_TRIGGER]
-                        )
-                        flush_result = self.local_client.chat(
-                            "Extract 1-3 important facts worth remembering from this conversation. "
-                            "Return ONLY a JSON array of short strings. If nothing notable, return [].",
-                            old_text[:3000],
-                            max_tokens=200,
-                        )
-                        if flush_result:
-                            log.debug("Pre-compaction flush: %s", flush_result[:100])
-                            # Facts will be picked up by memory.extract_facts on next turn
+                    old_text = "\n".join(
+                        f"{m.get('role','?')}: {(m.get('content') or '')[:200]}"
+                        for m in messages[:SESSION_COMPACT_TRIGGER]
+                    )
+                    flush_result = self.local_client.chat(
+                        "Extract 1-3 important facts worth remembering from this conversation. "
+                        "Return ONLY a JSON array of short strings. If nothing notable, return [].",
+                        old_text[:3000],
+                        max_tokens=200,
+                    )
+                    if flush_result:
+                        log.debug("Pre-compaction flush: %s", flush_result[:100])
                 except Exception:
                     pass  # best-effort, never block compaction
 
-            split = max(0, msg_count - SESSION_KEEP_RECENT)
-            old_msgs = messages[:split]
-            recent   = messages[split:]
-            lines = []
-            for m in old_msgs:
-                lines.append(f"{m.get('role','?').upper()}: {(m.get('content') or '')[:300]}")
-            result = session_compact(messages, self.local_client)
-            if result.success:
-                self._consecutive_failures = 0
-                self._last_compact_time = now
-                log.info("Session compact: %s", result.detail)
+                split = max(0, msg_count - SESSION_KEEP_RECENT)
+                old_msgs = messages[:split]
+                recent   = messages[split:]
+                lines = []
+                char_count = 0
+                for m in old_msgs:
+                    snippet = f"{m.get('role','?').upper()}: {(m.get('content') or '')[:300]}"
+                    if char_count + len(snippet) > SESSION_SUMMARY_MAX_CHARS:
+                        break
+                    lines.append(snippet)
+                    char_count += len(snippet)
+
                 try:
                     summary = self.local_client.chat(
                         _SESSION_SUMMARY_PROMPT,
-                        "\n".join(lines[:20]),
+                        "\n".join(lines),
                         max_tokens=400,
                     )
                     summary_msg = {"role": "system",
                                    "content": f"[Earlier conversation summary: {summary.strip()}]"}
+                    result = CompactResult(
+                        layer=CompactLayer.SESSION,
+                        success=True,
+                        messages_before=msg_count,
+                        messages_after=1 + len(recent),
+                        chars_saved=sum(len(m.get("content", "")) for m in old_msgs),
+                        detail=f"summarized {len(old_msgs)} messages -> 1 summary",
+                    )
+                    self._consecutive_failures = 0
+                    self._last_compact_time = now
+                    log.info("Session compact: %s", result.detail)
                     return [summary_msg] + recent, result
-                except Exception:
-                    pass
-            else:
-                self._consecutive_failures += 1
+                except Exception as exc:
+                    log.warning("Session compact failed: %s", exc)
+                    self._consecutive_failures += 1
 
         # Tier 3: full compact
         if total_chars > ESTIMATED_CONTEXT_BUDGET:
-            result = full_compact(messages, self.claude_client, self.local_client)
-            if result.success:
+            result, new_messages = full_compact(messages, self.claude_client, self.local_client)
+            if result.success and new_messages is not None:
                 self._consecutive_failures = 0
                 self._last_compact_time = now
                 log.info("Full compact: %s", result.detail)
-                keep_last = messages[-2:] if len(messages) >= 2 else messages[-1:]
-                # Re-generate summary (result doesn't carry the text)
-                try:
-                    lines = []
-                    for m in messages:
-                        lines.append(f"{m.get('role','?').upper()}: {(m.get('content') or '')[:500]}")
-                    conv_text = "\n".join(lines[:30])
-                    if self.claude_client:
-                        r = self.claude_client.chat_multi_turn(
-                            _FULL_SUMMARY_PROMPT,
-                            [{"role": "user", "content": conv_text}],
-                            max_tokens=1000,
-                        )
-                        summary = r.get("text", "")
-                    else:
-                        summary = self.local_client.chat(
-                            _FULL_SUMMARY_PROMPT, conv_text, max_tokens=800)
-                    summary_msg = {"role": "system",
-                                   "content": f"[Full conversation summary: {summary.strip()}]"}
-                    return [summary_msg] + keep_last, result
-                except Exception:
-                    pass
+                return new_messages, result
             else:
                 self._consecutive_failures += 1
 

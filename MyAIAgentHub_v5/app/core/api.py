@@ -337,13 +337,13 @@ class API:
             ram_gb = 0.0
 
         if ram_gb >= 32:
-            recommended, rec_reason = "llama3:8b", f"{ram_gb} GB RAM — 8B model runs comfortably"
+            recommended, rec_reason = "qwen2.5:7b", f"{ram_gb} GB RAM — 7B model runs comfortably with room to spare"
         elif ram_gb >= 16:
-            recommended, rec_reason = "llama3:8b", f"{ram_gb} GB RAM — 8B model should work well"
+            recommended, rec_reason = "qwen2.5:7b", f"{ram_gb} GB RAM — 7B model should work well"
         elif ram_gb >= 8:
-            recommended, rec_reason = "phi3:mini", f"{ram_gb} GB RAM — smaller model recommended"
+            recommended, rec_reason = "phi4-mini", f"{ram_gb} GB RAM — Phi-4 Mini (3.8B) fits well, strong at classification"
         else:
-            recommended, rec_reason = "phi3:mini", f"{ram_gb} GB RAM — lightweight model recommended"
+            recommended, rec_reason = "phi4-mini", f"{ram_gb} GB RAM — Phi-4 Mini (3.8B) lightweight model recommended"
 
         ollama_running = self._local.is_available(backend="ollama")
         lmstudio_running = self._local.is_available(backend="lmstudio")

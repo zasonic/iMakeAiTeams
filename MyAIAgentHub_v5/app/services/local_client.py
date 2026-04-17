@@ -23,6 +23,8 @@ _FALLBACK = "[Local model unavailable — no response]"
 class LocalClient:
     def __init__(self, settings: Settings):
         self._settings = settings
+        self._avail_cache: dict[str, tuple[bool, float]] = {}
+        self._avail_ttl = 10.0  # seconds
 
     def _url(self, backend: str | None = None) -> str:
         b = backend or self._settings.get("default_local_backend", "ollama")
@@ -34,14 +36,21 @@ class LocalClient:
         return backend or self._settings.get("default_local_backend", "ollama")
 
     def is_available(self, backend: str | None = None) -> bool:
-        """Check if a local model backend is reachable."""
+        """Check if a local model backend is reachable, with 10-second TTL cache."""
+        import time
+        b = self._backend(backend)
+        cached = self._avail_cache.get(b)
+        now = time.monotonic()
+        if cached and (now - cached[1]) < self._avail_ttl:
+            return cached[0]
         try:
-            b = self._backend(backend)
             url = self._url(b)
             endpoint = "/api/tags" if b == "ollama" else "/v1/models"
-            return requests.get(url + endpoint, timeout=2).status_code == 200
+            result = requests.get(url + endpoint, timeout=2).status_code == 200
         except Exception:
-            return False
+            result = False
+        self._avail_cache[b] = (result, now)
+        return result
 
     def list_models(self, backend: str | None = None) -> list[str]:
         """Return available model names."""
@@ -60,6 +69,15 @@ class LocalClient:
             log.warning(f"list_models failed for backend '{b}': {exc}")
             return []
 
+    def _build_payload(self, model: str, messages: list, max_tokens: int,
+                        stream: bool, backend: str) -> dict:
+        payload: dict = {"model": model, "messages": messages, "stream": stream}
+        if backend == "ollama":
+            payload["options"] = {"num_predict": max_tokens}
+        else:
+            payload["max_tokens"] = max_tokens
+        return payload
+
     def chat(self, system: str, user_message: str, model: str | None = None,
              max_tokens: int = 2048) -> str:
         """Single-turn chat. Returns response text, or a fallback string on error."""
@@ -70,8 +88,7 @@ class LocalClient:
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": user_message})
-        payload = {"model": model, "messages": messages,
-                   "max_tokens": max_tokens, "stream": False}
+        payload = self._build_payload(model, messages, max_tokens, False, b)
         try:
             if b == "ollama":
                 r = requests.post(url + "/api/chat", json=payload, timeout=120)
@@ -95,8 +112,7 @@ class LocalClient:
         if system:
             msgs.append({"role": "system", "content": system})
         msgs.extend(messages)
-        payload = {"model": model, "messages": msgs,
-                   "max_tokens": max_tokens, "stream": False}
+        payload = self._build_payload(model, msgs, max_tokens, False, b)
         try:
             if b == "ollama":
                 r = requests.post(url + "/api/chat", json=payload, timeout=120)
@@ -121,10 +137,9 @@ class LocalClient:
         if system:
             msgs.append({"role": "system", "content": system})
         msgs.extend(messages)
-        payload = {"model": model, "messages": msgs,
-                   "max_tokens": max_tokens, "stream": True}
+        payload = self._build_payload(model, msgs, max_tokens, True, b)
         endpoint = "/api/chat" if b == "ollama" else "/v1/chat/completions"
-        full = ""
+        chunks: list[str] = []
         try:
             with requests.post(url + endpoint, json=payload, stream=True, timeout=120) as resp:
                 resp.raise_for_status()
@@ -145,13 +160,13 @@ class LocalClient:
                         )
                         if text:
                             on_token(text)
-                            full += text
+                            chunks.append(text)
                     except Exception:
                         continue
         except Exception as exc:
             log.warning(f"LocalClient.stream_multi_turn failed: {exc}. Falling back to non-streaming.")
-            # Fallback: try non-streaming so the user still gets a response
             full = self.chat_multi_turn(system, messages, model=model, max_tokens=max_tokens)
             if full and full != _FALLBACK:
                 on_token(full)
-        return full
+            return full
+        return "".join(chunks)

@@ -53,6 +53,20 @@ class ClaudeClient:
 
     # ── Content helpers ───────────────────────────────────────────────────────
 
+    def _build_system_blocks(self, system: str) -> list:
+        """
+        Wrap the system prompt in a cache-eligible block so multi-turn
+        conversations benefit from prompt caching (90% cost reduction
+        on cache hits).  Safe fallback: if the API ignores cache_control
+        the request still works identically.
+        """
+        if not system:
+            return []
+        block = {"type": "text", "text": system}
+        if self._use_caching:
+            block["cache_control"] = {"type": "ephemeral"}
+        return [block]
+
     def _build_content(self, project_summary: str, user_message: str) -> list:
         """
         Build the content list for a standard chat request.
@@ -105,32 +119,39 @@ class ClaudeClient:
             "system": system,
             "messages": [{"role": "user", "content": content}],
         }
-        full_text = ""
+        chunks: list[str] = []
         with self._client.messages.stream(**kwargs) as stream:
             for token in stream.text_stream:
                 on_token(token)
-                full_text += token
-        return full_text
+                chunks.append(token)
+        return "".join(chunks)
 
     # ── Multi-turn chat ───────────────────────────────────────────────────────
 
     def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096) -> dict:
         """
         Send a multi-turn conversation. messages = [{"role":..., "content":...}]
-        Returns dict with "text", "input_tokens", "output_tokens".
+        Returns dict with "text", "input_tokens", "output_tokens",
+        and cache hit/creation token counts when available.
         """
+        system_blocks = self._build_system_blocks(system)
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": system_blocks,
             "messages": messages,
         }
         response = self._client.messages.create(**kwargs)
-        return {
+        result = {
             "text": response.content[0].text,
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
         }
+        if hasattr(response.usage, "cache_read_input_tokens"):
+            result["cache_read_input_tokens"] = response.usage.cache_read_input_tokens
+        if hasattr(response.usage, "cache_creation_input_tokens"):
+            result["cache_creation_input_tokens"] = response.usage.cache_creation_input_tokens
+        return result
 
     def stream_multi_turn(
         self,
@@ -147,23 +168,24 @@ class ClaudeClient:
         Callers must unpack the tuple:
             text, usage = claude.stream_multi_turn(...)
         """
+        system_blocks = self._build_system_blocks(system)
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": system_blocks,
             "messages": messages,
         }
-        full_text = ""
+        chunks: list[str] = []
         usage = None
         with self._client.messages.stream(**kwargs) as stream:
             for token in stream.text_stream:
                 on_token(token)
-                full_text += token
+                chunks.append(token)
             try:
                 usage = stream.get_final_usage()
             except Exception:
-                pass  # usage unavailable — caller handles gracefully
-        return full_text, usage
+                pass
+        return "".join(chunks), usage
 
     # ── Tool use (agentic loop) ─────────────────────────────────────────────
 

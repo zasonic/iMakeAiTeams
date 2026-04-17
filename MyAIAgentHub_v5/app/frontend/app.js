@@ -682,6 +682,8 @@ function clearTypingIndicator() {
   document.getElementById("typing-indicator").classList.remove("visible");
 }
 
+let _streamingRafId = null;
+let _pendingStreamText = null;
 function updateStreamingBubble(text) {
   if(!_streamingEl) {
     clearTypingIndicator();
@@ -691,8 +693,16 @@ function updateStreamingBubble(text) {
     _streamingEl.innerHTML = `<div class="msg-bubble"></div>`;
     msgs.insertBefore(_streamingEl, document.getElementById("typing-indicator"));
   }
-  _streamingEl.querySelector(".msg-bubble").innerHTML = renderMarkdown(text);
-  scrollToBottom();
+  _pendingStreamText = text;
+  if(!_streamingRafId) {
+    _streamingRafId = requestAnimationFrame(() => {
+      _streamingRafId = null;
+      if(_streamingEl && _pendingStreamText !== null) {
+        _streamingEl.querySelector(".msg-bubble").innerHTML = renderMarkdown(_pendingStreamText);
+        scrollToBottom();
+      }
+    });
+  }
 }
 
 function finalizeStreamingMessage(payload) {
