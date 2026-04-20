@@ -10,12 +10,18 @@ from pathlib import Path
 
 import webview
 
+from core import paths
 from core.settings import Settings
 from core.events import EventBus
 from core.api import API
 from core.first_run import needs_first_run
 
 APP_ROOT = Path(__file__).parent
+USER_DIR = paths.user_dir()
+# Must run before logging.basicConfig: a FileHandler pointed at APP_ROOT/app.log
+# would pin the old location and orphan the migrated log file.
+paths.migrate_legacy_install(APP_ROOT, USER_DIR)
+
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 logging.basicConfig(
@@ -23,14 +29,14 @@ logging.basicConfig(
     format=LOG_FORMAT,
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(APP_ROOT / "app.log", encoding="utf-8"),
+        logging.FileHandler(paths.log_path(), encoding="utf-8"),
     ],
 )
 log = logging.getLogger("MyAIAgentHub")
 
-settings = Settings(APP_ROOT / "settings.json")
+settings = Settings(paths.settings_path())
 bus = EventBus()
-api = API(settings, bus, APP_ROOT, log)
+api = API(settings, bus, USER_DIR, log)
 
 window = webview.create_window(
     title="iMakeAiTeams",
@@ -101,12 +107,24 @@ def _on_loaded():
 def _on_closing():
     def _cleanup():
         log.info("Window closing — shutting down services…")
-        api.shutdown()
-        log.info("Shutdown complete.")
+        try:
+            api.shutdown()
+            log.info("Shutdown complete.")
+        except Exception as exc:
+            log.warning("api.shutdown() raised: %s", exc, exc_info=True)
 
     t = threading.Thread(target=_cleanup, daemon=True)
     t.start()
-    t.join(timeout=4)
+    # 15s covers ChromaDB flush + WAL checkpoint on slow machines. If we still
+    # time out, surface the non-daemon threads still alive so zombies are
+    # diagnosable instead of silent.
+    t.join(timeout=15)
+    if t.is_alive():
+        alive = [
+            th.name for th in threading.enumerate()
+            if th is not threading.current_thread() and not th.daemon
+        ]
+        log.warning("Shutdown did not complete within 15s; live threads: %s", alive)
 
 
 window.events.loaded += _on_loaded

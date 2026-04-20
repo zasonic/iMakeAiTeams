@@ -34,6 +34,7 @@ from typing import Any
 
 import requests
 
+from core import paths
 from core.settings import Settings
 from core.events import EventBus
 from core.worker import run_in_thread
@@ -77,93 +78,153 @@ class API:
         self._window = None
         self._stop_chat = threading.Event()
 
-        # ── Claude client ─────────────────────────────────────────────────────
-        self._claude = ClaudeClient(
-            api_key=self._settings.get("claude_api_key", ""),
-            model=self._settings.get("claude_model", "claude-sonnet-4-6"),
-            use_caching=self._settings.get("claude_prompt_caching", True),
+        # Each service records its init status here. Writers only mutate this
+        # dict during __init__ on the main thread; downstream readers (channel
+        # manager on a background thread) read it snapshot-only after init
+        # completes, so no lock is required.
+        self._status: dict[str, dict] = {}
+
+        # ── Claude client (required — no useful app without it) ───────────────
+        self._claude = self._safe_init(
+            "claude_client",
+            lambda: ClaudeClient(
+                api_key=self._settings.get("claude_api_key", ""),
+                model=self._settings.get("claude_model", "claude-sonnet-4-6"),
+                use_caching=self._settings.get("claude_prompt_caching", True),
+            ),
+            required=True,
         )
 
         # ── Local model client ────────────────────────────────────────────────
-        self._local = LocalClient(self._settings)
+        self._local = self._safe_init(
+            "local_client",
+            lambda: LocalClient(self._settings),
+        )
+
+        # ── Shared embedding model (RAG + semantic search share the ~90MB ST) ─
+        _shared_st_model = self._safe_init(
+            "embedder",
+            self._load_shared_embedder,
+        )
 
         # ── RAG index ─────────────────────────────────────────────────────────
-        # Load the embedding model once and share it with both RAGIndex and
-        # semantic_search so the ~90MB transformer is only in memory once.
-        _shared_st_model = None
-        try:
-            from sentence_transformers import SentenceTransformer as _ST
-            _shared_st_model = _ST("all-MiniLM-L6-v2")
-            log.info("Shared SentenceTransformer model loaded.")
-        except Exception as exc:
-            log.warning(f"SentenceTransformer unavailable — RAG and semantic search disabled: {exc}")
-            log.warning("Embedding model not available — RAG and semantic search disabled. "
-                        "This may be because sentence-transformers is still downloading.")
+        self._rag = self._safe_init(
+            "rag_index",
+            lambda: RAGIndex(model=_shared_st_model),
+        )
+        if self._rag is not None:
+            _rag_path = paths.rag_cache_dir() / "index.npz"
+            if _rag_path.exists():
+                self._safe_init(
+                    "rag_load",
+                    lambda: (self._rag.load(_rag_path), self._rag.chunk_count())[1],
+                )
+            else:
+                self._status["rag_load"] = {"ok": True, "error": None}
 
-        self._rag = RAGIndex(model=_shared_st_model)
-        _rag_path = app_root / "rag_cache" / "index.npz"
-        if _rag_path.exists():
-            try:
-                self._rag.load(_rag_path)
-                log.info(f"RAG index loaded: {self._rag.chunk_count()} chunks")
-            except Exception as exc:
-                log.warning(f"RAG index load failed: {exc}")
-
-        # ── Database ──────────────────────────────────────────────────────────
-        _db_module.init_db(app_root)
+        # ── Database (required — chat/memory can't degrade without it) ────────
+        self._safe_init(
+            "database",
+            lambda: _db_module.init_db(paths.db_path()),
+            required=True,
+        )
 
         # ── Prompts ───────────────────────────────────────────────────────────
-        seeded = prompt_library.seed_prompts()
-        if seeded:
-            log.info(f"Seeded {seeded} prompt(s)")
+        self._safe_init("prompts_seed", prompt_library.seed_prompts)
 
         # ── Agents ────────────────────────────────────────────────────────────
-        a_seeded = seed_agents()
-        if a_seeded:
-            log.info(f"Seeded {a_seeded} built-in agent(s)")
+        self._safe_init("agents_seed", seed_agents)
 
         # ── Priority 1: refresh built-in ToM on every startup ─────────────────
-        try:
-            n = update_builtin_tom()
-            if n:
-                log.info(f"Refreshed Theory of Mind for {n} built-in agent(s).")
-        except Exception as exc:
-            log.warning(f"ToM update skipped: {exc}")
+        self._safe_init("theory_of_mind", update_builtin_tom)
 
         # ── Priority 5: set firewall default based on API key ─────────────────
-        try:
+        def _firewall_init():
             has_key = bool(self._settings.get("claude_api_key", "").strip())
             input_sanitizer.set_firewall_enabled(has_key)
-            log.info(f"Firewall default: {'ON' if has_key else 'OFF (no API key)'}")
-        except Exception as exc:
-            log.warning(f"Firewall init skipped: {exc}")
+            return has_key
+        self._safe_init("firewall", _firewall_init)
 
         # ── Semantic search ───────────────────────────────────────────────────
-        semantic_search.init_vector_store(app_root, shared_model=_shared_st_model)
-        semantic_search.start_background_indexer(interval_seconds=60)
+        self._safe_init(
+            "semantic_search",
+            lambda: semantic_search.init_vector_store(
+                paths.vector_store_dir(), shared_model=_shared_st_model,
+            ),
+        )
+        self._safe_init(
+            "semantic_search_indexer",
+            lambda: semantic_search.start_background_indexer(interval_seconds=60),
+        )
 
         # ── Memory manager ────────────────────────────────────────────────────
-        self._memory = MemoryManager(
-            rag_index=self._rag,
-            semantic_search_mod=semantic_search,
-            local_client=self._local,
+        self._memory = self._safe_init(
+            "memory_manager",
+            lambda: MemoryManager(
+                rag_index=self._rag,
+                semantic_search_mod=semantic_search,
+                local_client=self._local,
+            ),
         )
 
         # ── Task router ───────────────────────────────────────────────────────
-        self._router = TaskRouter(self._local, self._settings)
+        self._router = self._safe_init(
+            "router",
+            lambda: TaskRouter(self._local, self._settings),
+        )
 
         # ── Hook manager ──────────────────────────────────────────────────────
-        self._hooks = HookManager(self._settings)
+        self._hooks = self._safe_init(
+            "hook_manager",
+            lambda: HookManager(self._settings),
+        )
 
         # ── Chat orchestrator ─────────────────────────────────────────────────
-        self._chat = ChatOrchestrator(
-            claude_client=self._claude,
-            local_client=self._local,
-            router=self._router,
-            memory=self._memory,
-            settings=self._settings,
-            hook_manager=self._hooks,
+        self._chat = self._safe_init(
+            "chat_orchestrator",
+            lambda: ChatOrchestrator(
+                claude_client=self._claude,
+                local_client=self._local,
+                router=self._router,
+                memory=self._memory,
+                settings=self._settings,
+                hook_manager=self._hooks,
+            ),
         )
+
+    # ── Fail-soft service init ────────────────────────────────────────────────
+
+    def _safe_init(self, name, factory, *, required=False, fallback=None):
+        """Run ``factory()`` and record the outcome in self._status[name].
+
+        If ``required`` is True, re-raise on failure — the caller treats this
+        service as a ship-blocker and the app should fail loudly. Otherwise
+        log a warning, mark the service unavailable, and return ``fallback``.
+        """
+        try:
+            result = factory()
+            self._status[name] = {"ok": True, "error": None}
+            return result
+        except Exception as exc:
+            self._status[name] = {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            self._log.warning("Service %s failed to initialise: %s", name, exc,
+                              exc_info=True)
+            if required:
+                raise
+            return fallback
+
+    def _load_shared_embedder(self):
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        self._log.info("Shared SentenceTransformer model loaded.")
+        return model
+
+    def service_status(self) -> dict:
+        """Return a snapshot of per-service init status for the UI."""
+        return {name: dict(entry) for name, entry in self._status.items()}
 
     # ── Window reference ─────────────────────────────────────────────────────
 
@@ -558,7 +619,7 @@ class API:
                     self._emit("rag_progress", {"status": status, "pct": pct})
 
                 self._rag.build_from_folder(Path(folder_path), on_progress=_on_progress)
-                cache_path = self._app_root / "rag_cache" / "index.npz"
+                cache_path = paths.rag_cache_dir() / "index.npz"
                 self._rag.save(cache_path)
                 count = self._rag.chunk_count()
                 self._emit("rag_done", {"chunks": count, "folder": folder_path})
@@ -593,7 +654,7 @@ class API:
             p = Path(file_path)
             n = self._rag.add_file(p)
             if n:
-                cache_path = self._app_root / "rag_cache" / "index.npz"
+                cache_path = paths.rag_cache_dir() / "index.npz"
                 self._rag.save(cache_path)
             return {"chunks_added": n, "total_chunks": self._rag.chunk_count()}
         except Exception as e:
@@ -604,7 +665,7 @@ class API:
         try:
             n = self._rag.add_text(text, source=source)
             if n:
-                cache_path = self._app_root / "rag_cache" / "index.npz"
+                cache_path = paths.rag_cache_dir() / "index.npz"
                 self._rag.save(cache_path)
             return {"chunks_added": n, "total_chunks": self._rag.chunk_count()}
         except Exception as e:
@@ -613,18 +674,21 @@ class API:
     def rag_clear(self) -> dict:
         """Clear the entire RAG index."""
         self._rag.clear()
-        cache_path = self._app_root / "rag_cache" / "index.npz"
+        cache_path = paths.rag_cache_dir() / "index.npz"
         if cache_path.exists():
             cache_path.unlink()
-        chunks_path = self._app_root / "rag_cache" / "index_chunks.json"
+        chunks_path = paths.rag_cache_dir() / "index_chunks.json"
         if chunks_path.exists():
             chunks_path.unlink()
         return {"ok": True}
 
     def rag_status(self) -> dict:
+        status = self._status.get("rag_load", {}) if hasattr(self, "_status") else {}
         return {
-            "chunk_count": self._rag.chunk_count(),
-            "index_exists": (self._app_root / "rag_cache" / "index.npz").exists(),
+            "chunk_count": self._rag.chunk_count() if self._rag is not None else 0,
+            "index_exists": (paths.rag_cache_dir() / "index.npz").exists(),
+            "available": bool(status.get("ok", self._rag is not None)),
+            "error": status.get("error"),
         }
 
     def rag_search(self, query: str, top_k: int = 5) -> list:
@@ -1033,7 +1097,8 @@ class API:
         )
 
     def semantic_search_available(self) -> bool:
-        return semantic_search.is_available()
+        status = self._status.get("semantic_search", {})
+        return bool(status.get("ok")) and semantic_search.is_available()
 
     def save_memory(self, content: str, category: str = "fact") -> dict:
         mem_id = self._memory.save_explicit_memory(content, category)
@@ -1156,10 +1221,11 @@ class API:
         Parse CHANGELOG.md into a list of {version, body} dicts,
         newest first. Falls back to empty list if the file isn't found.
         """
-        changelog_path = self._app_root.parent / "CHANGELOG.md"
+        # CHANGELOG lives next to the source tree, not in user data
+        install_root = paths.install_root()
+        changelog_path = install_root / "CHANGELOG.md"
         if not changelog_path.exists():
-            # Try one level up (in case app_root is app/)
-            changelog_path = self._app_root.parent.parent / "CHANGELOG.md"
+            changelog_path = install_root.parent / "CHANGELOG.md"
         if not changelog_path.exists():
             return []
         try:

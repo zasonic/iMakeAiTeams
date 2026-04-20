@@ -79,10 +79,13 @@ RRF_K = 60  # standard dampening constant (Cormack et al. 2009)
 
 # ── Initialisation (unchanged) ────────────────────────────────────────────────
 
-def init_vector_store(app_root: Path, shared_model=None) -> bool:
+def init_vector_store(vector_dir: Path, shared_model=None) -> bool:
     """
     Initialise ChromaDB persistent client and embedding function.
     Also loads BM25 corpus from SQLite into memory.
+
+    ``vector_dir`` is the absolute directory where ChromaDB should persist.
+    Callers should pass ``core.paths.vector_store_dir()``.
     """
     global _chroma_client, _documents_col, _memory_col, _embed_fn, _initialized
 
@@ -99,8 +102,7 @@ def init_vector_store(app_root: Path, shared_model=None) -> bool:
             )
             return False
 
-        vector_dir = app_root / "myai_vector_store"
-        vector_dir.mkdir(exist_ok=True)
+        vector_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             if shared_model is not None:
