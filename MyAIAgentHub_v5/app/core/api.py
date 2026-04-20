@@ -35,6 +35,7 @@ from typing import Any
 import requests
 
 from core import paths
+from core.service_guard import requires as _requires
 from core.settings import Settings
 from core.events import EventBus
 from core.worker import run_in_thread
@@ -323,8 +324,8 @@ class API:
         if key == "smart_routing_enabled":
             key = "routing_enabled"
         self._settings.set(key, value)
-        # Keep live services in sync
-        if key == "routing_enabled":
+        # Keep live services in sync — router may be None if init failed.
+        if key == "routing_enabled" and self._router is not None:
             self._router.set_enabled(bool(value))
         if key == "firewall_enabled":
             try:
@@ -344,7 +345,8 @@ class API:
             )
         if key in ("routing_enabled", "smart_routing_enabled"):
             self._settings.set("routing_enabled", bool(value))
-            self._router.set_enabled(bool(value))
+            if self._router is not None:
+                self._router.set_enabled(bool(value))
         if key == "firewall_enabled":
             try:
                 from services import input_sanitizer as _san
@@ -406,10 +408,14 @@ class API:
         else:
             recommended, rec_reason = "phi3:mini", f"{ram_gb} GB RAM — lightweight model recommended"
 
-        ollama_running = self._local.is_available(backend="ollama")
-        lmstudio_running = self._local.is_available(backend="lmstudio")
-        ollama_models = self._local.list_models(backend="ollama") if ollama_running else []
-        lmstudio_models = self._local.list_models(backend="lmstudio") if lmstudio_running else []
+        if self._local is not None:
+            ollama_running = self._local.is_available(backend="ollama")
+            lmstudio_running = self._local.is_available(backend="lmstudio")
+            ollama_models = self._local.list_models(backend="ollama") if ollama_running else []
+            lmstudio_models = self._local.list_models(backend="lmstudio") if lmstudio_running else []
+        else:
+            ollama_running = lmstudio_running = False
+            ollama_models = lmstudio_models = []
 
         return {
             "ram_gb": ram_gb,
@@ -526,6 +532,7 @@ class API:
         """Stop the current streaming response."""
         self._stop_chat.set()
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_new_conversation(self, agent_id: str = "",
                               title: str = "New conversation") -> dict:
         """Create a new conversation and return its id."""
@@ -534,20 +541,25 @@ class API:
         )
         return {"id": cid}
 
+    @_requires("chat_orchestrator", default=[])
     def chat_list_conversations(self, limit: int = 30) -> list:
         return self._chat.list_conversations(limit=limit)
 
+    @_requires("chat_orchestrator", default=[])
     def chat_get_messages(self, conversation_id: str, limit: int = 100) -> list:
         return self._chat.get_conversation_messages(conversation_id, limit=limit)
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_rename_conversation(self, conversation_id: str, title: str) -> dict:
         self._chat.update_conversation_title(conversation_id, title)
         return {"ok": True}
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_delete_conversation(self, conversation_id: str) -> dict:
         self._chat.delete_conversation(conversation_id)
         return {"ok": True}
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_branch_conversation(self, conversation_id: str,
                                   from_message_id: str) -> dict:
         """
@@ -556,6 +568,7 @@ class API:
         """
         return self._chat.branch_conversation(conversation_id, from_message_id)
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_export_conversation(self, conversation_id: str,
                                   fmt: str = "markdown") -> dict:
         """
@@ -564,9 +577,11 @@ class API:
         """
         return self._chat.export_conversation(conversation_id, fmt)
 
+    @_requires("chat_orchestrator", default={})
     def chat_token_stats(self) -> dict:
         return self._chat.get_token_stats()
 
+    @_requires("chat_orchestrator", default={})
     def get_router_stats(self) -> dict:
         """
         Return accuracy trends per complexity bucket from the router feedback log.
@@ -609,6 +624,7 @@ class API:
 
     # ── RAG / Documents ───────────────────────────────────────────────────────
 
+    @_requires("rag_index", default=None)
     def build_rag_index(self, folder_path: str) -> None:
         """Build/rebuild the RAG index from a folder."""
         def _work():
@@ -639,6 +655,7 @@ class API:
                 self._emit("rag_error", {"error": friendly})
         run_in_thread(_work)
 
+    @_requires("rag_index", default={"error": "RAG unavailable"})
     def rag_add_file(self, file_path: str) -> dict:
         """Add a single file to the existing RAG index."""
         # ── Priority 5: scan document content before indexing ─────────────────
@@ -660,6 +677,7 @@ class API:
         except Exception as e:
             return {"error": str(e)}
 
+    @_requires("rag_index", default={"error": "RAG unavailable"})
     def rag_add_text(self, text: str, source: str = "manual") -> dict:
         """Add raw text to the RAG index."""
         try:
@@ -671,6 +689,7 @@ class API:
         except Exception as e:
             return {"error": str(e)}
 
+    @_requires("rag_index", default={"error": "RAG unavailable"})
     def rag_clear(self) -> dict:
         """Clear the entire RAG index."""
         self._rag.clear()
@@ -691,6 +710,7 @@ class API:
             "error": status.get("error"),
         }
 
+    @_requires("rag_index", default=[])
     def rag_search(self, query: str, top_k: int = 5) -> list:
         results = self._rag.search(query, top_k=top_k)
         # Unwrap (text, score) tuples — the frontend only needs the text strings
@@ -814,6 +834,10 @@ class API:
 
     def fetch_chat_models(self, backend: str) -> None:
         def _work():
+            if self._local is None:
+                self._emit("chat_models", {"backend": backend, "models": [],
+                                            "error": "local client unavailable"})
+                return
             models = self._local.list_models(backend=backend)
             self._emit("chat_models", {"backend": backend, "models": models})
         run_in_thread(_work)
@@ -1100,6 +1124,7 @@ class API:
         status = self._status.get("semantic_search", {})
         return bool(status.get("ok")) and semantic_search.is_available()
 
+    @_requires("memory_manager", default={"error": "memory unavailable"})
     def save_memory(self, content: str, category: str = "fact") -> dict:
         mem_id = self._memory.save_explicit_memory(content, category)
         return {"id": mem_id}
@@ -1406,14 +1431,17 @@ class API:
 
     # ── Hook management ──────────────────────────────────────────────────────
 
+    @_requires("hook_manager", default=[])
     def hook_list_points(self) -> list:
         """Return all hook points with descriptions and current hook counts."""
         return self._hooks.list_hook_points()
 
+    @_requires("hook_manager", default=[])
     def hook_list(self, hook_point: str) -> list:
         """Return all hooks configured for a specific hook point."""
         return self._hooks.get_hooks(hook_point)
 
+    @_requires("hook_manager", default={"error": "hooks unavailable"})
     def hook_add(self, hook_point: str, name: str, action: str = "log",
                  condition: str = "", description: str = "",
                  **extra) -> dict:
@@ -1428,21 +1456,25 @@ class API:
         }
         return self._hooks.add_hook(hook_point, cfg)
 
+    @_requires("hook_manager", default={"error": "hooks unavailable"})
     def hook_remove(self, hook_point: str, hook_name: str) -> dict:
         """Remove a hook by name."""
         ok = self._hooks.remove_hook(hook_point, hook_name)
         return {"ok": ok}
 
+    @_requires("hook_manager", default={"error": "hooks unavailable"})
     def hook_toggle(self, hook_point: str, hook_name: str,
                     enabled: bool) -> dict:
         """Enable or disable a hook."""
         ok = self._hooks.toggle_hook(hook_point, hook_name, enabled)
         return {"ok": ok}
 
+    @_requires("hook_manager", default=[])
     def hook_list_actions(self) -> list:
         """Return all available hook action types."""
         return self._hooks.list_actions()
 
+    @_requires("hook_manager", default=[])
     def hook_execution_log(self, limit: int = 50) -> list:
         """Return recent hook execution log."""
         return self._hooks.get_execution_log(limit)
@@ -1468,11 +1500,13 @@ class API:
 
     # ── Context compressor ───────────────────────────────────────────────────
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def compressor_reset(self) -> dict:
         """Reset the context compressor circuit breaker."""
         self._chat.compressor.reset_circuit_breaker()
         return {"ok": True}
 
+    @_requires("chat_orchestrator", default={})
     def compressor_status(self) -> dict:
         """Return current compressor status."""
         c = self._chat.compressor

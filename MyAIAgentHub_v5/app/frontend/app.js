@@ -110,6 +110,17 @@ function handleEvent(event, payload) {
       appendErrorMessage(payload.error || "Something went wrong");
       setStreamingState(false);
       break;
+    case "service_unavailable":
+      // Rate-limit toasts — a broken subsystem can fire many events per page load.
+      window.__svcToastShown = window.__svcToastShown || {};
+      if(!window.__svcToastShown[payload.service]) {
+        window.__svcToastShown[payload.service] = true;
+        showToast(
+          `${payload.service} is unavailable — see Settings → Subsystem status`,
+          "error"
+        );
+      }
+      break;
     case "chat_event": handleStructuredEvent(payload); break;
     case "rag_progress":
       document.getElementById("rag-subtitle").textContent = payload.status || "";
