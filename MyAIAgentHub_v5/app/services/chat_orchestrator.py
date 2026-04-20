@@ -38,10 +38,8 @@ MAX_HISTORY_MESSAGES = 40  # 20 user/assistant turns
 MAX_CONTEXT_CHARS = 80_000  # ~20K tokens — safe for 128K context models
                              # Leaves room for system prompt + RAG + response
 
-# Per-million-token pricing defaults. Users can override in Settings
-# to keep cost tracking accurate when Anthropic changes prices.
 _DEFAULT_MODEL_PRICES: dict[str, tuple[float, float]] = {
-    "haiku":  (0.80,  4.0),
+    "haiku":  (1.0,   5.0),
     "sonnet": (3.0,  15.0),
     "opus":  (15.0,  75.0),
 }
@@ -49,10 +47,12 @@ _DEFAULT_MODEL_PRICES: dict[str, tuple[float, float]] = {
 
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int,
                    settings=None) -> float:
-    if not model or "claude" not in model.lower():
+    if not model:
+        return 0.0
+    m = model.lower()
+    if "claude" not in m and "anthropic" not in m:
         return 0.0
 
-    # Allow user-configured price overrides
     prices = dict(_DEFAULT_MODEL_PRICES)
     if settings:
         custom = settings.get("model_prices", None)
@@ -61,7 +61,6 @@ def _estimate_cost(model: str, tokens_in: int, tokens_out: int,
                 if isinstance(val, (list, tuple)) and len(val) == 2:
                     prices[key] = (float(val[0]), float(val[1]))
 
-    m = model.lower()
     price_in, price_out = next(
         ((pi, po) for key, (pi, po) in prices.items() if key in m),
         (3.0, 15.0),

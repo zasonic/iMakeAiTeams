@@ -377,6 +377,10 @@ class MemoryManager:
         """
         global _extract_attempts, _extract_failures
         if not self.local or not self.local.is_available():
+            log.info("Fact extraction skipped — no local model available. "
+                     "Install Ollama and pull a model to enable automatic memory.")
+            hist = self._get_history(conversation_id)
+            hist.add("fact_skipped", "No local model available for fact extraction")
             return
         _extract_attempts += 1
         try:
