@@ -221,6 +221,14 @@ class ChannelManager:
     def _handle_chat_message(self, msg: "InboundMessage") -> None:
         """Route a normal chat message through the existing orchestrator."""
         try:
+            # The orchestrator may be None if chat_orchestrator failed to
+            # initialise (see API._safe_init). Without it we can't route the
+            # message, so bail out with a user-visible note instead of crashing
+            # the channel thread.
+            if self._orchestrator is None:
+                self._send_reply(msg, "⚠️ Chat is unavailable — see Settings → Subsystem status in the desktop app.")
+                return
+
             # Guardrails check
             if self._guardrails:
                 verdict = self._guardrails.check_input(msg.text)
@@ -270,6 +278,14 @@ class ChannelManager:
         conv_id = msg.conversation_id
 
         try:
+            # The agent loop drives tool calls through the Claude client. If
+            # claude_client failed to initialise we can't plan or execute tool
+            # steps — stop before the AgentLoop constructor tries to call a
+            # method on None.
+            if self._claude is None:
+                self._send_reply(msg, "⚠️ Agent tasks are unavailable — Claude client failed to start. See Settings → Subsystem status.")
+                return
+
             # Guardrails check on task
             if self._guardrails:
                 verdict = self._guardrails.check_input(task)

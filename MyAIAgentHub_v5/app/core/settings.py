@@ -16,6 +16,46 @@ from typing import Any
 
 log = logging.getLogger("MyAIEnv.settings")
 
+# ── Secret routing via OS keyring ────────────────────────────────────────────
+# Keys in this set are stored in the platform keyring (DPAPI on Windows,
+# Keychain on macOS, SecretService on Linux) instead of settings.json.
+# On first load, a plaintext value found in settings.json is migrated to the
+# keyring and cleared from the JSON file so the secret only lives on-disk in
+# the OS-native store.
+SECRET_KEYS: set[str] = {"claude_api_key"}
+KEYRING_SERVICE = "iMakeAiTeams"
+
+
+def _keyring_get(key: str) -> str | None:
+    # Broad BaseException catch is intentional: some backends (e.g. pyo3-based
+    # SecretService on a host missing its native deps) raise PanicException,
+    # which derives from BaseException. A broken keyring must never bring the
+    # app down — fall back to plaintext silently.
+    try:
+        import keyring
+        return keyring.get_password(KEYRING_SERVICE, key)
+    except BaseException as exc:
+        log.debug("keyring.get_password(%s) failed: %s", key, exc)
+        return None
+
+
+def _keyring_set(key: str, value: str) -> bool:
+    try:
+        import keyring
+        keyring.set_password(KEYRING_SERVICE, key, value)
+        return True
+    except BaseException as exc:
+        log.warning("keyring.set_password(%s) failed: %s — falling back to plaintext", key, exc)
+        return False
+
+
+def _keyring_delete(key: str) -> None:
+    try:
+        import keyring
+        keyring.delete_password(KEYRING_SERVICE, key)
+    except BaseException as exc:
+        log.debug("keyring.delete_password(%s) failed: %s", key, exc)
+
 # ── Schema ────────────────────────────────────────────────────────────────────
 # Each entry: key -> (python_type_or_types, default_value)
 # Use a tuple of types to allow multiple acceptable types (e.g. str and NoneType).
@@ -144,6 +184,7 @@ class Settings:
         self._data: dict = {}
         self._load()
         self._migrate()
+        self._migrate_secrets_to_keyring()
 
     # ── Private ───────────────────────────────────────────────────────────────
 
@@ -187,9 +228,36 @@ class Settings:
             except OSError as exc:
                 log.warning("settings: could not save migrated settings: %s", exc)
 
+    def _migrate_secrets_to_keyring(self) -> None:
+        """
+        One-time migration: move plaintext secrets from settings.json into the
+        OS keyring and clear the JSON copy. Runs on every load; no-op once the
+        JSON value is blank.
+        """
+        changed = False
+        for key in SECRET_KEYS:
+            plain = self._data.get(key)
+            if not plain:
+                continue
+            if _keyring_set(key, plain):
+                self._data[key] = ""
+                changed = True
+                log.info("settings: migrated secret '%s' into OS keyring", key)
+        if changed:
+            try:
+                self._save()
+            except OSError as exc:
+                log.warning("settings: could not save after secret migration: %s", exc)
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def get(self, key: str, default: Any = None) -> Any:
+        if key in SECRET_KEYS:
+            stored = _keyring_get(key)
+            if stored:
+                return stored
+            # Fall through to plaintext lookup — either keyring is unavailable
+            # (headless Linux without dbus, tests) or the secret was never set.
         with self._lock:
             if key in self._data:
                 return self._data[key]
@@ -211,6 +279,21 @@ class Settings:
 
         expected_type, _ = SETTINGS_DEFAULTS[key]
         value = _coerce(key, value, expected_type)
+
+        if key in SECRET_KEYS:
+            str_value = "" if value is None else str(value)
+            if str_value:
+                if _keyring_set(key, str_value):
+                    with self._lock:
+                        # Don't persist secrets to disk when keyring succeeds.
+                        self._data[key] = ""
+                        self._save()
+                    return
+                # keyring unavailable — fall through to plaintext write so the
+                # app still works (with the same security properties as before
+                # this change).
+            else:
+                _keyring_delete(key)
 
         with self._lock:
             self._data[key] = value

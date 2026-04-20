@@ -805,6 +805,18 @@ button{cursor:pointer;}
       </div>
     </div>
 
+    <div class="settings-section">
+      <div class="settings-heading">🩺 Subsystem status</div>
+      <div class="settings-card">
+        <div style="font-size:12px;color:var(--text3);margin-bottom:10px;">
+          Each core service reports ok or unavailable after startup. Unavailable subsystems
+          degrade a feature but do not prevent the rest of the app from working.
+        </div>
+        <div id="service-status-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+        <button class="btn" id="service-status-refresh" style="margin-top:10px;font-size:12px;">Refresh</button>
+      </div>
+    </div>
+
     <div style="display:flex;gap:8px;margin-top:4px;">
       <button class="btn" style="flex:1;" id="health-btn">Run Health Check</button>
       <button class="btn" style="flex:1;" id="diag-btn">Export Diagnostics</button>
@@ -907,6 +919,7 @@ button{cursor:pointer;}
         <div class="wz-h" style="font-size:30px;margin-bottom:6px;">You're all set</div>
         <div class="wz-sub" style="margin-bottom:24px;">Here's what we configured:</div>
         <div class="wz-checklist" id="wz-checklist"></div>
+        <div id="wz-subsystem-status" style="margin-top:6px;"></div>
         <button class="wz-cta" id="wz-finish-btn">Start chatting</button>
       </div>
     </div>

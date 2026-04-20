@@ -36,10 +36,14 @@ _db_path: Path | None = None
 _conn: sqlite3.Connection | None = None
 
 
-def init_db(app_root: Path) -> None:
-    """Call once at startup. Creates all tables if they don't exist."""
+def init_db(db_file: Path) -> None:
+    """Call once at startup. Creates all tables if they don't exist.
+
+    ``db_file`` is the absolute path to the SQLite file. Callers should pass
+    ``core.paths.db_path()`` rather than constructing a path themselves.
+    """
     global _db_path, _conn
-    _db_path = app_root / "myai.db"
+    _db_path = db_file
     _db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = _get_conn()
     _create_schema(conn)

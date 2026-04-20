@@ -62,13 +62,31 @@ Output: `dist/MyAI Agent Hub.app` and optionally `dist/MyAIAgentHub-1.0.0-mac.dm
 
 ### Windows
 
+Two variants are supported — pick one based on whether document search and
+semantic memory are needed:
+
 ```bash
-# Run from cmd or PowerShell
-build\build_windows.bat
+build\build_windows.bat full    REM ~1.6 GB installer: Tier 1 + Tier 2 (RAG, semantic search, BM25)
+build\build_windows.bat lite    REM ~60 MB installer:  Tier 1 only (chat, agents, teams, router)
 ```
 
-Output: `dist\MyAIAgentHub\MyAIAgentHub.exe`
-For a single-file setup installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) first — the script detects it automatically.
+Output:
+- Full: `dist\MyAIAgentHub\MyAIAgentHub.exe` + `dist\MyAIAgentHub-Setup-Full.exe`
+- Lite: `dist\MyAIAgentHub-lite\MyAIAgentHub-lite.exe` + `dist\MyAIAgentHub-Setup-Lite.exe`
+
+The lite build uses the same source tree — Tier 2 imports are lazy (see
+`core/api.py:95`, `services/semantic_search.py:58,93`, `channels/telegram_adapter.py:90`),
+so the lite installer bundles no PyTorch or sentence-transformers. At runtime,
+`service_status()` reports Tier 2 services as unavailable and the Settings →
+Subsystem status panel makes this visible to the user.
+
+Both installers write user data to `%LOCALAPPDATA%\iMakeAiTeams\` (resolved by
+`core/paths.py`), never into `Program Files` — so a lite→full upgrade preserves
+conversations, settings, and the OS-keyring-stored API key automatically.
+
+For single-file setup installers, install [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+first — the script detects it automatically and runs `iscc build\installer.iss`
+(full) or `iscc build\installer-lite.iss` (lite).
 
 ---
 

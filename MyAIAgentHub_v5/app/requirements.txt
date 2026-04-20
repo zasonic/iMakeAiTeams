@@ -1,8 +1,20 @@
+# ── Tier 1 (always shipped — lite + full installers) ─────────────────────────
+#
+# Minimum surface needed for the chat, memory-buffer, router, agents, teams,
+# prompt library, security engine, and settings to work end-to-end. Keeps the
+# lite bundle under ~60 MB.
+#
+# Tier 2/3 (RAG/semantic search/telegram) live in requirements-extensions.txt
+# and are bundled only by the full installer. All Tier 2/3 imports are lazy,
+# so the lite build runs fine without them — service_status() reports them as
+# unavailable and the UI degrades gracefully.
+
 # ── Core / UI ────────────────────────────────────────────────────────────────
 pywebview>=4.4.1
 requests>=2.31.0
 psutil>=5.9.0
 numpy>=1.26.0
+platformdirs>=4.0.0
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 anthropic>=0.40.0
@@ -11,34 +23,6 @@ anthropic>=0.40.0
 tenacity>=8.3.0
 pydantic>=2.7.0
 
-# ── Force CPU-only PyTorch to avoid 2GB+ CUDA download ───────────────────────
---extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.0.0
-
-# ── RAG / Embedding / Semantic Search ─────────────────────────────────────────
-sentence-transformers>=2.7.0
-chromadb>=0.5.0
-
-# ── Priority 2: Hybrid BM25 + vector search ───────────────────────────────────
-rank-bm25>=0.2.2
-
-# ── Channels: Telegram ────────────────────────────────────────────────────────
-python-telegram-bot>=21.0.0
-
-# ── Safety: ML-based security scanners (optional — app works without them) ────
-# LLM Guard: prompt injection detection, toxicity, secrets, PII (MIT license)
-# Install for ML-based security: pip install llm-guard
-# For faster inference: pip install llm-guard[onnxruntime]
-# llm-guard>=0.3.0
-
-# NeMo Guardrails: full Colang rail definitions (Apache 2.0)
-# Install for programmable dialog rails: pip install nemoguardrails
-# nemoguardrails>=0.9.0
-
-# ── Context compression: tree-sitter (optional — fallback to regex) ──────────
-# Install for AST-based repo map: pip install tree-sitter tree-sitter-python
-# tree-sitter>=0.24.0
-
-# ── Priority 5: Input sanitization (optional — app works without it) ──────────
-# llamafirewall>=0.1.0
-
+# ── OS-native secret storage (DPAPI on Win, Keychain on Mac, SecretService
+# on Linux — with a portable file-based fallback when no backend is present).
+keyring>=24.0.0

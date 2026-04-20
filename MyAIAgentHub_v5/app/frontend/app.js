@@ -110,6 +110,27 @@ function handleEvent(event, payload) {
       appendErrorMessage(payload.error || "Something went wrong");
       setStreamingState(false);
       break;
+    case "service_unavailable":
+      // Rate-limit toasts — a broken subsystem can fire many events per page load.
+      window.__svcToastShown = window.__svcToastShown || {};
+      if(!window.__svcToastShown[payload.service]) {
+        window.__svcToastShown[payload.service] = true;
+        showToast(
+          `${payload.service} is unavailable — see Settings → Subsystem status`,
+          "error"
+        );
+      }
+      break;
+    case "service_status_update":
+      // Live update from deferred-init: a previously-pending service has
+      // finished booting. Refresh the Settings + wizard status lists if
+      // they're rendered; show a one-time toast only when a service came up
+      // that the user likely cares about.
+      renderServiceStatusIfVisible();
+      if(payload.ok && payload.service === "embedder") {
+        showToast("Document search is now ready", "success");
+      }
+      break;
     case "chat_event": handleStructuredEvent(payload); break;
     case "rag_progress":
       document.getElementById("rag-subtitle").textContent = payload.status || "";
@@ -1275,7 +1296,70 @@ async function loadSettings() {
   const n = cnt ? (cnt.count || 0) : 0;
   const pending = document.getElementById("s-pending-text");
   if(pending) pending.textContent = n + " item" + (n===1?"":"s") + " waiting for review";
+
+  renderServiceStatus();
 }
+
+// Shared across the Settings → Subsystem status block and the first-run
+// wizard summary so both surfaces use identical human-readable names.
+const SERVICE_LABELS = {
+  claude_client: "Claude API client",
+  local_client: "Local model (Ollama / LM Studio)",
+  embedder: "Shared embedding model",
+  rag_index: "RAG index",
+  rag_load: "RAG cache load",
+  database: "SQLite database",
+  prompts_seed: "Prompt library",
+  agents_seed: "Built-in agents",
+  theory_of_mind: "Theory of Mind",
+  firewall: "Input firewall",
+  semantic_search: "Semantic search (ChromaDB)",
+  semantic_search_indexer: "Semantic search indexer",
+  memory_manager: "Memory manager",
+  router: "Task router",
+  hook_manager: "Hook manager",
+  chat_orchestrator: "Chat orchestrator",
+};
+
+function renderServiceStatusIfVisible() {
+  // Settings panel is only mounted when the user navigates to that view.
+  // Skip when hidden to avoid a useless api() round-trip per event.
+  if(document.getElementById("service-status-list")) renderServiceStatus();
+}
+
+async function renderServiceStatus() {
+  const list = document.getElementById("service-status-list");
+  if(!list) return;
+  const status = await api("service_status");
+  list.innerHTML = "";
+  if(!status || typeof status !== "object") {
+    list.textContent = "Service status unavailable.";
+    return;
+  }
+  const names = Object.keys(status).sort();
+  for(const name of names) {
+    const entry = status[name] || {};
+    const ok = !!entry.ok;
+    const pending = !!entry.pending;
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;background:var(--bg3);font-size:12px;";
+    const dot = document.createElement("span");
+    const color = pending ? "#f0ad4e" : (ok ? "#4caf50" : "#f44336");
+    dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0;`;
+    const label = document.createElement("span");
+    label.textContent = SERVICE_LABELS[name] || name;
+    label.style.cssText = "flex:1;color:var(--text);";
+    const detail = document.createElement("span");
+    detail.style.cssText = `color:${pending ? "#f0ad4e" : (ok ? "var(--text3)" : "#f44336")};font-size:11px;`;
+    detail.textContent = pending ? "starting…" : (ok ? "ok" : (entry.error || "unavailable"));
+    row.appendChild(dot);
+    row.appendChild(label);
+    row.appendChild(detail);
+    list.appendChild(row);
+  }
+}
+
+document.getElementById("service-status-refresh")?.addEventListener("click", renderServiceStatus);
 
 function setToggle(id, val) {
   const el = document.getElementById(id);
@@ -1602,7 +1686,7 @@ document.getElementById("wz-next-3").addEventListener("click", () => wizGoToStep
 document.getElementById("wz-skip-3").addEventListener("click", () => wizGoToStep(4));
 
 // ── Step 4: Ready checklist ──
-function wizPopulateReadyStep() {
+async function wizPopulateReadyStep() {
   const list = document.getElementById("wz-checklist");
   const items = [];
   // Claude connection
@@ -1623,6 +1707,32 @@ function wizPopulateReadyStep() {
       <div class="wz-check-detail">${escHtml(it.detail)}</div>
     </div>
   `).join("");
+
+  // Surface any subsystems that failed to start so the user sees the degraded
+  // state before clicking into the app. Don't render healthy ones — at 16
+  // services a full grid would overwhelm the "you're all set" moment.
+  const wzStatus = document.getElementById("wz-subsystem-status");
+  if(wzStatus) {
+    wzStatus.innerHTML = "";
+    const status = await api("service_status");
+    if(status && typeof status === "object") {
+      const failed = Object.entries(status).filter(([, e]) => e && !e.ok);
+      if(failed.length) {
+        const heading = document.createElement("div");
+        heading.className = "wz-sub";
+        heading.style.cssText = "margin:14px 0 6px;font-size:12px;text-align:left;";
+        heading.textContent = "Unavailable subsystems (features degrade, chat still works):";
+        wzStatus.appendChild(heading);
+        wzStatus.innerHTML += failed.map(([name, entry]) => `
+          <div class="wz-check-item">
+            <div class="wz-check-icon skip">&#8212;</div>
+            <div class="wz-check-label">${escHtml(SERVICE_LABELS[name] || name)}</div>
+            <div class="wz-check-detail">${escHtml(entry.error || "unavailable")}</div>
+          </div>
+        `).join("");
+      }
+    }
+  }
 }
 
 document.getElementById("wz-finish-btn").addEventListener("click", async () => {

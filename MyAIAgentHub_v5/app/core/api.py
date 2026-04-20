@@ -34,6 +34,8 @@ from typing import Any
 
 import requests
 
+from core import paths
+from core.service_guard import requires as _requires
 from core.settings import Settings
 from core.events import EventBus
 from core.worker import run_in_thread
@@ -77,93 +79,200 @@ class API:
         self._window = None
         self._stop_chat = threading.Event()
 
-        # ── Claude client ─────────────────────────────────────────────────────
-        self._claude = ClaudeClient(
-            api_key=self._settings.get("claude_api_key", ""),
-            model=self._settings.get("claude_model", "claude-sonnet-4-6"),
-            use_caching=self._settings.get("claude_prompt_caching", True),
+        # Each service records its init status here. Writers only mutate this
+        # dict during __init__ on the main thread; downstream readers (channel
+        # manager on a background thread) read it snapshot-only after init
+        # completes, so no lock is required.
+        self._status: dict[str, dict] = {}
+
+        # ── Claude client (required — no useful app without it) ───────────────
+        self._claude = self._safe_init(
+            "claude_client",
+            lambda: ClaudeClient(
+                api_key=self._settings.get("claude_api_key", ""),
+                model=self._settings.get("claude_model", "claude-sonnet-4-6"),
+                use_caching=self._settings.get("claude_prompt_caching", True),
+            ),
+            required=True,
         )
 
         # ── Local model client ────────────────────────────────────────────────
-        self._local = LocalClient(self._settings)
+        self._local = self._safe_init(
+            "local_client",
+            lambda: LocalClient(self._settings),
+        )
 
-        # ── RAG index ─────────────────────────────────────────────────────────
-        # Load the embedding model once and share it with both RAGIndex and
-        # semantic_search so the ~90MB transformer is only in memory once.
-        _shared_st_model = None
-        try:
-            from sentence_transformers import SentenceTransformer as _ST
-            _shared_st_model = _ST("all-MiniLM-L6-v2")
-            log.info("Shared SentenceTransformer model loaded.")
-        except Exception as exc:
-            log.warning(f"SentenceTransformer unavailable — RAG and semantic search disabled: {exc}")
-            log.warning("Embedding model not available — RAG and semantic search disabled. "
-                        "This may be because sentence-transformers is still downloading.")
+        # ── RAG index (fast — constructs empty, embedder attached later) ──────
+        # The SentenceTransformer model is NOT loaded here: that can block up
+        # to 60s on first run while HuggingFace downloads 90MB. Deferred to
+        # _start_deferred_init() which runs after the window paints.
+        self._rag = self._safe_init(
+            "rag_index",
+            lambda: RAGIndex(model=None),
+        )
 
-        self._rag = RAGIndex(model=_shared_st_model)
-        _rag_path = app_root / "rag_cache" / "index.npz"
-        if _rag_path.exists():
-            try:
-                self._rag.load(_rag_path)
-                log.info(f"RAG index loaded: {self._rag.chunk_count()} chunks")
-            except Exception as exc:
-                log.warning(f"RAG index load failed: {exc}")
-
-        # ── Database ──────────────────────────────────────────────────────────
-        _db_module.init_db(app_root)
+        # ── Database (required — chat/memory can't degrade without it) ────────
+        self._safe_init(
+            "database",
+            lambda: _db_module.init_db(paths.db_path()),
+            required=True,
+        )
 
         # ── Prompts ───────────────────────────────────────────────────────────
-        seeded = prompt_library.seed_prompts()
-        if seeded:
-            log.info(f"Seeded {seeded} prompt(s)")
+        self._safe_init("prompts_seed", prompt_library.seed_prompts)
 
         # ── Agents ────────────────────────────────────────────────────────────
-        a_seeded = seed_agents()
-        if a_seeded:
-            log.info(f"Seeded {a_seeded} built-in agent(s)")
+        self._safe_init("agents_seed", seed_agents)
 
         # ── Priority 1: refresh built-in ToM on every startup ─────────────────
-        try:
-            n = update_builtin_tom()
-            if n:
-                log.info(f"Refreshed Theory of Mind for {n} built-in agent(s).")
-        except Exception as exc:
-            log.warning(f"ToM update skipped: {exc}")
+        self._safe_init("theory_of_mind", update_builtin_tom)
 
         # ── Priority 5: set firewall default based on API key ─────────────────
-        try:
+        def _firewall_init():
             has_key = bool(self._settings.get("claude_api_key", "").strip())
             input_sanitizer.set_firewall_enabled(has_key)
-            log.info(f"Firewall default: {'ON' if has_key else 'OFF (no API key)'}")
-        except Exception as exc:
-            log.warning(f"Firewall init skipped: {exc}")
+            return has_key
+        self._safe_init("firewall", _firewall_init)
 
-        # ── Semantic search ───────────────────────────────────────────────────
-        semantic_search.init_vector_store(app_root, shared_model=_shared_st_model)
-        semantic_search.start_background_indexer(interval_seconds=60)
-
-        # ── Memory manager ────────────────────────────────────────────────────
-        self._memory = MemoryManager(
-            rag_index=self._rag,
-            semantic_search_mod=semantic_search,
-            local_client=self._local,
+        # ── Memory manager (fast — stores refs; rag/semantic lazy-check) ──────
+        self._memory = self._safe_init(
+            "memory_manager",
+            lambda: MemoryManager(
+                rag_index=self._rag,
+                semantic_search_mod=semantic_search,
+                local_client=self._local,
+            ),
         )
 
         # ── Task router ───────────────────────────────────────────────────────
-        self._router = TaskRouter(self._local, self._settings)
+        self._router = self._safe_init(
+            "router",
+            lambda: TaskRouter(self._local, self._settings),
+        )
 
         # ── Hook manager ──────────────────────────────────────────────────────
-        self._hooks = HookManager(self._settings)
+        self._hooks = self._safe_init(
+            "hook_manager",
+            lambda: HookManager(self._settings),
+        )
 
         # ── Chat orchestrator ─────────────────────────────────────────────────
-        self._chat = ChatOrchestrator(
-            claude_client=self._claude,
-            local_client=self._local,
-            router=self._router,
-            memory=self._memory,
-            settings=self._settings,
-            hook_manager=self._hooks,
+        self._chat = self._safe_init(
+            "chat_orchestrator",
+            lambda: ChatOrchestrator(
+                claude_client=self._claude,
+                local_client=self._local,
+                router=self._router,
+                memory=self._memory,
+                settings=self._settings,
+                hook_manager=self._hooks,
+            ),
         )
+
+        # ── Deferred services — mark pending so UI renders a spinner row ──────
+        # These come up after the window paints, driven by start_deferred_init.
+        for _name in ("embedder", "rag_load", "semantic_search",
+                      "semantic_search_indexer"):
+            self._status[_name] = {"ok": False, "error": None, "pending": True}
+
+    # ── Deferred initialization ───────────────────────────────────────────────
+
+    def start_deferred_init(self) -> None:
+        """Start the slow services in a background thread.
+
+        Call this from main.py after the window's `loaded` event fires. Heavy
+        work — sentence-transformers model load (~2-5s, or 60s+ on first-run
+        download), ChromaDB client construction (500ms-2s), background indexer
+        thread start — all run here so the user sees a painted window within
+        a second of launch instead of a blank PyWebView frame.
+        """
+        threading.Thread(
+            target=self._run_deferred_init,
+            daemon=True,
+            name="api-deferred-init",
+        ).start()
+
+    def _run_deferred_init(self) -> None:
+        # 1. Embedding model (the hang risk)
+        model = self._safe_init("embedder", self._load_shared_embedder)
+        self._emit_service_update("embedder")
+
+        # Attach the model to the already-constructed RAG index. RAGIndex
+        # tolerates a None model for construction and uses this attribute
+        # lazily in search/index operations.
+        if self._rag is not None and model is not None:
+            self._rag._model = model
+
+        # 2. RAG cache load — only meaningful once embedder is available
+        _rag_path = paths.rag_cache_dir() / "index.npz"
+        if self._rag is not None and model is not None and _rag_path.exists():
+            self._safe_init(
+                "rag_load",
+                lambda: (self._rag.load(_rag_path), self._rag.chunk_count())[1],
+            )
+        else:
+            self._status["rag_load"] = {
+                "ok": model is not None,
+                "error": None if model is not None else "embedder unavailable",
+            }
+        self._emit_service_update("rag_load")
+
+        # 3. ChromaDB vector store
+        self._safe_init(
+            "semantic_search",
+            lambda: semantic_search.init_vector_store(
+                paths.vector_store_dir(), shared_model=model,
+            ),
+        )
+        self._emit_service_update("semantic_search")
+
+        # 4. Background indexer thread
+        self._safe_init(
+            "semantic_search_indexer",
+            lambda: semantic_search.start_background_indexer(interval_seconds=60),
+        )
+        self._emit_service_update("semantic_search_indexer")
+
+        self._log.info("Deferred init complete.")
+
+    def _emit_service_update(self, name: str) -> None:
+        """Push a live status update to the frontend so the UI can refresh."""
+        entry = self._status.get(name, {})
+        self._emit("service_status_update", {"service": name, **entry})
+
+    # ── Fail-soft service init ────────────────────────────────────────────────
+
+    def _safe_init(self, name, factory, *, required=False, fallback=None):
+        """Run ``factory()`` and record the outcome in self._status[name].
+
+        If ``required`` is True, re-raise on failure — the caller treats this
+        service as a ship-blocker and the app should fail loudly. Otherwise
+        log a warning, mark the service unavailable, and return ``fallback``.
+        """
+        try:
+            result = factory()
+            self._status[name] = {"ok": True, "error": None}
+            return result
+        except Exception as exc:
+            self._status[name] = {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            self._log.warning("Service %s failed to initialise: %s", name, exc,
+                              exc_info=True)
+            if required:
+                raise
+            return fallback
+
+    def _load_shared_embedder(self):
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        self._log.info("Shared SentenceTransformer model loaded.")
+        return model
+
+    def service_status(self) -> dict:
+        """Return a snapshot of per-service init status for the UI."""
+        return {name: dict(entry) for name, entry in self._status.items()}
 
     # ── Window reference ─────────────────────────────────────────────────────
 
@@ -262,8 +371,8 @@ class API:
         if key == "smart_routing_enabled":
             key = "routing_enabled"
         self._settings.set(key, value)
-        # Keep live services in sync
-        if key == "routing_enabled":
+        # Keep live services in sync — router may be None if init failed.
+        if key == "routing_enabled" and self._router is not None:
             self._router.set_enabled(bool(value))
         if key == "firewall_enabled":
             try:
@@ -283,7 +392,8 @@ class API:
             )
         if key in ("routing_enabled", "smart_routing_enabled"):
             self._settings.set("routing_enabled", bool(value))
-            self._router.set_enabled(bool(value))
+            if self._router is not None:
+                self._router.set_enabled(bool(value))
         if key == "firewall_enabled":
             try:
                 from services import input_sanitizer as _san
@@ -345,10 +455,14 @@ class API:
         else:
             recommended, rec_reason = "phi3:mini", f"{ram_gb} GB RAM — lightweight model recommended"
 
-        ollama_running = self._local.is_available(backend="ollama")
-        lmstudio_running = self._local.is_available(backend="lmstudio")
-        ollama_models = self._local.list_models(backend="ollama") if ollama_running else []
-        lmstudio_models = self._local.list_models(backend="lmstudio") if lmstudio_running else []
+        if self._local is not None:
+            ollama_running = self._local.is_available(backend="ollama")
+            lmstudio_running = self._local.is_available(backend="lmstudio")
+            ollama_models = self._local.list_models(backend="ollama") if ollama_running else []
+            lmstudio_models = self._local.list_models(backend="lmstudio") if lmstudio_running else []
+        else:
+            ollama_running = lmstudio_running = False
+            ollama_models = lmstudio_models = []
 
         return {
             "ram_gb": ram_gb,
@@ -465,6 +579,7 @@ class API:
         """Stop the current streaming response."""
         self._stop_chat.set()
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_new_conversation(self, agent_id: str = "",
                               title: str = "New conversation") -> dict:
         """Create a new conversation and return its id."""
@@ -473,20 +588,25 @@ class API:
         )
         return {"id": cid}
 
+    @_requires("chat_orchestrator", default=[])
     def chat_list_conversations(self, limit: int = 30) -> list:
         return self._chat.list_conversations(limit=limit)
 
+    @_requires("chat_orchestrator", default=[])
     def chat_get_messages(self, conversation_id: str, limit: int = 100) -> list:
         return self._chat.get_conversation_messages(conversation_id, limit=limit)
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_rename_conversation(self, conversation_id: str, title: str) -> dict:
         self._chat.update_conversation_title(conversation_id, title)
         return {"ok": True}
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_delete_conversation(self, conversation_id: str) -> dict:
         self._chat.delete_conversation(conversation_id)
         return {"ok": True}
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_branch_conversation(self, conversation_id: str,
                                   from_message_id: str) -> dict:
         """
@@ -495,6 +615,7 @@ class API:
         """
         return self._chat.branch_conversation(conversation_id, from_message_id)
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_export_conversation(self, conversation_id: str,
                                   fmt: str = "markdown") -> dict:
         """
@@ -503,9 +624,11 @@ class API:
         """
         return self._chat.export_conversation(conversation_id, fmt)
 
+    @_requires("chat_orchestrator", default={})
     def chat_token_stats(self) -> dict:
         return self._chat.get_token_stats()
 
+    @_requires("chat_orchestrator", default={})
     def get_router_stats(self) -> dict:
         """
         Return accuracy trends per complexity bucket from the router feedback log.
@@ -548,6 +671,7 @@ class API:
 
     # ── RAG / Documents ───────────────────────────────────────────────────────
 
+    @_requires("embedder", default=None)
     def build_rag_index(self, folder_path: str) -> None:
         """Build/rebuild the RAG index from a folder."""
         def _work():
@@ -558,7 +682,7 @@ class API:
                     self._emit("rag_progress", {"status": status, "pct": pct})
 
                 self._rag.build_from_folder(Path(folder_path), on_progress=_on_progress)
-                cache_path = self._app_root / "rag_cache" / "index.npz"
+                cache_path = paths.rag_cache_dir() / "index.npz"
                 self._rag.save(cache_path)
                 count = self._rag.chunk_count()
                 self._emit("rag_done", {"chunks": count, "folder": folder_path})
@@ -578,6 +702,7 @@ class API:
                 self._emit("rag_error", {"error": friendly})
         run_in_thread(_work)
 
+    @_requires("embedder", default={"error": "RAG unavailable"})
     def rag_add_file(self, file_path: str) -> dict:
         """Add a single file to the existing RAG index."""
         # ── Priority 5: scan document content before indexing ─────────────────
@@ -593,40 +718,46 @@ class API:
             p = Path(file_path)
             n = self._rag.add_file(p)
             if n:
-                cache_path = self._app_root / "rag_cache" / "index.npz"
+                cache_path = paths.rag_cache_dir() / "index.npz"
                 self._rag.save(cache_path)
             return {"chunks_added": n, "total_chunks": self._rag.chunk_count()}
         except Exception as e:
             return {"error": str(e)}
 
+    @_requires("embedder", default={"error": "RAG unavailable"})
     def rag_add_text(self, text: str, source: str = "manual") -> dict:
         """Add raw text to the RAG index."""
         try:
             n = self._rag.add_text(text, source=source)
             if n:
-                cache_path = self._app_root / "rag_cache" / "index.npz"
+                cache_path = paths.rag_cache_dir() / "index.npz"
                 self._rag.save(cache_path)
             return {"chunks_added": n, "total_chunks": self._rag.chunk_count()}
         except Exception as e:
             return {"error": str(e)}
 
+    @_requires("rag_index", default={"error": "RAG unavailable"})
     def rag_clear(self) -> dict:
         """Clear the entire RAG index."""
         self._rag.clear()
-        cache_path = self._app_root / "rag_cache" / "index.npz"
+        cache_path = paths.rag_cache_dir() / "index.npz"
         if cache_path.exists():
             cache_path.unlink()
-        chunks_path = self._app_root / "rag_cache" / "index_chunks.json"
+        chunks_path = paths.rag_cache_dir() / "index_chunks.json"
         if chunks_path.exists():
             chunks_path.unlink()
         return {"ok": True}
 
     def rag_status(self) -> dict:
+        status = self._status.get("rag_load", {}) if hasattr(self, "_status") else {}
         return {
-            "chunk_count": self._rag.chunk_count(),
-            "index_exists": (self._app_root / "rag_cache" / "index.npz").exists(),
+            "chunk_count": self._rag.chunk_count() if self._rag is not None else 0,
+            "index_exists": (paths.rag_cache_dir() / "index.npz").exists(),
+            "available": bool(status.get("ok", self._rag is not None)),
+            "error": status.get("error"),
         }
 
+    @_requires("embedder", default=[])
     def rag_search(self, query: str, top_k: int = 5) -> list:
         results = self._rag.search(query, top_k=top_k)
         # Unwrap (text, score) tuples — the frontend only needs the text strings
@@ -750,6 +881,10 @@ class API:
 
     def fetch_chat_models(self, backend: str) -> None:
         def _work():
+            if self._local is None:
+                self._emit("chat_models", {"backend": backend, "models": [],
+                                            "error": "local client unavailable"})
+                return
             models = self._local.list_models(backend=backend)
             self._emit("chat_models", {"backend": backend, "models": models})
         run_in_thread(_work)
@@ -1033,8 +1168,10 @@ class API:
         )
 
     def semantic_search_available(self) -> bool:
-        return semantic_search.is_available()
+        status = self._status.get("semantic_search", {})
+        return bool(status.get("ok")) and semantic_search.is_available()
 
+    @_requires("memory_manager", default={"error": "memory unavailable"})
     def save_memory(self, content: str, category: str = "fact") -> dict:
         mem_id = self._memory.save_explicit_memory(content, category)
         return {"id": mem_id}
@@ -1156,10 +1293,11 @@ class API:
         Parse CHANGELOG.md into a list of {version, body} dicts,
         newest first. Falls back to empty list if the file isn't found.
         """
-        changelog_path = self._app_root.parent / "CHANGELOG.md"
+        # CHANGELOG lives next to the source tree, not in user data
+        install_root = paths.install_root()
+        changelog_path = install_root / "CHANGELOG.md"
         if not changelog_path.exists():
-            # Try one level up (in case app_root is app/)
-            changelog_path = self._app_root.parent.parent / "CHANGELOG.md"
+            changelog_path = install_root.parent / "CHANGELOG.md"
         if not changelog_path.exists():
             return []
         try:
@@ -1340,14 +1478,17 @@ class API:
 
     # ── Hook management ──────────────────────────────────────────────────────
 
+    @_requires("hook_manager", default=[])
     def hook_list_points(self) -> list:
         """Return all hook points with descriptions and current hook counts."""
         return self._hooks.list_hook_points()
 
+    @_requires("hook_manager", default=[])
     def hook_list(self, hook_point: str) -> list:
         """Return all hooks configured for a specific hook point."""
         return self._hooks.get_hooks(hook_point)
 
+    @_requires("hook_manager", default={"error": "hooks unavailable"})
     def hook_add(self, hook_point: str, name: str, action: str = "log",
                  condition: str = "", description: str = "",
                  **extra) -> dict:
@@ -1362,21 +1503,25 @@ class API:
         }
         return self._hooks.add_hook(hook_point, cfg)
 
+    @_requires("hook_manager", default={"error": "hooks unavailable"})
     def hook_remove(self, hook_point: str, hook_name: str) -> dict:
         """Remove a hook by name."""
         ok = self._hooks.remove_hook(hook_point, hook_name)
         return {"ok": ok}
 
+    @_requires("hook_manager", default={"error": "hooks unavailable"})
     def hook_toggle(self, hook_point: str, hook_name: str,
                     enabled: bool) -> dict:
         """Enable or disable a hook."""
         ok = self._hooks.toggle_hook(hook_point, hook_name, enabled)
         return {"ok": ok}
 
+    @_requires("hook_manager", default=[])
     def hook_list_actions(self) -> list:
         """Return all available hook action types."""
         return self._hooks.list_actions()
 
+    @_requires("hook_manager", default=[])
     def hook_execution_log(self, limit: int = 50) -> list:
         """Return recent hook execution log."""
         return self._hooks.get_execution_log(limit)
@@ -1402,11 +1547,13 @@ class API:
 
     # ── Context compressor ───────────────────────────────────────────────────
 
+    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def compressor_reset(self) -> dict:
         """Reset the context compressor circuit breaker."""
         self._chat.compressor.reset_circuit_breaker()
         return {"ok": True}
 
+    @_requires("chat_orchestrator", default={})
     def compressor_status(self) -> dict:
         """Return current compressor status."""
         c = self._chat.compressor

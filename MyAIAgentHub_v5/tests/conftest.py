@@ -26,7 +26,7 @@ def in_memory_db(tmp_path):
     Tears down by resetting the module-level state.
     """
     import db
-    db.init_db(tmp_path)
+    db.init_db(tmp_path / "myai.db")
     yield db
     # Teardown: close connection and reset globals
     if db._conn is not None:

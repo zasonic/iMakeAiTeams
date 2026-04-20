@@ -1,24 +1,29 @@
-; installer.iss — Inno Setup script for the FULL Windows installer.
-; Bundles Tier 1 + Tier 2 (sentence-transformers, torch-cpu, chromadb,
-; rank-bm25) — ~1.6 GB. RAG, semantic search, and knowledge graph all work
-; out of the box.
+; installer-lite.iss — Inno Setup script for the LITE Windows installer.
+; Bundles Tier 1 only (pywebview, anthropic, numpy, platformdirs, keyring,
+; requests, psutil, tenacity, pydantic) — ~60 MB. Chat, agents, teams,
+; router, security engine, prompt library all work. RAG, semantic search,
+; and Telegram report unavailable via service_status() and the Settings
+; → Subsystem status panel degrades them gracefully.
 ;
 ; Build pipeline:
-;   set MYAI_VARIANT=full
+;   set MYAI_VARIANT=lite
 ;   pyinstaller build\MyAIAgentHub.spec --noconfirm --clean
-;   iscc build\installer.iss
+;   iscc build\installer-lite.iss
 ;
-; The companion lite script is build\installer-lite.iss. They use different
-; AppIds so both can install side-by-side on the same machine for testing.
+; Distinct AppId + AppName so the lite build coexists with the full build
+; on the same machine (useful for switching or A/B testing). Users who want
+; to migrate lite → full uninstall lite first; their data survives because
+; paths.user_dir() resolves to the same %LOCALAPPDATA%\iMakeAiTeams\ for
+; both builds.
 
-#define AppName "MyAI Agent Hub"
+#define AppName "MyAI Agent Hub Lite"
 #define AppVersion "5.0.2"
 #define AppPublisher "iMakeAiTeams"
 #define AppURL "https://myaiagenthub.app"
-#define AppExeName "MyAIAgentHub.exe"
+#define AppExeName "MyAIAgentHub-lite.exe"
 
 [Setup]
-AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
+AppId={{B2C3D4E5-F6A7-8901-BCDE-F23456789012}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
@@ -26,7 +31,7 @@ AppPublisherURL={#AppURL}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir=dist
-OutputBaseFilename=MyAIAgentHub-Setup-Full
+OutputBaseFilename=MyAIAgentHub-Setup-Lite
 SetupIconFile=icons\AppIcon.ico
 Compression=lzma
 SolidCompression=yes
@@ -42,7 +47,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-Source: "dist\MyAIAgentHub\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\MyAIAgentHub-lite\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
