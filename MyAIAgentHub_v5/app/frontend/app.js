@@ -1275,7 +1275,59 @@ async function loadSettings() {
   const n = cnt ? (cnt.count || 0) : 0;
   const pending = document.getElementById("s-pending-text");
   if(pending) pending.textContent = n + " item" + (n===1?"":"s") + " waiting for review";
+
+  renderServiceStatus();
 }
+
+async function renderServiceStatus() {
+  const list = document.getElementById("service-status-list");
+  if(!list) return;
+  const status = await api("service_status");
+  list.innerHTML = "";
+  if(!status || typeof status !== "object") {
+    list.textContent = "Service status unavailable.";
+    return;
+  }
+  const labels = {
+    claude_client: "Claude API client",
+    local_client: "Local model (Ollama / LM Studio)",
+    embedder: "Shared embedding model",
+    rag_index: "RAG index",
+    rag_load: "RAG cache load",
+    database: "SQLite database",
+    prompts_seed: "Prompt library",
+    agents_seed: "Built-in agents",
+    theory_of_mind: "Theory of Mind",
+    firewall: "Input firewall",
+    semantic_search: "Semantic search (ChromaDB)",
+    semantic_search_indexer: "Semantic search indexer",
+    memory_manager: "Memory manager",
+    router: "Task router",
+    hook_manager: "Hook manager",
+    chat_orchestrator: "Chat orchestrator",
+  };
+  const names = Object.keys(status).sort();
+  for(const name of names) {
+    const entry = status[name] || {};
+    const ok = !!entry.ok;
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;background:var(--bg3);font-size:12px;";
+    const dot = document.createElement("span");
+    dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:${ok ? "#4caf50" : "#f44336"};flex-shrink:0;`;
+    const label = document.createElement("span");
+    label.textContent = labels[name] || name;
+    label.style.cssText = "flex:1;color:var(--text);";
+    const detail = document.createElement("span");
+    detail.style.cssText = `color:${ok ? "var(--text3)" : "#f44336"};font-size:11px;`;
+    detail.textContent = ok ? "ok" : (entry.error || "unavailable");
+    row.appendChild(dot);
+    row.appendChild(label);
+    row.appendChild(detail);
+    list.appendChild(row);
+  }
+}
+
+document.getElementById("service-status-refresh")?.addEventListener("click", renderServiceStatus);
 
 function setToggle(id, val) {
   const el = document.getElementById(id);
