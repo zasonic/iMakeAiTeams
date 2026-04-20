@@ -38,7 +38,6 @@ from datetime import datetime, timezone
 import db as _db
 from models import SessionHistory
 from services.prompt_library import get_active_prompt
-from services import knowledge_graph as _kg
 from services.security_engine import validate_fact_for_storage, MAX_FACTS_PER_CONVERSATION
 
 log = logging.getLogger("MyAIEnv.memory")
@@ -70,20 +69,12 @@ class MemoryContext:
     rag_chunks:      list = field(default_factory=list)
     memories:        list = field(default_factory=list)
 
-    # Knowledge graph relationships (set externally by MemoryManager)
-    kg_relationships: list = field(default_factory=list)
-
     def to_system_suffix(self) -> str:
         parts = []
         if self.session_facts:
             parts.append(
                 "## Known facts about this session\n" +
                 "\n".join(f"- {f}" for f in self.session_facts)
-            )
-        if self.kg_relationships:
-            parts.append(
-                "## Known relationships\n" +
-                "\n".join(f"- {r}" for r in self.kg_relationships)
             )
         if self.rag_chunks:
             parts.append(
@@ -375,18 +366,6 @@ class MemoryManager:
                  f"RAG: {len(ctx.rag_chunks)} chunks, Memories: {len(ctx.memories)}, "
                  f"Facts: {len(ctx.session_facts)}")
 
-        # ── v4.0: Knowledge graph query ───────────────────────────────────────
-        try:
-            kg_rels = _kg.query_for_context(
-                message=user_message,
-                existing_session_facts=ctx.session_facts,
-            )
-            ctx.kg_relationships = kg_rels
-            if kg_rels:
-                log.debug("KG: injected %d relationship(s) into context", len(kg_rels))
-        except Exception as exc:
-            log.debug("Knowledge graph query skipped: %s", exc)
-
         return ctx
 
     def extract_facts(self, conversation_id: str, user_msg: str,
@@ -511,20 +490,6 @@ class MemoryManager:
             if _extract_attempts >= 20 and _extract_failures / _extract_attempts > 0.5:
                 log.warning("Memory fact extraction failing frequently.")
             log.debug(f"Fact extraction failed: {exc}")
-
-        # ── v4.0: Extract knowledge graph triples ─────────────────────────────
-        try:
-            n_triples = _kg.extract_triples(
-                conversation_id=conversation_id,
-                user_msg=user_msg,
-                assistant_msg=assistant_msg,
-                local_client=self.local,
-            )
-            if n_triples:
-                log.debug("KG: extracted %d triple(s)", n_triples)
-        except Exception as exc:  # noqa: F841
-            log.debug("KG triple extraction skipped: %s", exc)
-            n_triples = 0
 
     def _parse_facts_json(
         self,

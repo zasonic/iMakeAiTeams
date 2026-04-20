@@ -51,49 +51,6 @@ window = webview.create_window(
 api.set_window(window)
 
 
-def _start_channel_manager():
-    """Start the channel manager in a background thread after services are ready."""
-    try:
-        from channels.channel_manager import ChannelManager
-        from services.guardrails_gate import GuardrailsGate
-
-        # Guardrails gate (optional — degrades gracefully if nemoguardrails not installed)
-        guardrails = GuardrailsGate(settings, local_client=getattr(api, '_local', None))
-
-        cm = ChannelManager(
-            settings=settings,
-            bus=bus,
-            chat_orchestrator=api._chat if hasattr(api, '_chat') else None,
-            claude_client=api._claude if hasattr(api, '_claude') else None,
-            local_client=api._local if hasattr(api, '_local') else None,
-            memory=api._memory if hasattr(api, '_memory') else None,
-            safety_gate=None,
-            guardrails_gate=guardrails,
-            project_root=APP_ROOT,
-        )
-        cm.start()
-        api.set_channel_manager(cm)
-        log.info("Channel manager started and wired into API")
-
-        # Start background daemon (heartbeat, idle compaction, Dream consolidation)
-        try:
-            from services.daemon import BackgroundDaemon
-            daemon = BackgroundDaemon(
-                settings=settings,
-                local_client=getattr(api, '_local', None),
-                claude_client=getattr(api, '_claude', None),
-                memory_manager=getattr(api, '_memory', None),
-                project_root=APP_ROOT,
-            )
-            daemon.start()
-            log.info("Background daemon started")
-        except Exception as daemon_exc:
-            log.warning("Background daemon failed to start: %s", daemon_exc)
-
-    except Exception as exc:
-        log.error("Channel manager failed to start: %s", exc, exc_info=True)
-
-
 def _on_loaded():
     if needs_first_run(settings):
         window.evaluate_js("window.showFirstRun()")
@@ -104,8 +61,6 @@ def _on_loaded():
     # sentence-transformers, ChromaDB, and the indexer thread all run here so
     # a blank PyWebView frame is never shown during a 60s first-run download.
     api.start_deferred_init()
-    # Start channel manager after GUI is loaded (services are fully initialised)
-    threading.Thread(target=_start_channel_manager, name="channel-manager-start", daemon=True).start()
 
 
 def _on_closing():
