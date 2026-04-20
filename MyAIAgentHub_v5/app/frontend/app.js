@@ -1290,6 +1290,27 @@ async function loadSettings() {
   renderServiceStatus();
 }
 
+// Shared across the Settings → Subsystem status block and the first-run
+// wizard summary so both surfaces use identical human-readable names.
+const SERVICE_LABELS = {
+  claude_client: "Claude API client",
+  local_client: "Local model (Ollama / LM Studio)",
+  embedder: "Shared embedding model",
+  rag_index: "RAG index",
+  rag_load: "RAG cache load",
+  database: "SQLite database",
+  prompts_seed: "Prompt library",
+  agents_seed: "Built-in agents",
+  theory_of_mind: "Theory of Mind",
+  firewall: "Input firewall",
+  semantic_search: "Semantic search (ChromaDB)",
+  semantic_search_indexer: "Semantic search indexer",
+  memory_manager: "Memory manager",
+  router: "Task router",
+  hook_manager: "Hook manager",
+  chat_orchestrator: "Chat orchestrator",
+};
+
 async function renderServiceStatus() {
   const list = document.getElementById("service-status-list");
   if(!list) return;
@@ -1299,24 +1320,6 @@ async function renderServiceStatus() {
     list.textContent = "Service status unavailable.";
     return;
   }
-  const labels = {
-    claude_client: "Claude API client",
-    local_client: "Local model (Ollama / LM Studio)",
-    embedder: "Shared embedding model",
-    rag_index: "RAG index",
-    rag_load: "RAG cache load",
-    database: "SQLite database",
-    prompts_seed: "Prompt library",
-    agents_seed: "Built-in agents",
-    theory_of_mind: "Theory of Mind",
-    firewall: "Input firewall",
-    semantic_search: "Semantic search (ChromaDB)",
-    semantic_search_indexer: "Semantic search indexer",
-    memory_manager: "Memory manager",
-    router: "Task router",
-    hook_manager: "Hook manager",
-    chat_orchestrator: "Chat orchestrator",
-  };
   const names = Object.keys(status).sort();
   for(const name of names) {
     const entry = status[name] || {};
@@ -1326,7 +1329,7 @@ async function renderServiceStatus() {
     const dot = document.createElement("span");
     dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:${ok ? "#4caf50" : "#f44336"};flex-shrink:0;`;
     const label = document.createElement("span");
-    label.textContent = labels[name] || name;
+    label.textContent = SERVICE_LABELS[name] || name;
     label.style.cssText = "flex:1;color:var(--text);";
     const detail = document.createElement("span");
     detail.style.cssText = `color:${ok ? "var(--text3)" : "#f44336"};font-size:11px;`;
@@ -1665,7 +1668,7 @@ document.getElementById("wz-next-3").addEventListener("click", () => wizGoToStep
 document.getElementById("wz-skip-3").addEventListener("click", () => wizGoToStep(4));
 
 // ── Step 4: Ready checklist ──
-function wizPopulateReadyStep() {
+async function wizPopulateReadyStep() {
   const list = document.getElementById("wz-checklist");
   const items = [];
   // Claude connection
@@ -1686,6 +1689,32 @@ function wizPopulateReadyStep() {
       <div class="wz-check-detail">${escHtml(it.detail)}</div>
     </div>
   `).join("");
+
+  // Surface any subsystems that failed to start so the user sees the degraded
+  // state before clicking into the app. Don't render healthy ones — at 16
+  // services a full grid would overwhelm the "you're all set" moment.
+  const wzStatus = document.getElementById("wz-subsystem-status");
+  if(wzStatus) {
+    wzStatus.innerHTML = "";
+    const status = await api("service_status");
+    if(status && typeof status === "object") {
+      const failed = Object.entries(status).filter(([, e]) => e && !e.ok);
+      if(failed.length) {
+        const heading = document.createElement("div");
+        heading.className = "wz-sub";
+        heading.style.cssText = "margin:14px 0 6px;font-size:12px;text-align:left;";
+        heading.textContent = "Unavailable subsystems (features degrade, chat still works):";
+        wzStatus.appendChild(heading);
+        wzStatus.innerHTML += failed.map(([name, entry]) => `
+          <div class="wz-check-item">
+            <div class="wz-check-icon skip">&#8212;</div>
+            <div class="wz-check-label">${escHtml(SERVICE_LABELS[name] || name)}</div>
+            <div class="wz-check-detail">${escHtml(entry.error || "unavailable")}</div>
+          </div>
+        `).join("");
+      }
+    }
+  }
 }
 
 document.getElementById("wz-finish-btn").addEventListener("click", async () => {
