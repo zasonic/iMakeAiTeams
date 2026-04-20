@@ -102,26 +102,14 @@ class API:
             lambda: LocalClient(self._settings),
         )
 
-        # ── Shared embedding model (RAG + semantic search share the ~90MB ST) ─
-        _shared_st_model = self._safe_init(
-            "embedder",
-            self._load_shared_embedder,
-        )
-
-        # ── RAG index ─────────────────────────────────────────────────────────
+        # ── RAG index (fast — constructs empty, embedder attached later) ──────
+        # The SentenceTransformer model is NOT loaded here: that can block up
+        # to 60s on first run while HuggingFace downloads 90MB. Deferred to
+        # _start_deferred_init() which runs after the window paints.
         self._rag = self._safe_init(
             "rag_index",
-            lambda: RAGIndex(model=_shared_st_model),
+            lambda: RAGIndex(model=None),
         )
-        if self._rag is not None:
-            _rag_path = paths.rag_cache_dir() / "index.npz"
-            if _rag_path.exists():
-                self._safe_init(
-                    "rag_load",
-                    lambda: (self._rag.load(_rag_path), self._rag.chunk_count())[1],
-                )
-            else:
-                self._status["rag_load"] = {"ok": True, "error": None}
 
         # ── Database (required — chat/memory can't degrade without it) ────────
         self._safe_init(
@@ -146,19 +134,7 @@ class API:
             return has_key
         self._safe_init("firewall", _firewall_init)
 
-        # ── Semantic search ───────────────────────────────────────────────────
-        self._safe_init(
-            "semantic_search",
-            lambda: semantic_search.init_vector_store(
-                paths.vector_store_dir(), shared_model=_shared_st_model,
-            ),
-        )
-        self._safe_init(
-            "semantic_search_indexer",
-            lambda: semantic_search.start_background_indexer(interval_seconds=60),
-        )
-
-        # ── Memory manager ────────────────────────────────────────────────────
+        # ── Memory manager (fast — stores refs; rag/semantic lazy-check) ──────
         self._memory = self._safe_init(
             "memory_manager",
             lambda: MemoryManager(
@@ -192,6 +168,77 @@ class API:
                 hook_manager=self._hooks,
             ),
         )
+
+        # ── Deferred services — mark pending so UI renders a spinner row ──────
+        # These come up after the window paints, driven by start_deferred_init.
+        for _name in ("embedder", "rag_load", "semantic_search",
+                      "semantic_search_indexer"):
+            self._status[_name] = {"ok": False, "error": None, "pending": True}
+
+    # ── Deferred initialization ───────────────────────────────────────────────
+
+    def start_deferred_init(self) -> None:
+        """Start the slow services in a background thread.
+
+        Call this from main.py after the window's `loaded` event fires. Heavy
+        work — sentence-transformers model load (~2-5s, or 60s+ on first-run
+        download), ChromaDB client construction (500ms-2s), background indexer
+        thread start — all run here so the user sees a painted window within
+        a second of launch instead of a blank PyWebView frame.
+        """
+        threading.Thread(
+            target=self._run_deferred_init,
+            daemon=True,
+            name="api-deferred-init",
+        ).start()
+
+    def _run_deferred_init(self) -> None:
+        # 1. Embedding model (the hang risk)
+        model = self._safe_init("embedder", self._load_shared_embedder)
+        self._emit_service_update("embedder")
+
+        # Attach the model to the already-constructed RAG index. RAGIndex
+        # tolerates a None model for construction and uses this attribute
+        # lazily in search/index operations.
+        if self._rag is not None and model is not None:
+            self._rag._model = model
+
+        # 2. RAG cache load — only meaningful once embedder is available
+        _rag_path = paths.rag_cache_dir() / "index.npz"
+        if self._rag is not None and model is not None and _rag_path.exists():
+            self._safe_init(
+                "rag_load",
+                lambda: (self._rag.load(_rag_path), self._rag.chunk_count())[1],
+            )
+        else:
+            self._status["rag_load"] = {
+                "ok": model is not None,
+                "error": None if model is not None else "embedder unavailable",
+            }
+        self._emit_service_update("rag_load")
+
+        # 3. ChromaDB vector store
+        self._safe_init(
+            "semantic_search",
+            lambda: semantic_search.init_vector_store(
+                paths.vector_store_dir(), shared_model=model,
+            ),
+        )
+        self._emit_service_update("semantic_search")
+
+        # 4. Background indexer thread
+        self._safe_init(
+            "semantic_search_indexer",
+            lambda: semantic_search.start_background_indexer(interval_seconds=60),
+        )
+        self._emit_service_update("semantic_search_indexer")
+
+        self._log.info("Deferred init complete.")
+
+    def _emit_service_update(self, name: str) -> None:
+        """Push a live status update to the frontend so the UI can refresh."""
+        entry = self._status.get(name, {})
+        self._emit("service_status_update", {"service": name, **entry})
 
     # ── Fail-soft service init ────────────────────────────────────────────────
 
@@ -624,7 +671,7 @@ class API:
 
     # ── RAG / Documents ───────────────────────────────────────────────────────
 
-    @_requires("rag_index", default=None)
+    @_requires("embedder", default=None)
     def build_rag_index(self, folder_path: str) -> None:
         """Build/rebuild the RAG index from a folder."""
         def _work():
@@ -655,7 +702,7 @@ class API:
                 self._emit("rag_error", {"error": friendly})
         run_in_thread(_work)
 
-    @_requires("rag_index", default={"error": "RAG unavailable"})
+    @_requires("embedder", default={"error": "RAG unavailable"})
     def rag_add_file(self, file_path: str) -> dict:
         """Add a single file to the existing RAG index."""
         # ── Priority 5: scan document content before indexing ─────────────────
@@ -677,7 +724,7 @@ class API:
         except Exception as e:
             return {"error": str(e)}
 
-    @_requires("rag_index", default={"error": "RAG unavailable"})
+    @_requires("embedder", default={"error": "RAG unavailable"})
     def rag_add_text(self, text: str, source: str = "manual") -> dict:
         """Add raw text to the RAG index."""
         try:
@@ -710,7 +757,7 @@ class API:
             "error": status.get("error"),
         }
 
-    @_requires("rag_index", default=[])
+    @_requires("embedder", default=[])
     def rag_search(self, query: str, top_k: int = 5) -> list:
         results = self._rag.search(query, top_k=top_k)
         # Unwrap (text, score) tuples — the frontend only needs the text strings

@@ -35,11 +35,17 @@ def requires(service_name: str, default: Any = None) -> Callable:
         def wrapped(self, *args, **kwargs):
             status = self._status.get(service_name, {})
             if not status.get("ok"):
-                self._emit("service_unavailable", {
-                    "service": service_name,
-                    "error": status.get("error"),
-                    "method": fn.__name__,
-                })
+                # ``pending`` means the service is still starting in the
+                # deferred-init thread — not a user-visible failure. Return
+                # the default quietly; the Settings panel row will flip to
+                # ``ok`` (or to a real error) via a ``service_status_update``
+                # event once _run_deferred_init finishes this step.
+                if not status.get("pending"):
+                    self._emit("service_unavailable", {
+                        "service": service_name,
+                        "error": status.get("error"),
+                        "method": fn.__name__,
+                    })
                 return default
             return fn(self, *args, **kwargs)
         return wrapped

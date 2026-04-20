@@ -85,3 +85,18 @@ def test_decorator_preserves_args_kwargs_and_metadata():
     # functools.wraps preserves name + docstring
     assert chat_get_messages.__name__ == "chat_get_messages"
     assert chat_get_messages.__doc__ == "Return messages."
+
+
+def test_decorator_is_quiet_for_pending_services():
+    """A service that's still booting (deferred_init) must not fire the
+    service_unavailable toast — that would alarm the user over a normal
+    first-run state."""
+    api = _FakeAPI({"embedder": {"ok": False, "error": None, "pending": True}})
+
+    @_requires("embedder", default=[])
+    def rag_search(self, q):
+        return ["real"]
+
+    assert rag_search(api, "q") == []
+    # Crucially: no toast event emitted while pending.
+    assert api.emitted == []

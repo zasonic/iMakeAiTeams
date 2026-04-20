@@ -121,6 +121,16 @@ function handleEvent(event, payload) {
         );
       }
       break;
+    case "service_status_update":
+      // Live update from deferred-init: a previously-pending service has
+      // finished booting. Refresh the Settings + wizard status lists if
+      // they're rendered; show a one-time toast only when a service came up
+      // that the user likely cares about.
+      renderServiceStatusIfVisible();
+      if(payload.ok && payload.service === "embedder") {
+        showToast("Document search is now ready", "success");
+      }
+      break;
     case "chat_event": handleStructuredEvent(payload); break;
     case "rag_progress":
       document.getElementById("rag-subtitle").textContent = payload.status || "";
@@ -1311,6 +1321,12 @@ const SERVICE_LABELS = {
   chat_orchestrator: "Chat orchestrator",
 };
 
+function renderServiceStatusIfVisible() {
+  // Settings panel is only mounted when the user navigates to that view.
+  // Skip when hidden to avoid a useless api() round-trip per event.
+  if(document.getElementById("service-status-list")) renderServiceStatus();
+}
+
 async function renderServiceStatus() {
   const list = document.getElementById("service-status-list");
   if(!list) return;
@@ -1324,16 +1340,18 @@ async function renderServiceStatus() {
   for(const name of names) {
     const entry = status[name] || {};
     const ok = !!entry.ok;
+    const pending = !!entry.pending;
     const row = document.createElement("div");
     row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;background:var(--bg3);font-size:12px;";
     const dot = document.createElement("span");
-    dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:${ok ? "#4caf50" : "#f44336"};flex-shrink:0;`;
+    const color = pending ? "#f0ad4e" : (ok ? "#4caf50" : "#f44336");
+    dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0;`;
     const label = document.createElement("span");
     label.textContent = SERVICE_LABELS[name] || name;
     label.style.cssText = "flex:1;color:var(--text);";
     const detail = document.createElement("span");
-    detail.style.cssText = `color:${ok ? "var(--text3)" : "#f44336"};font-size:11px;`;
-    detail.textContent = ok ? "ok" : (entry.error || "unavailable");
+    detail.style.cssText = `color:${pending ? "#f0ad4e" : (ok ? "var(--text3)" : "#f44336")};font-size:11px;`;
+    detail.textContent = pending ? "starting…" : (ok ? "ok" : (entry.error || "unavailable"));
     row.appendChild(dot);
     row.appendChild(label);
     row.appendChild(detail);

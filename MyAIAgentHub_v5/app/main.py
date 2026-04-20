@@ -100,6 +100,10 @@ def _on_loaded():
     else:
         start = settings.get("start_tab", "chat")
         window.evaluate_js(f"window.navigate('{start}')")
+    # Kick off the deferred (slow) services now that the window has painted.
+    # sentence-transformers, ChromaDB, and the indexer thread all run here so
+    # a blank PyWebView frame is never shown during a 60s first-run download.
+    api.start_deferred_init()
     # Start channel manager after GUI is loaded (services are fully initialised)
     threading.Thread(target=_start_channel_manager, name="channel-manager-start", daemon=True).start()
 
