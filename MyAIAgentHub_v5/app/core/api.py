@@ -44,25 +44,18 @@ from services.claude_client import ClaudeClient
 from services.local_client import LocalClient
 from services.rag_index import RAGIndex
 from services import semantic_search, error_classifier, health_monitor
-from services import prompt_library, task_scheduler
+from services import prompt_library
 from services.router import TaskRouter
 from services.memory import MemoryManager
 from services.chat_orchestrator import ChatOrchestrator
-from services.hooks import HookManager
 from services.agent_registry import (
     seed_agents, update_builtin_tom,
     generate_agent_tom, refresh_team_tom,
     add_team_member as _registry_add_member,
     remove_team_member as _registry_remove_member,
 )
-from services import input_sanitizer, adversarial_debate
+from services import input_sanitizer
 from services.rate_limiter import rate_limit_chat, rate_limit
-from services.task_scheduler import (
-    get_workflow_handoffs, get_workflow_checkpoints, get_success_criteria_map,
-)
-from services.memory import (
-    get_pending_review, approve_pending, reject_pending, get_pending_count,
-)
 
 from models import StreamEvent
 
@@ -150,12 +143,6 @@ class API:
             lambda: TaskRouter(self._local, self._settings),
         )
 
-        # ── Hook manager ──────────────────────────────────────────────────────
-        self._hooks = self._safe_init(
-            "hook_manager",
-            lambda: HookManager(self._settings),
-        )
-
         # ── Chat orchestrator ─────────────────────────────────────────────────
         self._chat = self._safe_init(
             "chat_orchestrator",
@@ -165,7 +152,6 @@ class API:
                 router=self._router,
                 memory=self._memory,
                 settings=self._settings,
-                hook_manager=self._hooks,
             ),
         )
 
@@ -356,9 +342,7 @@ class API:
             "start_tab":             self._settings.get("start_tab",             "chat"),
             "routing_enabled":               self._settings.get("routing_enabled",               True),
             "smart_routing_enabled":         self._settings.get("routing_enabled",               True),
-            "goal_decomposition_enabled":    self._settings.get("goal_decomposition_enabled",    True),
             "interleaved_reasoning_enabled": self._settings.get("interleaved_reasoning_enabled", True),
-            "knowledge_graph_enabled":       self._settings.get("knowledge_graph_enabled",       True),
             "firewall_enabled":              self._settings.get("firewall_enabled",              True),
             "is_first_run":                  not self._settings.get("first_run_complete",        False),
             "first_run_complete":            self._settings.get("first_run_complete",            False),
@@ -972,116 +956,6 @@ class API:
         delete_team(team_id)
         return {"ok": True}
 
-    # ── Workflow / multi-agent ────────────────────────────────────────────────
-
-    def plan_and_run_workflow(self, goal: str,
-                              workflow_name: str = "") -> None:
-        def _work():
-            try:
-                name  = workflow_name or f"Workflow {datetime.now(timezone.utc).strftime('%H:%M')}"
-                wf_id = task_scheduler.plan_workflow(goal, self._claude, workflow_name=name)
-                self._emit("workflow_planned", {"workflow_id": wf_id, "name": name})
-
-                def _on_status(s):
-                    self._emit("workflow_progress", s)
-
-                def _on_event(event_name, payload):
-                    self._emit(event_name, payload)
-                    # Fire workflow hooks
-                    if event_name == "task_starting":
-                        self._hooks.fire("pre_workflow", payload)
-                    elif event_name in ("task_done", "task_failed"):
-                        self._hooks.fire("post_workflow", payload)
-                    elif event_name == "safety_blocked":
-                        self._hooks.fire("post_workflow", {
-                            **payload, "status": "safety_blocked"
-                        })
-
-                criteria = get_success_criteria_map(wf_id)
-                result = task_scheduler.run_workflow(
-                    wf_id, self._claude, self._local,
-                    on_status=_on_status,
-                    on_event=_on_event,
-                    success_criteria_map=criteria,
-                )
-
-                # ── Priority 6: Adversarial Debate Round ──────────────────────
-                use_local = not bool(self._settings.get("claude_api_key", "").strip())
-                debate_result = adversarial_debate.run_debate_round(
-                    workflow_id=wf_id, claude_client=self._claude,
-                    on_event=_on_event, use_local=use_local,
-                )
-                addendum = adversarial_debate.build_debate_synthesis_addendum(debate_result)
-                if addendum:
-                    result["debate_summary"]  = addendum
-                    result["debate_conflicts"] = debate_result["total_fact_conflicts"]
-                    result["debate_gaps"]      = debate_result["total_gaps"]
-
-                self._emit("workflow_done", result)
-                self._os_notify("Workflow complete", name)
-            except Exception as e:
-                self._log.error(f"Workflow error: {e}")
-                err_msg = str(e).lower()
-                if "invalid json" in err_msg or "json" in err_msg:
-                    friendly = "The planner couldn't parse that goal. Try rephrasing it more specifically, e.g. 'Research X and write a summary'."
-                elif "cycle" in err_msg:
-                    friendly = "The workflow planner created a circular dependency. Try a simpler goal."
-                elif "authentication" in err_msg or "api key" in err_msg:
-                    friendly = "Invalid API key — update it in Settings to run workflows."
-                elif "rate" in err_msg or "429" in err_msg:
-                    friendly = "Claude is busy — wait a moment and try again."
-                else:
-                    friendly = "Workflow stopped unexpectedly. Try a more specific goal, or check the error log in Settings."
-                self._emit("workflow_error", {"error": friendly})
-        run_in_thread(_work)
-
-    def get_workflow_status(self, workflow_id: str) -> dict:
-        return task_scheduler.get_workflow_status(workflow_id)
-
-    def list_workflows(self, limit: int = 20) -> list:
-        return task_scheduler.list_workflows(limit=limit)
-
-    def get_workflow_templates(self) -> list:
-        """Return template gallery cards for the frontend."""
-        from services.workflow_templates import list_templates
-        return list_templates()
-
-    @rate_limit_chat
-    def run_workflow_from_template(self, template_id: str, goal: str,
-                                    workflow_name: str = "") -> None:
-        """
-        Instantiate a pre-built template and run it immediately.
-        Emits the same workflow_planned / workflow_progress / workflow_done events
-        as plan_and_run_workflow.
-        """
-        def _work():
-            try:
-                from services.workflow_templates import plan_from_template
-                wf_id = plan_from_template(template_id, goal,
-                                            workflow_name=workflow_name)
-                name = workflow_name or goal[:40]
-                self._emit("workflow_planned", {"workflow_id": wf_id, "name": name})
-
-                def _on_status(s):
-                    self._emit("workflow_progress", s)
-
-                result = task_scheduler.run_workflow(
-                    wf_id, self._claude, self._local, on_status=_on_status
-                )
-                self._emit("workflow_done", result)
-                self._os_notify("Workflow complete", name)
-            except Exception as e:
-                self._log.error(f"Template workflow error: {e}")
-                err_msg = str(e).lower()
-                if "unknown template" in err_msg:
-                    friendly = "Unknown template — please reload and try again."
-                elif "authentication" in err_msg or "api key" in err_msg:
-                    friendly = "Invalid API key — update it in Settings."
-                else:
-                    friendly = f"Workflow failed: {e}"
-                self._emit("workflow_error", {"error": friendly})
-        run_in_thread(_work)
-
     # ── Prompt library ────────────────────────────────────────────────────────
 
     def prompt_list(self) -> list:
@@ -1112,23 +986,6 @@ class API:
 
     def prompt_import(self, data: dict) -> dict:
         return prompt_library.import_prompt(data)
-
-    def prompt_compare(self, version_a_id: str, version_b_id: str,
-                       test_input: str, criteria: list | None = None) -> None:
-        def _work():
-            try:
-                result = prompt_library.run_comparison(
-                    version_a_id, version_b_id, test_input,
-                    criteria or ["accuracy", "clarity", "task_adherence"],
-                    self._claude,
-                )
-                self._emit("prompt_compare_done", result)
-            except Exception as e:
-                self._emit("prompt_compare_error", {"error": str(e)})
-        run_in_thread(_work)
-
-    def prompt_experiments(self, limit: int = 20) -> list:
-        return prompt_library.list_experiments(limit=limit)
 
     # ── Health check ─────────────────────────────────────────────────────────
 
@@ -1382,34 +1239,6 @@ class API:
             "chroma_docs":    semantic_search.document_count(),
         }
 
-    # ── Priority 3: HandoffPacket ─────────────────────────────────────────────
-
-    def workflow_get_handoffs(self, workflow_id: str) -> list:
-        """Return all HandoffPackets for a workflow."""
-        return get_workflow_handoffs(workflow_id)
-
-    # ── Priority 4: Saga Checkpoints ──────────────────────────────────────────
-
-    def workflow_get_checkpoints(self, workflow_id: str) -> list:
-        """Return all saga checkpoints for a workflow."""
-        return get_workflow_checkpoints(workflow_id)
-
-    def workflow_checkpoint_summary(self, workflow_id: str) -> dict:
-        """Aggregated saga state for the workflow detail header."""
-        checkpoints = get_workflow_checkpoints(workflow_id)
-        if not checkpoints:
-            return {"total": 0, "committed": 0, "rolled_back": 0, "avg_confidence": None}
-        committed  = [c for c in checkpoints if c.get("state") == "committed"]
-        rolled     = [c for c in checkpoints if c.get("state") == "rolled_back"]
-        scores     = [c["confidence_score"] for c in committed if c.get("confidence_score")]
-        return {
-            "total":          len(checkpoints),
-            "committed":      len(committed),
-            "rolled_back":    len(rolled),
-            "avg_confidence": round(sum(scores)/len(scores), 2) if scores else None,
-            "steps_with_retries": sorted({c["step_index"] for c in rolled}),
-        }
-
     # ── Priority 5: Firewall ──────────────────────────────────────────────────
 
     def security_get_status(self) -> dict:
@@ -1425,179 +1254,6 @@ class API:
         """Return recent scan log for the Settings Security audit panel."""
         return input_sanitizer.get_scan_log(limit=limit, verdict_filter=verdict_filter)
 
-    # ── Priority 6: Adversarial Debate ───────────────────────────────────────
-
-    def workflow_get_debate(self, workflow_id: str) -> list:
-        """Return all ChallengePackets for a workflow debate round."""
-        return adversarial_debate.get_workflow_debate(workflow_id)
-
-    def debate_get_settings(self) -> dict:
-        """Return debate settings for the Settings panel."""
-        return {
-            "debate_enabled":        adversarial_debate.is_debate_enabled(),
-            "debate_tier_threshold": adversarial_debate.get_debate_tier_threshold(),
-        }
-
-    def debate_set_settings(self, enabled: bool, tier_threshold: str = "claude") -> dict:
-        """Update debate toggle and tier threshold."""
-        if tier_threshold not in ("claude", "local", "never"):
-            return {"ok": False, "error": "tier_threshold must be claude, local, or never"}
-        adversarial_debate.set_debate_settings(enabled=enabled, tier_threshold=tier_threshold)
-        return {"ok": True, "debate_enabled": enabled, "debate_tier_threshold": tier_threshold}
-
-    def debate_estimate_cost(self, agent_count: int = 4) -> dict:
-        """Estimate cost of a debate round for the Settings panel."""
-        tokens = agent_count * 400
-        cost   = (tokens / 1_000_000) * 3.0  # Sonnet output $/M
-        return {
-            "agent_count": agent_count, "total_output_tokens": tokens,
-            "estimated_cost_usd": round(cost, 6),
-            "cost_label": f"~${cost:.4f}" if cost >= 0.0001 else "<$0.0001",
-            "note": f"{agent_count} agent(s) × ~400 tokens each at Sonnet tier",
-        }
-
-    # ── Priority 7: Memory Trust Scoring ─────────────────────────────────────
-
-    def memory_get_pending_review(self, limit: int = 50) -> list:
-        """Return unresolved flagged memory items for the Settings review panel."""
-        return get_pending_review(limit=limit)
-
-    def memory_approve_pending(self, review_id: str) -> dict:
-        """Approve a pending memory item — commits it to the appropriate store."""
-        ok = approve_pending(review_id)
-        return {"ok": ok}
-
-    def memory_reject_pending(self, review_id: str) -> dict:
-        """Reject a pending memory item — discards it permanently."""
-        ok = reject_pending(review_id)
-        return {"ok": ok}
-
-    def memory_pending_count(self) -> dict:
-        """Return count of unresolved pending review items (for badge display)."""
-        return {"count": get_pending_count()}
-
-    # ── Hook management ──────────────────────────────────────────────────────
-
-    @_requires("hook_manager", default=[])
-    def hook_list_points(self) -> list:
-        """Return all hook points with descriptions and current hook counts."""
-        return self._hooks.list_hook_points()
-
-    @_requires("hook_manager", default=[])
-    def hook_list(self, hook_point: str) -> list:
-        """Return all hooks configured for a specific hook point."""
-        return self._hooks.get_hooks(hook_point)
-
-    @_requires("hook_manager", default={"error": "hooks unavailable"})
-    def hook_add(self, hook_point: str, name: str, action: str = "log",
-                 condition: str = "", description: str = "",
-                 **extra) -> dict:
-        """Add a hook to a hook point."""
-        cfg = {
-            "name": name,
-            "action": action,
-            "condition": condition,
-            "description": description,
-            "enabled": True,
-            **extra,
-        }
-        return self._hooks.add_hook(hook_point, cfg)
-
-    @_requires("hook_manager", default={"error": "hooks unavailable"})
-    def hook_remove(self, hook_point: str, hook_name: str) -> dict:
-        """Remove a hook by name."""
-        ok = self._hooks.remove_hook(hook_point, hook_name)
-        return {"ok": ok}
-
-    @_requires("hook_manager", default={"error": "hooks unavailable"})
-    def hook_toggle(self, hook_point: str, hook_name: str,
-                    enabled: bool) -> dict:
-        """Enable or disable a hook."""
-        ok = self._hooks.toggle_hook(hook_point, hook_name, enabled)
-        return {"ok": ok}
-
-    @_requires("hook_manager", default=[])
-    def hook_list_actions(self) -> list:
-        """Return all available hook action types."""
-        return self._hooks.list_actions()
-
-    @_requires("hook_manager", default=[])
-    def hook_execution_log(self, limit: int = 50) -> list:
-        """Return recent hook execution log."""
-        return self._hooks.get_execution_log(limit)
-
-    # ── Safety gate ──────────────────────────────────────────────────────────
-
-    def safety_scan_command(self, command: str) -> dict:
-        """Scan a command string for dangerous patterns."""
-        from services.safety_gate import scan_command
-        v = scan_command(command)
-        return {"level": v.level.value, "reason": v.reason, "pattern": v.pattern}
-
-    def safety_scan_content(self, content: str) -> dict:
-        """Scan content for dangerous patterns."""
-        from services.safety_gate import scan_content
-        v = scan_content(content)
-        return {"level": v.level.value, "reason": v.reason, "pattern": v.pattern}
-
-    def safety_get_patterns(self) -> dict:
-        """Return all safety gate patterns for display in Settings."""
-        from services.safety_gate import get_all_patterns
-        return get_all_patterns()
-
-    # ── Context compressor ───────────────────────────────────────────────────
-
-    @_requires("chat_orchestrator", default={"error": "chat unavailable"})
-    def compressor_reset(self) -> dict:
-        """Reset the context compressor circuit breaker."""
-        self._chat.compressor.reset_circuit_breaker()
-        return {"ok": True}
-
-    @_requires("chat_orchestrator", default={})
-    def compressor_status(self) -> dict:
-        """Return current compressor status."""
-        c = self._chat.compressor
-        return {
-            "circuit_broken": c._circuit_broken,
-            "consecutive_failures": c._consecutive_failures,
-        }
-
-    # ── v4.0: Knowledge Graph ────────────────────────────────────────────────
-
-    def knowledge_graph_stats(self) -> dict:
-        """Return stats about the knowledge graph triple store."""
-        from services import knowledge_graph as _kg
-        return _kg.get_stats()
-
-    def knowledge_graph_search(self, query: str, limit: int = 20) -> list:
-        """Search knowledge graph triples by keyword."""
-        from services import knowledge_graph as _kg
-        return _kg.search_triples(query, limit=limit)
-
-    def knowledge_graph_toggle(self, enabled: bool) -> dict:
-        """Enable or disable knowledge graph extraction."""
-        self._settings.set("knowledge_graph_enabled", enabled)
-        return {"ok": True, "enabled": enabled}
-
-    # ── v4.0: Goal Decomposition ─────────────────────────────────────────────
-
-    def goal_decomposition_toggle(self, enabled: bool) -> dict:
-        """Enable or disable automatic goal decomposition."""
-        self._settings.set("goal_decomposition_enabled", enabled)
-        return {"ok": True, "enabled": enabled}
-
-    def goal_decomposition_status(self) -> dict:
-        """Return current goal decomposition settings."""
-        return {
-            "enabled": self._settings.get("goal_decomposition_enabled", True),
-            "interleaved_reasoning": self._settings.get("interleaved_reasoning_enabled", True),
-        }
-
-    def interleaved_reasoning_toggle(self, enabled: bool) -> dict:
-        """Enable or disable interleaved extended reasoning."""
-        self._settings.set("interleaved_reasoning_enabled", enabled)
-        return {"ok": True, "enabled": enabled}
-
     # ── v4.0: Studio Mode ────────────────────────────────────────────────────
 
     def studio_mode_get(self) -> dict:
@@ -1612,100 +1268,7 @@ class API:
     def shutdown(self) -> None:
         self._log.info("Shutting down services…")
         self._stop_chat.set()
-        if hasattr(self, '_channel_manager') and self._channel_manager:
-            try:
-                self._channel_manager.stop()
-            except Exception:
-                pass
         self._log.info("Shutdown complete.")
-
-    # ── Channel management ────────────────────────────────────────────────────
-
-    def set_channel_manager(self, channel_manager) -> None:
-        """Called by main.py after startup to wire in the channel manager."""
-        self._channel_manager = channel_manager
-
-    def channel_status(self) -> dict:
-        """Return status of all channel adapters."""
-        if not hasattr(self, '_channel_manager') or not self._channel_manager:
-            return {"error": "Channel manager not initialised", "adapters": {}}
-        return self._channel_manager.status()
-
-    def channel_stop_agent(self, conversation_id: str) -> dict:
-        """Stop a running agent loop for a conversation."""
-        if not hasattr(self, '_channel_manager') or not self._channel_manager:
-            return {"error": "Channel manager not initialised"}
-        stopped = self._channel_manager.stop_agent_task(conversation_id)
-        return {"ok": stopped, "conversation_id": conversation_id}
-
-    def channel_get_allowlist(self, channel_name: str) -> dict:
-        """Get the user allowlist for a channel."""
-        if not hasattr(self, '_channel_manager') or not self._channel_manager:
-            return {"error": "Channel manager not initialised"}
-        return {
-            "channel": channel_name,
-            "allowlist": self._channel_manager._ac.get_allowlist(channel_name),
-        }
-
-    def channel_add_user(self, channel_name: str, user_id: str) -> dict:
-        """Add a user ID to a channel's allowlist."""
-        if not hasattr(self, '_channel_manager') or not self._channel_manager:
-            return {"error": "Channel manager not initialised"}
-        self._channel_manager._ac.add_user(channel_name, str(user_id))
-        return {"ok": True, "channel": channel_name, "user_id": user_id}
-
-    def channel_remove_user(self, channel_name: str, user_id: str) -> dict:
-        """Remove a user ID from a channel's allowlist."""
-        if not hasattr(self, '_channel_manager') or not self._channel_manager:
-            return {"error": "Channel manager not initialised"}
-        self._channel_manager._ac.remove_user(channel_name, str(user_id))
-        return {"ok": True, "channel": channel_name, "user_id": user_id}
-
-    def channel_set_open(self, channel_name: str) -> dict:
-        """Set a channel to open mode (all users allowed)."""
-        if not hasattr(self, '_channel_manager') or not self._channel_manager:
-            return {"error": "Channel manager not initialised"}
-        self._channel_manager._ac.set_open(channel_name)
-        return {"ok": True, "channel": channel_name, "mode": "open"}
-
-    def agent_approve_tool(self, request_id: str, allow_session: bool = False) -> dict:
-        """Approve a pending tool call from the agent loop (called by GUI)."""
-        if not hasattr(self, '_channel_manager') or not self._channel_manager:
-            return {"error": "No channel manager"}
-        # Forward to active agent loops
-        with self._channel_manager._lock:
-            for loop in self._channel_manager._active_loops.values():
-                if hasattr(loop, '_perms'):
-                    loop._perms.approve(request_id, allow_session=allow_session)
-        return {"ok": True, "request_id": request_id}
-
-    def agent_deny_tool(self, request_id: str) -> dict:
-        """Deny a pending tool call from the agent loop (called by GUI)."""
-        if not hasattr(self, '_channel_manager') or not self._channel_manager:
-            return {"error": "No channel manager"}
-        with self._channel_manager._lock:
-            for loop in self._channel_manager._active_loops.values():
-                if hasattr(loop, '_perms'):
-                    loop._perms.deny(request_id)
-        return {"ok": True, "request_id": request_id}
-
-    def guardrails_status(self) -> dict:
-        """Return NeMo Guardrails gate status."""
-        if not hasattr(self, '_channel_manager') or not self._channel_manager:
-            return {"error": "No channel manager"}
-        gate = self._channel_manager._guardrails
-        if not gate:
-            return {"enabled": False, "mode": "passthrough"}
-        return gate.status()
-
-    def guardrails_set_enabled(self, enabled: bool) -> dict:
-        """Enable or disable the guardrails gate."""
-        if not hasattr(self, '_channel_manager') or not self._channel_manager:
-            return {"error": "No channel manager"}
-        gate = self._channel_manager._guardrails
-        if gate:
-            gate.set_enabled(enabled)
-        return {"ok": True, "enabled": enabled}
 
     def agent_set_project_root(self, path: str) -> dict:
         """Set the default project root for agent runs."""

@@ -26,11 +26,7 @@ import uuid
 from datetime import datetime, timezone
 
 import db as _db
-from models import ChatResult, ExecutionTarget, ToolPermissionContext
-from services.context_compressor import ContextCompressor, micro_compact
-from services.hooks import HookManager
-from services.retrieval_refiner import RetrievalRefiner
-from services.goal_decomposer import GoalDecomposer
+from models import ChatResult, ExecutionTarget
 from services.security_engine import (
     quarantine_chunks, render_quarantined_context, enforce_context_rules,
     validate_fact_for_storage, RiskLedger, RiskCategory, SecurityAssessment,
@@ -113,28 +109,13 @@ def _log_router_event(
 
 
 class ChatOrchestrator:
-    def __init__(self, claude_client, local_client, router, memory, settings,
-                 hook_manager: HookManager | None = None):
+    def __init__(self, claude_client, local_client, router, memory, settings):
         self.claude = claude_client
         self.local = local_client
         self.router = router
         self.memory = memory
         self._settings = settings
-        self.hooks = hook_manager or HookManager(settings)
         self._risk_ledgers: dict[str, RiskLedger] = {}  # per-conversation
-        self.compressor = ContextCompressor(
-            local_client=local_client,
-            claude_client=claude_client,
-        )
-        self.refiner = RetrievalRefiner(
-            rag_index=memory.rag,
-            local_client=local_client,
-            claude_client=claude_client,
-        )
-        self.decomposer = GoalDecomposer(
-            claude_client=claude_client,
-            local_client=local_client,
-        )
 
     # ── Conversation management ──────────────────────────────────────────────
 
@@ -439,80 +420,18 @@ class ChatOrchestrator:
             for r in reversed(history_rows)
         ]
 
-        # ── Fix 7: Token-aware trimming before compression ───────────────────
+        # ── Fix 7: Token-aware trimming ──────────────────────────────────────
         messages = self._trim_history_to_budget(messages)
-
-        # ── Context compression (micro-compact every turn) ───────────────────
-        messages, compact_result = self.compressor.auto_compact(messages)
-        if compact_result and compact_result.success:
-            _emit_event("context_compacted", {
-                "layer":          compact_result.layer.value,
-                "messages_before": compact_result.messages_before,
-                "messages_after":  compact_result.messages_after,
-                "chars_saved":     compact_result.chars_saved,
-            })
 
         # Recall memory and build system context
         mem = self.memory.get_context(conversation_id, user_message)
-
-        # ── Iterative retrieval refinement ──────────────────────────────────
-        # If we have RAG chunks, evaluate whether they're sufficient and
-        # refine the search if needed. This is the core agentic loop.
-        initial_rag = mem.rag_chunks
-        initial_scored = []
-        for chunk in initial_rag:
-            if isinstance(chunk, (list, tuple)) and len(chunk) >= 2:
-                initial_scored.append((str(chunk[0]), float(chunk[1])))
-            elif isinstance(chunk, str):
-                initial_scored.append((chunk, 0.5))
-
-        refinement = self.refiner.refine(
-            user_message,
-            initial_chunks=initial_scored if initial_scored else None,
-            top_k=3,
-            on_event=_emit_event,
-        )
-
-        # Replace RAG chunks with refined, deduplicated results
-        if refinement.was_refined or refinement.chunks:
-            mem.rag_chunks = refinement.texts
-
         mem_suffix = mem.to_system_suffix()
-
-        # ── Inject project memory (CLAUDE.md) into system prompt ───────────
-        # This goes between the base prompt and memory suffix so it's part
-        # of the cacheable prefix (static across turns).
-        try:
-            from services.project_memory import load_project_memory
-            project_root = Path(self._settings.get("agent_project_root", "."))
-            project_mem = load_project_memory(project_root)
-            if project_mem:
-                system_prompt = system_prompt + "\n\n" + project_mem
-        except Exception as _pm_exc:
-            log.debug("Project memory load skipped: %s", _pm_exc)
 
         full_system = system_prompt
         if mem_suffix:
             full_system = system_prompt + "\n\n" + mem_suffix
 
-        # ── Active Memory retrieval (OpenClaw pattern) ────────────────────────
-        # Auto-query RAG for relevant prior context before every reply.
-        # Stored in _active_mem_suffix so it survives system prompt rebuilds.
         _active_mem_suffix = ""
-        try:
-            from services.project_memory import get_active_memory, should_inject_private_memory
-            # Only inject private memory in direct/GUI chats, not group channels
-            if should_inject_private_memory():
-                active_mem = get_active_memory(
-                    user_message,
-                    rag_index=self.memory.rag if hasattr(self.memory, "rag") else None,
-                    semantic_search_mod=self.memory.semantic if hasattr(self.memory, "semantic") else None,
-                )
-                if active_mem:
-                    _active_mem_suffix = active_mem
-                    full_system += "\n\n" + active_mem
-        except Exception:
-            pass  # active memory is best-effort
 
         # ── Fix 9: Inject tool restrictions into system prompt ───────────────
         if _allowed_tools:
@@ -529,18 +448,10 @@ class ChatOrchestrator:
             "facts_count": len(mem.session_facts),
             "rag_chunks": len(mem.rag_chunks),
             "memories": len(mem.memories),
-            "retrieval_refined": refinement.was_refined,
-            "retrieval_passes": refinement.total_passes,
         })
 
         if self.memory.should_summarize(conversation_id):
             self.memory.summarize_buffer(conversation_id)
-
-        # ── Hook: pre_route ──────────────────────────────────────────────────
-        route_ctx = self.hooks.fire("pre_route", {
-            "user_message": user_message,
-            "conversation_id": conversation_id,
-        })
 
         # Route: Claude or local?
         model_pref = agent.get("model_preference", "auto") if agent else "auto"
@@ -568,50 +479,6 @@ class ChatOrchestrator:
             "confidence": route_confidence,
             "needs_context": route_needs_context,
         })
-
-        # ── v4.1 UAR: Confidence-driven context expansion ────────────────────
-        # When the router signals low confidence or needs_context, widen the
-        # retrieval window BEFORE generating. This is the core UAR insight:
-        # "epistemic anxiety" should trigger retrieval, not generation.
-        if route_needs_context and self.memory.rag:
-            _emit_event("context_expanding", {
-                "reason": "low router confidence",
-                "confidence": route_confidence,
-            })
-            try:
-                extra = self.refiner.refine(
-                    user_message,
-                    initial_chunks=[(t, s) for t, s in
-                                    (refinement.chunks if refinement.chunks else [])],
-                    top_k=6,  # double the normal retrieval width
-                    on_event=_emit_event,
-                )
-                if extra.chunks:
-                    # Merge new chunks with existing, dedup by content
-                    existing = set(mem.rag_chunks)
-                    for text in extra.texts:
-                        if text not in existing:
-                            mem.rag_chunks.append(text)
-                            existing.add(text)
-                    # Rebuild system prompt with expanded context
-                    mem_suffix = mem.to_system_suffix()
-                    full_system = system_prompt
-                    if mem_suffix:
-                        full_system = system_prompt + "\n\n" + mem_suffix
-                    if _active_mem_suffix:
-                        full_system += "\n\n" + _active_mem_suffix
-                    if _allowed_tools:
-                        tool_names = ", ".join(_allowed_tools)
-                        full_system += (
-                            "\n\n## Tool Restrictions\n"
-                            f"You may ONLY use these tools: {tool_names}. "
-                            "Do not attempt to use any other tools or capabilities "
-                            "outside this list."
-                        )
-                    log.info("UAR context expansion: %d total RAG chunks",
-                             len(mem.rag_chunks))
-            except Exception as exc:
-                log.debug("UAR context expansion failed (non-fatal): %s", exc)
 
         # ── v4.1: Adaptive memory injection budget (Engram-inspired) ─────────
         # The Engram U-shaped finding says ~25% memory, ~75% reasoning is
@@ -642,33 +509,8 @@ class ChatOrchestrator:
                     "outside this list."
                 )
 
-        # ── Hook: post_route ─────────────────────────────────────────────────
-        self.hooks.fire("post_route", {
-            "route_model": route_model,
-            "complexity": complexity,
-            "reasoning": route_reason,
-        })
-
         # ── Improvement 6: Resolve execution target ──────────────────────────
         target = self._resolve_target(route_model, agent)
-
-        # ── Hook: pre_send ───────────────────────────────────────────────────
-        send_ctx = self.hooks.fire("pre_send", {
-            "user_message": user_message,
-            "system_prompt": full_system,
-            "model": target.model_name,
-            "conversation_id": conversation_id,
-        })
-        if send_ctx.get("_blocked"):
-            return ChatResult(
-                text=f"⚠️ Blocked by hook: {send_ctx.get('_block_reason', 'unknown')}",
-                model="", route_reason="hook_blocked",
-                tokens_in=0, tokens_out=0, cost_usd=0.0,
-                message_id=str(uuid.uuid4()),
-            )
-        # Allow hooks to modify the system prompt
-        if "system_prompt" in send_ctx and send_ctx["system_prompt"] != full_system:
-            full_system = send_ctx["system_prompt"]
 
         # ══════════════════════════════════════════════════════════════════════
         # SECURITY ENGINE: Structural enforcement before model inference
@@ -747,59 +589,18 @@ class ChatOrchestrator:
 
         # ══════════════════════════════════════════════════════════════════════
 
-        # ── v4.0 #2: Dynamic Goal Decomposition ─────────────────────────────
-        # Only attempt decomposition when: routing to Claude, classified complex,
-        # goal decomposition is enabled in settings, and message looks multi-step.
-        decomposition_enabled = self._settings.get("goal_decomposition_enabled", True)
         response_text = ""
         tokens_in = 0
         tokens_out = 0
         model_name = target.model_name
         had_error = False
-        used_decomposition = False
-
-        if (
-            decomposition_enabled
-            and target.backend == "claude"
-            and complexity in ("complex", "medium")
-        ):
-            try:
-                decomp = self.decomposer.decompose_and_execute(
-                    message=user_message,
-                    system_prompt=full_system,
-                    messages=messages,
-                    complexity=complexity,
-                    on_event=_emit_event,
-                    on_token=on_token if on_token else None,
-                )
-                if decomp.was_decomposed and decomp.final_response:
-                    # ── Fix 10: Quality gate — reject short or error-like output ──
-                    resp = decomp.final_response.strip()
-                    if len(resp) > 50 and not resp.startswith("[Error"):
-                        response_text = resp
-                        tokens_in = decomp.total_tokens_in
-                        tokens_out = decomp.total_tokens_out
-                        used_decomposition = True
-                        log.info(
-                            "Goal decomposition used: %d steps, %d tokens",
-                            len(decomp.steps_completed), tokens_out,
-                        )
-                    else:
-                        log.warning(
-                            "Decomposition produced low-quality output (%d chars), "
-                            "falling through to normal path", len(resp)
-                        )
-                        # used_decomposition stays False → normal/thinking path runs
-            except Exception as exc:
-                log.warning("Goal decomposer failed (falling through): %s", exc)
 
         # ── v4.0 #4: Interleaved Reasoning Visibility ────────────────────────
         # When routing to Claude and extended thinking is available, emit
         # a reasoning step event before generating the final response.
         reasoning_enabled = self._settings.get("interleaved_reasoning_enabled", True)
         if (
-            not used_decomposition
-            and reasoning_enabled
+            reasoning_enabled
             and target.backend == "claude"
             and complexity == "complex"
             and not on_token  # only in non-streaming path (thinking is blocking)
@@ -919,19 +720,6 @@ class ChatOrchestrator:
                                 log.debug("Escalation to Claude failed: %s", esc_exc)
             except Exception:
                 pass  # quality check is best-effort, never block response
-
-        # Quality signals for router feedback
-
-        # ── Hook: post_response ──────────────────────────────────────────────
-        self.hooks.fire("post_response", {
-            "response":        response_text,
-            "model":           model_name,
-            "tokens_in":       tokens_in,
-            "tokens_out":      tokens_out,
-            "cost_usd":        _estimate_cost(model_name, tokens_in, tokens_out, self._settings),
-            "had_error":       had_error,
-            "conversation_id": conversation_id,
-        })
 
         # Persist router feedback
         _log_router_event(

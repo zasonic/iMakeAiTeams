@@ -12,13 +12,11 @@
  * │  §4  CONVERSATION MANAGEMENT        — list, create, delete, branch│
  * │  §5  AGENT & TEAM MANAGEMENT        — CRUD, ToM                  │
  * │  §6  RAG & DOCUMENTS                — file indexing, search       │
- * │  §7  WORKFLOWS                      — run, progress, display      │
- * │  §8  PROMPT LIBRARY                 — versions, A/B tests         │
- * │  §9  SETTINGS & DIAGNOSTICS         — config panels, health       │
- * │  §10 SECURITY & SAFETY              — scan display, firewall UI   │
- * │  §11 MEMORY & KNOWLEDGE GRAPH       — facts, pending review       │
- * │  §12 SETUP WIZARD                   — first-run onboarding        │
- * │  §13 INITIALIZATION                 — DOMContentLoaded, nav       │
+ * │  §7  PROMPT LIBRARY                 — versions                    │
+ * │  §8  SETTINGS & DIAGNOSTICS         — config panels, health       │
+ * │  §9  SECURITY & SAFETY              — scan display, firewall UI   │
+ * │  §10 SETUP WIZARD                   — first-run onboarding        │
+ * │  §11 INITIALIZATION                 — DOMContentLoaded, nav       │
  * └────────────────────────────────────────────────────────────────────┘
  *
  * REFACTORING NOTE: This file should eventually be split into ES modules
@@ -61,7 +59,6 @@ const state = {
   ragChunks: 0,
   lastRoute: { model: "claude", reason: "" },
   tokenStats: { total_cost_usd: 0, estimated_savings_usd: 0 },
-  workflows: [],
   settings: {},
   studioMode: false,
   // Current thinking block state
@@ -150,24 +147,6 @@ function handleEvent(event, payload) {
       renderHealthResults(payload.results || []);
       updateHealthDot(payload.has_failures ? "bad" : "ok");
       break;
-    case "workflow_planned":
-      showToast("Workflow planned: " + (payload.name || ""));
-      loadWorkflows();
-      break;
-    case "workflow_progress":
-      updateWorkflowCard(payload);
-      break;
-    case "workflow_done":
-      updateWorkflowCard(payload);
-      loadWorkflows();
-      showToast("Workflow complete ✓", "success");
-      break;
-    case "workflow_error":
-      showToast("Workflow error: " + payload.error, "error");
-      break;
-    case "prompt_compare_done":
-      showToast("Compare done — winner: " + payload.winner);
-      break;
     case "diagnostics_ready":
       document.getElementById("diag-status").textContent = "Saved: " + payload.path;
       break;
@@ -178,9 +157,6 @@ function handleEvent(event, payload) {
       showConnResult(payload.backend, payload.ok);
       break;
     case "security_scan": handleSecurityScanEvent(payload); break;
-    case "handoff_step":   handleHandoffStepEvent(payload);  break;
-    case "saga_checkpoint":handleSagaCheckpointEvent(payload);break;
-    case "debate_round":   handleDebateRoundEvent(payload);   break;
     default:
       console.debug("Unhandled event:", event, payload);
   }
@@ -189,9 +165,6 @@ function handleEvent(event, payload) {
 // ── Structured event handler ──────────────────────────────────────────────────
 function handleStructuredEvent(payload) {
   if(payload.type==="security_scan"){ handleSecurityScanEvent(payload); return; }
-  if(payload.type==="handoff_step"){ handleHandoffStepEvent(payload); return; }
-  if(payload.type==="saga_checkpoint"){ handleSagaCheckpointEvent(payload); return; }
-  if(payload.type==="debate_round"){ handleDebateRoundEvent(payload); return; }
 
   switch(payload.type) {
     case "message_start":
@@ -227,15 +200,6 @@ function handleStructuredEvent(payload) {
       }
       break;
 
-    case "context_expanding":
-      addThinkingStep({
-        icon: "📖",
-        label: "Retrieving additional context",
-        detail: `Router confidence: ${Math.round((payload.confidence||0)*100)}% — widening search`,
-        status: "running",
-      });
-      break;
-
     case "security_assessment":
       addThinkingStep({
         icon: payload.icon || "🛡️",
@@ -246,94 +210,12 @@ function handleStructuredEvent(payload) {
       break;
 
     case "memory_recalled":
-      if(payload.facts_count>0||payload.rag_chunks>0||payload.memories>0||payload.kg_relationships>0) {
+      if(payload.facts_count>0||payload.rag_chunks>0||payload.memories>0) {
         const total = (payload.facts_count||0)+(payload.rag_chunks||0)+(payload.memories||0);
-        let detail = total + " memor"+(total===1?"y":"ies")+" recalled";
-        if(payload.retrieval_refined) detail += " (refined ×" + payload.retrieval_passes + ")";
-        if(payload.kg_relationships) detail += ", " + payload.kg_relationships + " relationship" + (payload.kg_relationships===1?"":"s");
+        const detail = total + " memor"+(total===1?"y":"ies")+" recalled";
         addThinkingStep({ icon:"🧠", label:"Memory recalled", detail, status:"ok",
           summaryChip: "📚 " + total });
       }
-      break;
-
-    case "retrieval_pass":
-      addThinkingStep({
-        icon:"🔍", label:"Search pass " + (payload.pass||1),
-        detail: "Query: "" + (payload.query||"").substring(0,60) + "" → " +
-          (payload.chunks_found||0) + " chunk" + (payload.chunks_found===1?"":"s") +
-          (payload.new_unique!==undefined ? ", " + payload.new_unique + " new" : ""),
-        status:"running",
-      });
-      break;
-    case "retrieval_evaluated":
-      addThinkingStep({
-        icon: payload.sufficient ? "✓" : "↻",
-        label: payload.sufficient ? "Context sufficient" : "Refining search",
-        detail: (payload.reason||"") + (payload.refined_query ? " → new query: "" + payload.refined_query + """ : ""),
-        status: payload.sufficient ? "ok" : "warn",
-      });
-      break;
-    case "retrieval_refined":
-      addThinkingStep({
-        icon:"📚", label:"Retrieval refined (" + (payload.total_passes||2) + " passes)",
-        detail: (payload.initial_chunks||0) + " → " + (payload.final_chunks||0) + " chunks",
-        status:"ok",
-      });
-      break;
-
-    // ── Goal Decomposition events ──
-    case "goal_decomposing":
-      addThinkingStep({ icon:"🔀", label:"Analyzing complexity…", detail:payload.message_preview||"", status:"spin" });
-      break;
-    case "goal_decomposed":
-      state._totalDecompSteps = payload.step_count || 0;
-      state._decompositionSteps = {};
-      (payload.steps||[]).forEach(s => { state._decompositionSteps[s.step] = "pending"; });
-      addThinkingStep({
-        icon:"🗂",
-        label:"Goal decomposed into " + payload.step_count + " steps",
-        detail: payload.goal_summary || "",
-        status:"ok",
-        summaryChip:"🗂 " + payload.step_count + " steps",
-        expandContent: buildDecompTracker(payload.steps||[]),
-      });
-      renderDecompTracker();
-      break;
-    case "step_started":
-      state._decompositionSteps[payload.step] = "running";
-      addThinkingStep({
-        icon:"▶",
-        label:"Step " + payload.step + "/" + (payload.total||"?") + ": " + (payload.task||""),
-        detail:"",
-        status:"spin",
-      });
-      renderDecompTracker();
-      break;
-    case "step_completed":
-      state._decompositionSteps[payload.step] = "done";
-      addThinkingStep({
-        icon:"✓",
-        label:"Step " + payload.step + " complete",
-        detail:(payload.output_preview||"").substring(0,100) + (payload.tokens_out?" · "+payload.tokens_out+" tokens":""),
-        status:"ok",
-      });
-      renderDecompTracker();
-      break;
-    case "step_error":
-      state._decompositionSteps[payload.step] = "error";
-      addThinkingStep({ icon:"✗", label:"Step " + payload.step + " failed", detail:payload.error||"", status:"error" });
-      renderDecompTracker();
-      break;
-    case "synthesizing_steps":
-      addThinkingStep({ icon:"⊕", label:"Combining results…", detail:"", status:"spin",
-        summaryChip:"⊕ Synthesizing" });
-      break;
-    case "decomposition_complete":
-      addThinkingStep({
-        icon:"✓", label:"Goal complete",
-        detail:payload.steps_completed + " steps · " + payload.total_tokens_out + " tokens",
-        status:"ok",
-      });
       break;
 
     // ── Extended Reasoning events (#4) ──
@@ -348,13 +230,6 @@ function handleStructuredEvent(payload) {
         status:"ok",
         expandContent: payload.thinking_preview ? "<div style='font-size:11px;color:var(--text2);white-space:pre-wrap;padding:8px;background:var(--bg3);border-radius:6px;margin-top:6px;'>" + (payload.thinking_preview||"").replace(/</g,"&lt;") + "…</div>" : "",
       });
-      break;
-
-    // ── Context compressor ──
-    case "context_compacted":
-      addThinkingStep({ icon:"✂", label:"Context compacted",
-        detail:(payload.messages_before||0)+" → "+(payload.messages_after||0)+" messages, saved "+(payload.chars_saved||0)+" chars",
-        status:"ok" });
       break;
 
     default:
@@ -468,7 +343,6 @@ function onViewActivated(view) {
   else if(view==="teams") loadTeams();
   else if(view==="prompts") loadPrompts();
   else if(view==="docs") loadRagStats();
-  else if(view==="workflows") loadWorkflows();
   else if(view==="settings") loadSettings();
 }
 
@@ -1011,86 +885,6 @@ async function deleteTeam(id, name) {
   });
 }
 
-// ── Workflows view ────────────────────────────────────────────────────────────
-async function loadWorkflows() {
-  const list = document.getElementById("workflows-list");
-  list.innerHTML = '<div class="loading-state">Loading workflows…</div>';
-
-  // Load persisted workflows from the DB
-  const [dbWorkflows, templates] = await Promise.all([
-    api("list_workflows", 20),
-    api("get_workflow_templates"),
-  ]);
-
-  // Merge DB workflows with any in-memory live updates
-  if(dbWorkflows && dbWorkflows.length) {
-    dbWorkflows.forEach(wf => {
-      const live = state.workflows.find(w => w.id === wf.id);
-      if(live) Object.assign(wf, live); // live state wins for status/tasks
-    });
-    state.workflows = dbWorkflows;
-  }
-
-  let html = "";
-
-  // Template gallery (only shown when there are no running workflows or as a section)
-  if(templates && templates.length) {
-    html += `<div class="wf-section-label">Quick start templates</div>
-    <div class="wf-template-grid">${templates.map(t => `
-      <div class="wf-template-card" data-action="run-template" data-template-id="${t.id}" data-template-name="${escAttr(t.name)}">
-        <div class="wf-template-icon">${escHtml(t.icon||"⚙")}</div>
-        <div class="wf-template-name">${escHtml(t.name)}</div>
-        <div class="wf-template-desc">${escHtml(t.description||"")}</div>
-      </div>`).join("")}
-    </div>`;
-  }
-
-  // Past/active workflows
-  if(state.workflows.length) {
-    html += `<div class="wf-section-label" style="margin-top:16px;">Recent workflows</div>`;
-    html += state.workflows.map(w => renderWorkflowCard(w)).join("");
-  } else {
-    html += `<div class="empty-state" style="margin-top:12px;">No workflows yet. Enter a goal above or pick a template to get started.</div>`;
-  }
-
-  list.innerHTML = html;
-}
-
-function renderWorkflowCard(w) {
-  const tasks = w.tasks || [];
-  let pipeHtml = "";
-  if(tasks.length) {
-    pipeHtml = '<div class="pipeline">';
-    tasks.forEach((t,i) => {
-      const cls = t.status==="succeeded"?"done":t.status==="running"?"running":t.status==="failed"?"error":"";
-      const icon = t.status==="succeeded"?"✓":t.status==="running"?"⟳":t.status==="failed"?"✗":(i+1)+"";
-      pipeHtml += `<div class="pipe-step ${cls}"><div class="pipe-circle">${icon}</div><div class="pipe-label">${escHtml((t.name||"").substring(0,20))}</div></div>`;
-      if(i < tasks.length-1) pipeHtml += `<div class="pipe-conn ${t.status==="succeeded"?"done":t.status==="running"?"running":""}"></div>`;
-    });
-    pipeHtml += "</div>";
-  }
-  return `<div class="workflow-card" id="wf-${w.id}">
-    <div class="workflow-top"><div class="workflow-name">${escHtml(w.name||"Workflow")}</div>
-    <span class="status-badge ${w.status||"pending"}">${w.status||"pending"}</span></div>
-    ${pipeHtml}
-  </div>`;
-}
-
-function updateWorkflowCard(payload) {
-  if(!payload.workflow_id) return;
-  const idx = state.workflows.findIndex(w=>w.id===payload.workflow_id);
-  if(idx>=0) { state.workflows[idx] = {...state.workflows[idx], ...payload}; }
-  else { state.workflows.push(payload); }
-  loadWorkflows();
-}
-
-document.getElementById("run-workflow-btn").addEventListener("click", async () => {
-  const goal = document.getElementById("workflow-goal").value.trim();
-  if(!goal) { showToast("Enter a goal first","error"); return; }
-  showToast("Planning workflow…");
-  api("plan_and_run_workflow", goal);
-});
-
 // ── Prompts view ──────────────────────────────────────────────────────────────
 async function loadPrompts() {
   const list = document.getElementById("prompts-list");
@@ -1175,9 +969,6 @@ async function loadRagStats() {
     document.getElementById("rag-sources").textContent = (status.total_sources||0).toLocaleString();
     state.ragChunks = status.total_chunks || 0;
   }
-  // KG stats
-  const kg = await api("knowledge_graph_stats");
-  if(kg) document.getElementById("kg-triples").textContent = (kg.total_triples||0).toLocaleString();
 }
 
 function updateRagStats() { loadRagStats(); }
@@ -1286,16 +1077,8 @@ async function loadSettings() {
 
   // Toggles — all keys now returned by get_settings()
   setToggle("s-routing",   get("smart_routing_enabled")         !== false);
-  setToggle("s-decomp",    get("goal_decomposition_enabled")    !== false);
   setToggle("s-reasoning", get("interleaved_reasoning_enabled") !== false);
-  setToggle("s-kg",        get("knowledge_graph_enabled")       !== false);
   setToggle("s-firewall",  get("firewall_enabled")              !== false);
-
-  // Pending review count
-  const cnt = await api("memory_pending_count");
-  const n = cnt ? (cnt.count || 0) : 0;
-  const pending = document.getElementById("s-pending-text");
-  if(pending) pending.textContent = n + " item" + (n===1?"":"s") + " waiting for review";
 
   renderServiceStatus();
 }
@@ -1317,7 +1100,6 @@ const SERVICE_LABELS = {
   semantic_search_indexer: "Semantic search indexer",
   memory_manager: "Memory manager",
   router: "Task router",
-  hook_manager: "Hook manager",
   chat_orchestrator: "Chat orchestrator",
 };
 
@@ -1404,9 +1186,7 @@ async function saveAllSettings() {
     default_local_model:            document.getElementById("s-local-model").value.trim(),
     system_prompt:                  document.getElementById("s-system").value.trim(),
     smart_routing_enabled:          document.getElementById("s-routing").checked,
-    goal_decomposition_enabled:     document.getElementById("s-decomp").checked,
     interleaved_reasoning_enabled:  document.getElementById("s-reasoning").checked,
-    knowledge_graph_enabled:        document.getElementById("s-kg").checked,
     firewall_enabled:               document.getElementById("s-firewall").checked,
   };
   if(budgetRaw !== "") settings.max_conversation_budget_usd = budget;
@@ -1414,11 +1194,6 @@ async function saveAllSettings() {
   for(const [k, v] of Object.entries(settings)) {
     if(v !== null && v !== undefined && v !== "") await api("save_setting", k, v);
   }
-
-  // Sync live services via the toggle endpoints
-  await api("goal_decomposition_toggle",    settings.goal_decomposition_enabled);
-  await api("interleaved_reasoning_toggle", settings.interleaved_reasoning_enabled);
-  await api("knowledge_graph_toggle",       settings.knowledge_graph_enabled);
 
   showToast("All settings saved", "success");
 }
@@ -1444,22 +1219,6 @@ function showConnResult(backend, ok) {
   r.textContent = ok ? "✓ Connected to " + backend : "✗ " + backend + " not reachable — check the URL and that the server is running";
   r.style.color = ok ? "var(--green)" : "var(--red)";
 }
-
-// Pending review
-document.getElementById("s-review-btn").addEventListener("click", async () => {
-  const items = await api("memory_get_pending_review", 50);
-  const el = document.getElementById("s-pending-list");
-  el.style.display = "block";
-  if(!items || !items.length) { el.innerHTML = '<div style="font-size:12px;color:var(--text3);">No items pending review.</div>'; return; }
-  el.innerHTML = items.map(i => `<div class="review-item" data-review-id="${i.id}">
-    <div style="font-size:12px;margin-bottom:5px;">${escHtml(i.content||"")}</div>
-    <div style="font-size:10px;color:var(--text3);margin-bottom:5px;">Verdict: ${escHtml(i.scan_verdict)} · Source: ${escHtml(i.source_type)}</div>
-    <div style="display:flex;gap:6px;">
-      <button class="btn-sm" data-action="approve" data-id="${i.id}">✓ Approve</button>
-      <button class="btn-sm danger" data-action="reject" data-id="${i.id}">✗ Reject</button>
-    </div>
-  </div>`).join("");
-});
 
 async function runHealthCheck() {
   const btn = document.getElementById("health-btn");
@@ -1518,40 +1277,6 @@ function handleSecurityScanEvent(payload) {
     icon: payload.icon || (status==="ok"?"🛡":"⚠️"),
     label: payload.label || "Security scan",
     detail: payload.detail || "",
-    status,
-  });
-}
-
-// ── Handoff step event ────────────────────────────────────────────────────────
-function handleHandoffStepEvent(payload) {
-  const status = payload.validation_passed ? "ok" : "warn";
-  const conf = payload.confidence !== undefined ? Math.round(payload.confidence*100)+"%  confidence" : "";
-  addThinkingStep({
-    icon:"🤝",
-    label:"Handoff: " + escHtml(payload.agent_name||"Agent"),
-    detail: conf + (payload.subtask_completed ? " · " + payload.subtask_completed : ""),
-    status,
-  });
-}
-
-// ── Saga checkpoint event ─────────────────────────────────────────────────────
-function handleSagaCheckpointEvent(payload) {
-  const status = payload.state==="committed"?"ok":payload.state==="rolled_back"?"error":"warn";
-  addThinkingStep({
-    icon:"📌",
-    label:"Checkpoint: " + escHtml(payload.agent_name||""),
-    detail:"State: " + (payload.state||"") + (payload.confidence_score!==undefined?" · conf "+Math.round(payload.confidence_score*100)+"%" : ""),
-    status,
-  });
-}
-
-// ── Debate round event ────────────────────────────────────────────────────────
-function handleDebateRoundEvent(payload) {
-  const status = payload.changed_position ? "warn" : "ok";
-  addThinkingStep({
-    icon:"⚔️",
-    label:"Debate: " + escHtml(payload.agent_name||"Agent"),
-    detail:(payload.changed_position?"Position revised":"Position held") + (payload.overall_assessment ? " · " + payload.overall_assessment.substring(0,60) : ""),
     status,
   });
 }
@@ -1822,13 +1547,6 @@ async function init() {
     }
   }
 
-  // Update pending count badge
-  const cnt = await api("memory_pending_count");
-  if(cnt && cnt.count > 0) {
-    const pendingText = document.getElementById("s-pending-text");
-    if(pendingText) pendingText.textContent = cnt.count + " item" + (cnt.count===1?"":"s") + " waiting for review";
-  }
-
   // ── Permanent delegated listeners ─────────────────────────────────────────
   // These sit on stable container elements whose innerHTML gets rebuilt by
   // load*() functions. Registering once here means they survive every rebuild.
@@ -1859,26 +1577,6 @@ async function init() {
   document.getElementById("prompts-list").addEventListener("click", e => {
     const item = e.target.closest("[data-prompt-id]");
     if(item) editPrompt(item.dataset.promptId);
-  });
-
-  document.getElementById("s-pending-list").addEventListener("click", async e => {
-    const btn = e.target.closest("[data-action]");
-    if(!btn) return;
-    const { action, id } = btn.dataset;
-    if(action === "approve") { await api("memory_approve_pending", id); showToast("Approved", "success"); }
-    if(action === "reject")  { await api("memory_reject_pending",  id); showToast("Rejected"); }
-    document.getElementById("s-review-btn").click();
-  });
-
-  // Workflow template gallery delegation
-  document.getElementById("workflows-list").addEventListener("click", async e => {
-    const card = e.target.closest("[data-action='run-template']");
-    if(!card) return;
-    const { templateId, templateName } = card.dataset;
-    const goal = document.getElementById("workflow-goal").value.trim();
-    const name = goal ? goal.substring(0, 40) : templateName;
-    showToast("Starting " + templateName + "…");
-    api("run_workflow_from_template", templateId, goal || templateName, name);
   });
 
   // Export conversation button
@@ -1932,131 +1630,4 @@ if(document.readyState === "loading") {
 } else {
   init();
 }
-
-// ── Channels panel ──────────────────────────────────────────────────────────
-
-async function loadChannelStatus() {
-  if (!window.pywebview?.api?.channel_status) return;
-  try {
-    const status = await window.pywebview.api.channel_status();
-    // Telegram badge
-    const tg = status.telegram;
-    const badge = document.getElementById('tg-status-badge');
-    if (badge) {
-      if (tg && tg.running) {
-        badge.textContent = '● connected';
-        badge.style.background = 'rgba(34,197,94,0.15)';
-        badge.style.color = '#22c55e';
-      } else if (status.configured?.telegram) {
-        badge.textContent = '⚠ configured but not running';
-        badge.style.background = 'rgba(245,158,11,0.15)';
-        badge.style.color = '#f59e0b';
-      } else {
-        badge.textContent = 'not configured';
-        badge.style.background = 'var(--bg3)';
-        badge.style.color = 'var(--text-dim)';
-      }
-    }
-    // Active tasks
-    const tasksEl = document.getElementById('active-tasks-list');
-    if (tasksEl) {
-      const n = status.active_agent_tasks || 0;
-      tasksEl.textContent = n > 0 ? `${n} task(s) running` : 'No active tasks';
-      tasksEl.style.color = n > 0 ? 'var(--accent)' : 'var(--text-dim)';
-    }
-  } catch(e) {
-    console.error('loadChannelStatus error:', e);
-  }
-}
-
-async function loadGuardrailsStatus() {
-  if (!window.pywebview?.api?.guardrails_status) return;
-  try {
-    const s = await window.pywebview.api.guardrails_status();
-    const el = document.getElementById('guardrails-status');
-    if (el) {
-      el.textContent = `Mode: ${s.mode || 'unknown'} | NeMo available: ${s.nemo_available ? 'Yes' : 'No'} | Rails loaded: ${s.rails_loaded ? 'Yes' : 'No'}`;
-    }
-    const toggle = document.getElementById('guardrails-toggle');
-    if (toggle) toggle.checked = !!s.enabled;
-  } catch(e) {}
-}
-
-async function saveTelegramToken() {
-  const input = document.getElementById('tg-token-input');
-  const token = input ? input.value.trim() : '';
-  if (!token) { showToast('Please enter a bot token', 'warn'); return; }
-  if (!window.pywebview?.api?.set_setting) return;
-  await window.pywebview.api.set_setting('telegram_bot_token', token);
-  showToast('Token saved. Restart the app to connect.', 'success');
-  input.value = '';
-}
-
-async function saveTelegramAllowlist() {
-  const ta = document.getElementById('tg-allowlist');
-  const ids = (ta ? ta.value : '').split('\n').map(s => s.trim()).filter(Boolean);
-  if (!window.pywebview?.api?.channel_add_user) return;
-  await window.pywebview.api.channel_set_open('telegram');
-  for (const uid of ids) {
-    await window.pywebview.api.channel_add_user('telegram', uid);
-  }
-  showToast(`Saved ${ids.length} allowed user(s)`, 'success');
-}
-
-async function saveAgentRoot() {
-  const input = document.getElementById('agent-root-input');
-  const path = input ? input.value.trim() : '';
-  if (!path) { showToast('Please enter a path', 'warn'); return; }
-  if (!window.pywebview?.api?.agent_set_project_root) return;
-  const r = await window.pywebview.api.agent_set_project_root(path);
-  const status = document.getElementById('agent-root-status');
-  if (r.error) {
-    if (status) status.textContent = '✕ ' + r.error;
-    if (status) status.style.color = 'var(--danger)';
-  } else {
-    if (status) status.textContent = '✓ Set to: ' + r.path;
-    if (status) status.style.color = '#22c55e';
-  }
-}
-
-async function pickAgentRoot() {
-  if (!window.pywebview?.api?.pick_folder) return;
-  const path = await window.pywebview.api.pick_folder();
-  if (path) {
-    const input = document.getElementById('agent-root-input');
-    if (input) input.value = path;
-    await saveAgentRoot();
-  }
-}
-
-async function toggleGuardrails(enabled) {
-  if (!window.pywebview?.api?.guardrails_set_enabled) return;
-  await window.pywebview.api.guardrails_set_enabled(enabled);
-  await loadGuardrailsStatus();
-}
-
-// Listen for channel status events from the backend
-window.addEventListener('channel_status', (e) => loadChannelStatus());
-window.addEventListener('channel_response', (e) => {
-  const data = e.detail || {};
-  // Channel responses during agent mode appear in the chat if conv_id matches
-  console.log('channel_response:', data);
-});
-
-// Auto-load when navigating to channels view
-const _origNavigate = window.navigate;
-window.navigate = function(view) {
-  if (_origNavigate) _origNavigate(view);
-  if (view === 'channels') {
-    loadChannelStatus();
-    loadGuardrailsStatus();
-    // Pre-fill agent root if set
-    if (window.pywebview?.api?.get_setting) {
-      window.pywebview.api.get_setting('agent_project_root').then(r => {
-        const input = document.getElementById('agent-root-input');
-        if (input && r && r.value) input.value = r.value;
-      }).catch(() => {});
-    }
-  }
-};
 

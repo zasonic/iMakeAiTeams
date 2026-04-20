@@ -619,10 +619,6 @@ button{cursor:pointer;}
       <div class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/><path d="M21 21v-2a4 4 0 0 0-3-3.85"/></svg></div>
       <span class="nav-text">Teams</span><span class="nav-tooltip">Teams</span>
     </div>
-    <div class="nav-item nav-studio-only" data-nav="workflows">
-      <div class="nav-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></div>
-      <span class="nav-text">Workflows</span><span class="nav-tooltip">Workflows</span>
-    </div>
     <div class="nav-item nav-studio-only" data-nav="prompts">
       <div class="nav-icon"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></div>
       <span class="nav-text">Prompts</span><span class="nav-tooltip">Prompts</span>
@@ -632,10 +628,6 @@ button{cursor:pointer;}
     <div class="nav-item" data-nav="settings">
       <div class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
       <span class="nav-text">Settings</span><span class="nav-tooltip">Settings</span>
-    </div>
-    <div class="nav-item" data-nav="channels">
-      <div class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.64 3.42 2 2 0 0 1 3.62 1.24h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 6.13 6.13l1.96-1.96a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg></div>
-      <span class="nav-text">Channels</span><span class="nav-tooltip">Channels</span>
     </div>
   </div>
   <div class="sidebar-footer">
@@ -709,7 +701,7 @@ button{cursor:pointer;}
       </div>
     </div>
     <div class="drop-zone" id="drop-zone"><div style="font-size:28px;">📄</div><div class="drop-text">Drop files here or click to browse</div><div class="drop-hint">PDF · TXT · MD · DOCX · CSV</div></div>
-    <div class="rag-stats"><div><div class="rag-stat-val" id="rag-chunks">0</div><div class="rag-stat-lbl">Indexed chunks</div></div><div><div class="rag-stat-val" id="rag-sources">0</div><div class="rag-stat-lbl">Documents</div></div><div><div class="rag-stat-val" id="kg-triples">0</div><div class="rag-stat-lbl">Knowledge triples</div></div></div>
+    <div class="rag-stats"><div><div class="rag-stat-val" id="rag-chunks">0</div><div class="rag-stat-lbl">Indexed chunks</div></div><div><div class="rag-stat-val" id="rag-sources">0</div><div class="rag-stat-lbl">Documents</div></div></div>
     <div class="search-bar"><input type="text" id="doc-search" class="form-input" placeholder="Search your documents…"><button class="btn" id="doc-search-btn">Search</button><button class="btn" id="doc-clear-btn">Clear</button></div>
     <div class="method-bar"><button class="method-btn active" data-method="hybrid">Hybrid</button><button class="method-btn" data-method="semantic">Semantic</button><button class="method-btn" data-method="bm25">Keyword</button></div>
     <div id="doc-results"></div>
@@ -726,13 +718,6 @@ button{cursor:pointer;}
   <div id="view-teams" class="view"><div class="view-inner">
     <div class="view-header"><div><div class="view-title">Agent Teams</div><div class="view-subtitle">Coordinate multiple agents for complex tasks</div></div><button class="btn btn-primary" id="new-team-btn">＋ New Team</button></div>
     <div id="teams-list"></div>
-  </div></div>
-
-  <!-- ── Workflows ── -->
-  <div id="view-workflows" class="view"><div class="view-inner">
-    <div class="view-header"><div><div class="view-title">Workflows</div><div class="view-subtitle">Multi-step automated pipelines</div></div></div>
-    <div class="goal-row"><input type="text" id="workflow-goal" placeholder="Describe a multi-step goal…"><button class="btn btn-primary" id="run-workflow-btn">Run</button></div>
-    <div id="workflows-list"></div>
   </div></div>
 
   <!-- ── Prompts ── -->
@@ -766,17 +751,7 @@ button{cursor:pointer;}
       <div class="settings-heading">⚡ Smart Routing</div>
       <div class="settings-card">
         <div class="s-row"><div class="s-info"><div class="s-label">Smart Routing</div><div class="s-desc">Send simple questions to your free local model automatically</div></div><label class="toggle"><input type="checkbox" id="s-routing" checked><span class="toggle-slider"></span></label></div>
-        <div class="s-row"><div class="s-info"><div class="s-label">Goal Decomposition</div><div class="s-desc">Break complex multi-part requests into sequential steps</div></div><label class="toggle"><input type="checkbox" id="s-decomp" checked><span class="toggle-slider"></span></label></div>
         <div class="s-row"><div class="s-info"><div class="s-label">Extended Reasoning</div><div class="s-desc">Let Claude think deeply before answering hard questions</div></div><label class="toggle"><input type="checkbox" id="s-reasoning" checked><span class="toggle-slider"></span></label></div>
-      </div>
-    </div>
-
-    <div class="settings-section">
-      <div class="settings-heading">🧠 AI Memory</div>
-      <div class="settings-card">
-        <div class="s-row"><div class="s-info"><div class="s-label">Knowledge Graph</div><div class="s-desc">Build a relationship map from your conversations (auto)</div></div><label class="toggle"><input type="checkbox" id="s-kg" checked><span class="toggle-slider"></span></label></div>
-        <div class="s-row"><div class="s-info"><div class="s-label">Memory Review Queue</div><div class="s-desc" id="s-pending-text">0 items waiting for review</div></div><button class="btn btn-sm" id="s-review-btn">Review</button></div>
-        <div id="s-pending-list" style="display:none;padding:10px;border-top:1px solid var(--border-s);"></div>
       </div>
     </div>
 
@@ -927,77 +902,6 @@ button{cursor:pointer;}
 </div>
 
 <script src="app.js"></script>
-  <!-- ── Channels view ──────────────────────────────────────────────────── -->
-  <div id="view-channels" class="view" style="flex-direction:column;">
-    <div class="view-inner" style="max-width:720px;">
-      <h2 style="margin:0 0 6px;font-size:1.3rem;font-weight:600;">Channels</h2>
-      <p style="color:var(--text-dim);font-size:.88rem;margin:0 0 24px;">
-        Connect messaging apps so you can chat and run agent tasks from anywhere.
-      </p>
-
-      <!-- Telegram card -->
-      <div class="card" style="margin-bottom:16px;">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
-          <svg viewBox="0 0 24 24" width="24" height="24" fill="var(--accent)"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.562 8.248-2.026 9.54c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12l-6.871 4.326-2.962-.924c-.643-.204-.657-.643.136-.953l11.57-4.461c.537-.194 1.006.131.89.681z"/></svg>
-          <span style="font-weight:600;font-size:1rem;">Telegram</span>
-          <span id="tg-status-badge" style="margin-left:auto;font-size:.75rem;padding:2px 10px;border-radius:99px;background:var(--bg3);color:var(--text-dim);">not configured</span>
-        </div>
-
-        <label style="display:block;font-size:.82rem;color:var(--text-dim);margin-bottom:4px;">Bot Token (from @BotFather)</label>
-        <div style="display:flex;gap:8px;margin-bottom:12px;">
-          <input id="tg-token-input" type="password" placeholder="123456789:ABCdef..."
-            style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg2);color:var(--text);font-size:.88rem;"
-            autocomplete="off" spellcheck="false">
-          <button onclick="saveTelegramToken()" class="btn-primary" style="white-space:nowrap;">Save &amp; Connect</button>
-        </div>
-
-        <label style="display:block;font-size:.82rem;color:var(--text-dim);margin-bottom:4px;">Allowed Telegram User IDs (one per line, empty = everyone)</label>
-        <textarea id="tg-allowlist" rows="3" placeholder="123456789&#10;987654321"
-          style="width:100%;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg2);color:var(--text);font-size:.88rem;resize:vertical;box-sizing:border-box;"></textarea>
-        <button onclick="saveTelegramAllowlist()" class="btn-secondary" style="margin-top:8px;font-size:.82rem;">Save Allowlist</button>
-      </div>
-
-      <!-- Agent project root -->
-      <div class="card" style="margin-bottom:16px;">
-        <h3 style="font-size:1rem;font-weight:600;margin:0 0 12px;">Agent Project Root</h3>
-        <p style="font-size:.82rem;color:var(--text-dim);margin:0 0 10px;">
-          The directory agent tasks operate in. All file reads/writes are sandboxed here.
-        </p>
-        <div style="display:flex;gap:8px;align-items:center;">
-          <input id="agent-root-input" type="text" placeholder="/path/to/your/project"
-            style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg2);color:var(--text);font-size:.88rem;"
-            spellcheck="false">
-          <button onclick="saveAgentRoot()" class="btn-primary">Set</button>
-          <button onclick="pickAgentRoot()" class="btn-secondary">Browse…</button>
-        </div>
-        <p id="agent-root-status" style="font-size:.78rem;color:var(--text-dim);margin:6px 0 0;"></p>
-      </div>
-
-      <!-- Safety / Guardrails -->
-      <div class="card" style="margin-bottom:16px;">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-          <h3 style="font-size:1rem;font-weight:600;margin:0;">Safety &amp; Guardrails</h3>
-          <label style="display:flex;align-items:center;gap:6px;margin-left:auto;cursor:pointer;font-size:.85rem;">
-            <input id="guardrails-toggle" type="checkbox" checked onchange="toggleGuardrails(this.checked)"> Enabled
-          </label>
-        </div>
-        <p style="font-size:.82rem;color:var(--text-dim);margin:0 0 8px;">
-          Pattern-based jailbreak detection. Install <code>nemoguardrails</code> for full ML-based safety rails.
-        </p>
-        <div id="guardrails-status" style="font-size:.78rem;color:var(--text-dim);padding:6px 10px;background:var(--bg2);border-radius:6px;"></div>
-      </div>
-
-      <!-- Active agent tasks -->
-      <div class="card">
-        <div style="display:flex;align-items:center;margin-bottom:12px;">
-          <h3 style="font-size:1rem;font-weight:600;margin:0;">Active Agent Tasks</h3>
-          <button onclick="loadChannelStatus()" class="btn-secondary" style="margin-left:auto;font-size:.78rem;padding:4px 10px;">Refresh</button>
-        </div>
-        <div id="active-tasks-list" style="font-size:.85rem;color:var(--text-dim);">No active tasks</div>
-      </div>
-
-    </div>
-  </div>
 
 </body>
 </html>
