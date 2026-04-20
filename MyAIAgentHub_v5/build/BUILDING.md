@@ -1,98 +1,118 @@
 # Building MyAI Agent Hub
 
-Two build approaches are available: **Briefcase** (recommended for final distribution) and **PyInstaller** (faster iteration).
+The Windows shipping pipeline is **PyInstaller → Inno Setup → signtool**. There is no
+runtime Python bootstrap anymore: the installer is the launcher.
 
 ---
 
-## Option A — Briefcase (recommended)
+## Windows
 
-Briefcase produces proper platform-native installers: a `.dmg` on Mac and an `.msi` on Windows.
+### Prerequisites
 
-### Install Briefcase
+- Python 3.11 on PATH
+- Inno Setup 6 with `iscc.exe` on PATH — <https://jrsoftware.org/isinfo.php>
+- Microsoft Edge WebView2 Runtime **x64 offline installer** dropped at
+  `build/webview2/MicrosoftEdgeWebView2RuntimeInstallerX64.exe`
+  (download from <https://developer.microsoft.com/en-us/microsoft-edge/webview2/>).
+  Gitignored — each build host supplies its own copy.
 
-```bash
-pip install briefcase
+### Build
+
+```bat
+build\build_windows.bat full     REM ~1.7 GB installer: Tier 1 + Tier 2 + bundled model
+build\build_windows.bat lite     REM ~60 MB installer:  Tier 1 only (chat, agents, teams, router)
 ```
 
-### Mac
+What the script does:
 
-```bash
-# First time: scaffold the platform-specific project
-briefcase create macOS
+1. `pip install` Tier 1 deps, plus Tier 2 for `full`.
+2. `full` only: `python build/fetch_model.py` downloads `all-MiniLM-L6-v2` into
+   `build/models/all-MiniLM-L6-v2/` for bundling. Fails the build if the
+   download does not succeed — we do not ship without the model.
+3. Verifies `build/webview2/MicrosoftEdgeWebView2RuntimeInstallerX64.exe` exists.
+4. Runs `pyinstaller build/MyAIAgentHub.spec --noconfirm --clean`. The spec
+   uses `collect_all()` for sentence_transformers, chromadb, anthropic,
+   tokenizers, transformers, webview, and clr_loader — the full
+   `(datas, binaries, hiddenimports)` triple, not just hidden imports.
+5. `build/sign.ps1 <exe>` — no-op unless `MYAI_SIGN` is set.
+6. `iscc build/installer.iss` (or `installer-lite.iss`) packages everything
+   into `dist\MyAIAgentHub-Setup-Full.exe`. The Inno script conditionally
+   invokes the bundled WebView2 installer from `[Run]` via `Check: NeedsWebView2`.
+7. `build/sign.ps1 <installer>` — second pass of the two-pass sign.
 
-# Build the .app bundle
-briefcase build macOS
+Output:
+- Full: `dist\MyAIAgentHub-Setup-Full.exe`
+- Lite: `dist\MyAIAgentHub-Setup-Lite.exe`
 
-# Package into a distributable .dmg
-briefcase package macOS
-# Output: dist/MyAI Agent Hub-1.0.0.dmg
+### Launch log
+
+Every launch writes one line to `%LOCALAPPDATA%\MyAIAgentHub\launch.log` from a
+PyInstaller runtime hook (`build/runtime_hook_launch_log.py`) — before
+`app/main.py` executes. Uncaught exceptions are also appended there. This is
+the first place to check when diagnosing clean-VM failures.
+
+### Microsoft Trusted Signing (optional)
+
+Signing is gated on `MYAI_SIGN`. When unset, `build/sign.ps1` is a no-op — the
+build produces unsigned artifacts. When set, both the inner EXE and the
+installer are signed with SHA-256 and RFC 3161 timestamped via
+`timestamp.acs.microsoft.com`. Required env:
+
+```bat
+set MYAI_SIGN=1
+set TRUSTED_SIGNING_DLIB=C:\path\to\dir-containing-TrustedSigning.dll
+set TRUSTED_SIGNING_METADATA=C:\path\to\signing-metadata.json
 ```
 
-### Windows
-
-```bash
-briefcase create windows
-briefcase build windows
-briefcase package windows
-# Output: dist/MyAI Agent Hub-1.0.0.msi
-# Note: Requires WiX Toolset 3.x — https://wixtoolset.org/
+Verify after build:
+```bat
+signtool verify /pa /v dist\MyAIAgentHub-Setup-Full.exe
 ```
 
-### Run in dev mode (no build step)
+### Clean-VM verification (mandatory)
 
-```bash
-briefcase dev
-```
+Four prior builds passed on the developer machine and failed in the wild.
+The only real test is a clean VM. Before tagging a release:
+
+1. **Pristine Windows 11 23H2 VM.** Hyper-V, VirtualBox, or Parallels.
+   Fresh ISO install, no updates applied, no extra software. Snapshot → `BaseClean`.
+2. Revert to `BaseClean`. Copy **only** `MyAIAgentHub-Setup-Full.exe` in —
+   nothing else (no Python, no VC redist, no PATH edits).
+3. **Disconnect the VM's network adapter.** The test from here is offline.
+4. Double-click the installer. Complete with defaults.
+5. Launch from Start Menu. Window must paint within ~10 s.
+6. Confirm `%LOCALAPPDATA%\MyAIAgentHub\launch.log` exists with a fresh line.
+7. Enter a real Anthropic key; send a chat message (reconnect briefly for this
+   step, then disconnect again).
+8. Upload a small PDF, ask a RAG question — **offline**. The bundled model
+   must handle semantic search with no network.
+9. Close, reopen — settings and chat history persist.
+10. Uninstall. Confirm `C:\Program Files\MyAI Agent Hub\` is gone and
+    `%LOCALAPPDATA%\MyAIAgentHub\` is **not** (user data preserved).
+
+**Rule:** if any step fails, fix the build — not the VM.
 
 ---
 
-## Option B — PyInstaller (faster, no installer polish)
-
-Produces a `.app` bundle (Mac) or an `.exe` + folder (Windows) without a system installer.
-
-### Mac
+## Mac
 
 ```bash
 # Requires: pip install pyinstaller
-# Optional: brew install create-dmg   (for .dmg output)
 bash build/build_mac.sh
 ```
 
-Output: `dist/MyAI Agent Hub.app` and optionally `dist/MyAIAgentHub-1.0.0-mac.dmg`
+Output: `dist/MyAI Agent Hub.app` (and optionally a `.dmg`).
 
-### Windows
-
-Two variants are supported — pick one based on whether document search and
-semantic memory are needed:
-
+Code-sign with an Apple Developer ID before distribution:
 ```bash
-build\build_windows.bat full    REM ~1.6 GB installer: Tier 1 + Tier 2 (RAG, semantic search, BM25)
-build\build_windows.bat lite    REM ~60 MB installer:  Tier 1 only (chat, agents, teams, router)
+codesign --deep --force --verify --verbose \
+  --sign "Developer ID Application: Your Name (XXXXXXXXXX)" \
+  "dist/MyAI Agent Hub.app"
 ```
-
-Output:
-- Full: `dist\MyAIAgentHub\MyAIAgentHub.exe` + `dist\MyAIAgentHub-Setup-Full.exe`
-- Lite: `dist\MyAIAgentHub-lite\MyAIAgentHub-lite.exe` + `dist\MyAIAgentHub-Setup-Lite.exe`
-
-The lite build uses the same source tree — Tier 2 imports are lazy (see
-`core/api.py:95`, `services/semantic_search.py:58,93`, `channels/telegram_adapter.py:90`),
-so the lite installer bundles no PyTorch or sentence-transformers. At runtime,
-`service_status()` reports Tier 2 services as unavailable and the Settings →
-Subsystem status panel makes this visible to the user.
-
-Both installers write user data to `%LOCALAPPDATA%\iMakeAiTeams\` (resolved by
-`core/paths.py`), never into `Program Files` — so a lite→full upgrade preserves
-conversations, settings, and the OS-keyring-stored API key automatically.
-
-For single-file setup installers, install [Inno Setup 6](https://jrsoftware.org/isinfo.php)
-first — the script detects it automatically and runs `iscc build\installer.iss`
-(full) or `iscc build\installer-lite.iss` (lite).
 
 ---
 
-## App icon
-
-Both build methods expect icon files at:
+## App icons
 
 | File | Format | Used by |
 |------|--------|---------|
@@ -100,32 +120,18 @@ Both build methods expect icon files at:
 | `icons/AppIcon.ico` | Windows icon | Windows builds |
 | `icons/AppIcon.png` | 1024×1024 PNG | Source / Linux |
 
-Create the `.icns` from a 1024×1024 PNG on Mac:
-```bash
-mkdir -p icons/AppIcon.iconset
-sips -z 1024 1024 icons/AppIcon.png --out icons/AppIcon.iconset/icon_512x512@2x.png
-iconutil -c icns icons/AppIcon.iconset -o icons/AppIcon.icns
-```
-
-Convert to `.ico` on any platform:
-```bash
-pip install Pillow
-python3 -c "
-from PIL import Image
-img = Image.open('icons/AppIcon.png')
-img.save('icons/AppIcon.ico', sizes=[(16,16),(32,32),(48,48),(256,256)])
-"
-```
+The spec fails early if the target-platform icon is missing.
 
 ---
 
 ## Notes
 
-- **Sentence-transformers model** (`all-MiniLM-L6-v2`, ~90MB) downloads automatically on first launch from the bundled app. This requires an internet connection on the first run but is cached afterward.
-- **WebView2 on Windows**: the app uses Microsoft Edge WebView2, which ships with Windows 11 and is auto-installed on Windows 10. If a user is missing it, the PyWebView startup error message will tell them.
-- **Code signing**: unsigned `.app` bundles will trigger Gatekeeper on Mac. For a proper distribution, sign with an Apple Developer certificate:
-  ```bash
-  codesign --deep --force --verify --verbose \
-    --sign "Developer ID Application: Your Name (XXXXXXXXXX)" \
-    "dist/MyAI Agent Hub.app"
-  ```
+- **User data location**: `%LOCALAPPDATA%\MyAIAgentHub\` on Windows,
+  `~/Library/Application Support/MyAIAgentHub/` on macOS. v5 installs stored
+  this under `iMakeAiTeams/`; `paths._migrate_v5_user_dir()` moves it across
+  the first time the new build runs.
+- **Embedding model**: `all-MiniLM-L6-v2` is bundled inside the installer
+  (full variant only, ~90 MB). It loads from
+  `install_root()/_internal/models/all-MiniLM-L6-v2/` — no network on first run.
+- **Lite variant** omits the model and all Tier 2 deps. `service_status()`
+  reports semantic search and RAG as unavailable; the UI degrades gracefully.

@@ -17,6 +17,9 @@ from core.api import API
 from core.first_run import needs_first_run
 
 APP_ROOT = Path(__file__).parent
+# v5→v6 APP_NAME rename: move %LOCALAPPDATA%\iMakeAiTeams\* to ...\MyAIAgentHub\*
+# before anyone resolves a path that would pin the old location.
+paths.migrate_v5_user_dir()
 USER_DIR = paths.user_dir()
 # Must run before logging.basicConfig: a FileHandler pointed at APP_ROOT/app.log
 # would pin the old location and orphan the migrated log file.

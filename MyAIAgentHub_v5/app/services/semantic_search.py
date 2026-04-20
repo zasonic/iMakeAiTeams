@@ -119,7 +119,10 @@ def init_vector_store(vector_dir: Path, shared_model=None) -> bool:
                         return vecs.tolist()
                 _embed_fn = _SharedEmbedFn()
             else:
-                _embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+                from core import paths
+                _embed_fn = SentenceTransformerEmbeddingFunction(
+                    model_name=str(paths.bundled_model_dir())
+                )
 
             _chroma_client = chromadb.PersistentClient(path=str(vector_dir))
             _documents_col = _chroma_client.get_or_create_collection(
