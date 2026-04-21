@@ -41,9 +41,9 @@ MAX_CONTEXT_CHARS = 80_000  # ~20K tokens — safe for 128K context models
 # Per-million-token pricing defaults. Users can override in Settings
 # to keep cost tracking accurate when Anthropic changes prices.
 _DEFAULT_MODEL_PRICES: dict[str, tuple[float, float]] = {
-    "haiku":  (0.80,  4.0),
+    "haiku":  (1.0,   5.0),
     "sonnet": (3.0,  15.0),
-    "opus":  (15.0,  75.0),
+    "opus":   (5.0,  25.0),
 }
 
 

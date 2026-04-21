@@ -112,6 +112,26 @@ class ClaudeClient:
                 full_text += token
         return full_text
 
+    # ── System prompt caching helper ─────────────────────────────────────────
+
+    def _cached_system(self, system: str):
+        """
+        Wrap a system prompt with cache_control for multi-turn calls.
+        Caching the system prompt avoids re-processing it every turn,
+        saving ~90% of input token cost on the system portion after the
+        first call (Anthropic prompt caching, 5-min TTL, auto-refreshed).
+        Falls back to plain string if the list format is unsupported.
+        """
+        if not system or not self._use_caching:
+            return system
+        return [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
     # ── Multi-turn chat ───────────────────────────────────────────────────────
 
     def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096) -> dict:
@@ -122,10 +142,14 @@ class ClaudeClient:
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._cached_system(system),
             "messages": messages,
         }
-        response = self._client.messages.create(**kwargs)
+        try:
+            response = self._client.messages.create(**kwargs)
+        except Exception:
+            kwargs["system"] = system
+            response = self._client.messages.create(**kwargs)
         return {
             "text": response.content[0].text,
             "input_tokens": response.usage.input_tokens,
@@ -150,19 +174,24 @@ class ClaudeClient:
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._cached_system(system),
             "messages": messages,
         }
         full_text = ""
         usage = None
-        with self._client.messages.stream(**kwargs) as stream:
+        try:
+            stream_ctx = self._client.messages.stream(**kwargs)
+        except Exception:
+            kwargs["system"] = system
+            stream_ctx = self._client.messages.stream(**kwargs)
+        with stream_ctx as stream:
             for token in stream.text_stream:
                 on_token(token)
                 full_text += token
             try:
                 usage = stream.get_final_usage()
             except Exception:
-                pass  # usage unavailable — caller handles gracefully
+                pass
         return full_text, usage
 
     # ── Tool use (agentic loop) ─────────────────────────────────────────────
@@ -184,11 +213,15 @@ class ClaudeClient:
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._cached_system(system),
             "messages": messages,
             "tools": tools,
         }
-        response = self._client.messages.create(**kwargs)
+        try:
+            response = self._client.messages.create(**kwargs)
+        except Exception:
+            kwargs["system"] = system
+            response = self._client.messages.create(**kwargs)
         content = []
         for block in response.content:
             if block.type == "text":
@@ -260,11 +293,41 @@ class ClaudeClient:
         """
         Run a chat with extended thinking enabled.
         Returns a dict with keys "thinking" and "answer".
+
+        Uses adaptive thinking (effort-based) which lets Claude decide how
+        much to think based on query complexity. Falls back to legacy
+        budget_tokens format for older model versions.
         """
         thinking_model = model or self._model
+        max_out = 64000
+
+        def _parse_response(response) -> dict:
+            thinking_text = ""
+            answer_text = ""
+            for block in response.content:
+                if block.type == "thinking":
+                    thinking_text = block.thinking
+                elif block.type == "text":
+                    answer_text = block.text
+            return {"thinking": thinking_text, "answer": answer_text}
+
+        effort = "high" if budget_tokens >= 8000 else "medium" if budget_tokens >= 3000 else "low"
+
+        try:
+            response = self._client.messages.create(
+                model=thinking_model,
+                max_tokens=max_out,
+                system=system,
+                thinking={"type": "adaptive", "effort": effort},
+                messages=[{"role": "user", "content": user_message}],
+            )
+            return _parse_response(response)
+        except Exception:
+            pass
+
         response = self._client.messages.create(
             model=thinking_model,
-            max_tokens=16000,
+            max_tokens=max_out,
             system=system,
             thinking={
                 "type": "enabled",
@@ -272,11 +335,4 @@ class ClaudeClient:
             },
             messages=[{"role": "user", "content": user_message}],
         )
-        thinking_text = ""
-        answer_text = ""
-        for block in response.content:
-            if block.type == "thinking":
-                thinking_text = block.thinking
-            elif block.type == "text":
-                answer_text = block.text
-        return {"thinking": thinking_text, "answer": answer_text}
+        return _parse_response(response)
