@@ -78,6 +78,10 @@ if /I "%VARIANT%"=="full" (
 
 echo =^> Build output: %EXE_PATH%
 
+echo =^> Running packaged smoke test against %EXE_PATH%...
+set MYAI_PACKAGED_BINARY=%EXE_PATH%
+python -m pytest tests\test_smoke_end_to_end.py::test_smoke_packaged -v || exit /b 1
+
 REM Pass 1 of two-pass signing: sign the inner EXE before Inno Setup packages it.
 REM sign.ps1 is a no-op unless MYAI_SIGN is set.
 where pwsh >nul 2>&1

@@ -69,6 +69,36 @@ Verify after build:
 signtool verify /pa /v dist\MyAIAgentHub-Setup-Full.exe
 ```
 
+### End-to-end smoke tests
+
+`tests/test_smoke_end_to_end.py` spawns the app as a subprocess, waits for
+the `loaded` event, sends a chat message through the real
+`window.pywebview.api` bridge, and asserts that a `chat_done` event comes
+back. The Anthropic SDK is never called — a harness stubs the LLM — so
+the test has no network dependency.
+
+- `test_smoke_source` runs against `python app/main.py` and catches
+  regressions in the bridge, event pipeline, and frontend wiring.
+- `test_smoke_packaged` runs against the PyInstaller binary and catches
+  packaging failures (missing hidden imports, wrong bundled-model paths,
+  broken `collect_all` entries) that unit tests never exercise.
+
+The Windows and macOS build scripts run the packaged smoke test
+automatically after PyInstaller completes and fail the build if it
+doesn't pass. To run either test locally:
+
+```bash
+# against source
+pytest tests/test_smoke_end_to_end.py::test_smoke_source -v
+
+# against a PyInstaller build
+export MYAI_PACKAGED_BINARY="dist/MyAIAgentHub/MyAIAgentHub"     # or the .exe path
+pytest tests/test_smoke_end_to_end.py::test_smoke_packaged -v
+```
+
+On headless Linux, `xvfb-run` is prepended automatically when
+`$DISPLAY` is unset.
+
 ### Clean-VM verification (mandatory)
 
 Four prior builds passed on the developer machine and failed in the wild.
