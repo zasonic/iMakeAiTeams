@@ -20,6 +20,10 @@ pyinstaller build/MyAIAgentHub.spec --noconfirm --clean
 
 echo "==> Build output: dist/MyAI Agent Hub.app"
 
+echo "==> Running packaged smoke test..."
+export MYAI_PACKAGED_BINARY="dist/MyAI Agent Hub.app/Contents/MacOS/MyAIAgentHub"
+python -m pytest tests/test_smoke_end_to_end.py::test_smoke_packaged -v
+
 # Optional: wrap in a .dmg for distribution
 if command -v create-dmg &>/dev/null; then
   echo "==> Creating .dmg installer..."

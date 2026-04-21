@@ -92,4 +92,8 @@ def _on_closing():
 window.events.loaded += _on_loaded
 window.events.closing += _on_closing
 
+# Opt-in test hook; no-op unless MYAI_SMOKE_TEST=1.
+from core import smoke_harness
+smoke_harness.install(api, window)
+
 webview.start(debug=os.environ.get("MYAI_DEBUG", "").lower() in ("1", "true", "yes"))
