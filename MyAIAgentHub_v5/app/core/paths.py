@@ -26,9 +26,11 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 
-APP_NAME = "iMakeAiTeams"
+APP_NAME = "MyAIAgentHub"
 APP_AUTHOR = "iMakeAiTeams"
 MIGRATION_SENTINEL = ".migrated_v5"
+V5_RENAME_SENTINEL = ".migrated_v6_rename"
+LEGACY_APP_NAME = "iMakeAiTeams"
 
 # Legacy artifacts that lived next to the executable in v5.0.x.
 # Order matters: SQLite WAL/SHM must move with the main DB file.
@@ -48,6 +50,65 @@ def user_dir() -> Path:
     path = Path(user_data_dir(APP_NAME, APP_AUTHOR, roaming=False))
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def legacy_user_dir() -> Path:
+    """v5 user data directory (before the APP_NAME rename to MyAIAgentHub)."""
+    return Path(user_data_dir(LEGACY_APP_NAME, APP_AUTHOR, roaming=False))
+
+
+def migrate_v5_user_dir() -> None:
+    """
+    One-shot move of v5 user data from the legacy 'iMakeAiTeams' dir to the
+    new 'MyAIAgentHub' dir after the APP_NAME rename. Called once at startup
+    from app/main.py, before logging is configured.
+
+    Sentinel-guarded, swallows errors, never raises — a broken migration must
+    not brick the app. Keyring entries are stored in the OS keychain and are
+    not touched here.
+    """
+    try:
+        target = user_dir()
+        sentinel = target / V5_RENAME_SENTINEL
+        if sentinel.exists():
+            return
+        legacy = legacy_user_dir()
+        if not legacy.exists() or legacy == target:
+            sentinel.write_text("{}", encoding="utf-8")
+            return
+        # Only migrate if the new dir is effectively empty (ignoring our own
+        # sentinels). Respects users who already have data in the new dir.
+        existing = [p for p in target.iterdir() if p.name not in {
+            V5_RENAME_SENTINEL, MIGRATION_SENTINEL,
+        }]
+        if existing:
+            sentinel.write_text(
+                json.dumps({"skipped": "target not empty", "at": time.time()}),
+                encoding="utf-8",
+            )
+            return
+        moved: list[str] = []
+        for entry in list(legacy.iterdir()):
+            dst = target / entry.name
+            if dst.exists():
+                continue
+            try:
+                shutil.move(str(entry), str(dst))
+                moved.append(entry.name)
+            except OSError as exc:
+                print(
+                    f"paths.migrate_v5: failed to move {entry.name}: {exc}",
+                    file=sys.stderr,
+                )
+        sentinel.write_text(
+            json.dumps(
+                {"migrated_at": time.time(), "from": str(legacy), "moved": moved},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"paths.migrate_v5: unexpected error: {exc}", file=sys.stderr)
 
 
 def install_root() -> Path:
@@ -91,6 +152,27 @@ def extensions_dir() -> Path:
     d = user_dir() / "extensions"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def bundled_model_dir(name: str = "all-MiniLM-L6-v2") -> Path:
+    """
+    Resolve the sentence-transformers model bundled with the installer.
+
+    Frozen builds place the model at install_root()/_internal/models/<name>/
+    (PyInstaller onedir layout). Source checkouts fall back to
+    build/models/<name>/ at the repo root, populated by build/fetch_model.py.
+    """
+    frozen_path = install_root() / "_internal" / "models" / name
+    if frozen_path.exists():
+        return frozen_path
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        mp = Path(meipass) / "models" / name
+        if mp.exists():
+            return mp
+    # Source checkout
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    return repo_root / "build" / "models" / name
 
 
 def migrate_legacy_install(app_root: Path, target_user_dir: Path) -> None:

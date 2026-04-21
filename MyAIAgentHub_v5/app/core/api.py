@@ -252,7 +252,8 @@ class API:
 
     def _load_shared_embedder(self):
         from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("all-MiniLM-L6-v2")
+        from core import paths
+        model = SentenceTransformer(str(paths.bundled_model_dir()))
         self._log.info("Shared SentenceTransformer model loaded.")
         return model
 

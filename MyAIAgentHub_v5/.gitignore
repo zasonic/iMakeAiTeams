@@ -30,3 +30,10 @@ rag_cache/
 
 # Sentence transformers model cache
 .cache/
+
+# PyInstaller / Inno Setup build artifacts
+build/models/
+build/webview2/*.exe
+dist/
+*.spec.bak
+

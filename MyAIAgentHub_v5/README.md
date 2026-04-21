@@ -17,20 +17,35 @@ A local-first desktop AI platform where Claude and local models work as a coordi
 
 ## Setup
 
-1. Install Python 3.11+
+### Windows (end users)
+
+1. Download `MyAIAgentHub-Setup-Full.exe` (or `-Lite` for the chat-only variant)
+2. Double-click to install — no Python required. The installer bundles the
+   runtime, the embedding model, and the Microsoft Edge WebView2 runtime.
+3. Launch from the Start Menu or desktop shortcut.
+4. Enter your Anthropic API key in Settings on first launch.
+
+### Mac (end users)
+
+1. Download the `.dmg` and drag the app into Applications.
+2. Launch and enter your API key in Settings.
+
+### Developers (running from source)
+
+1. Install Python 3.11+.
 2. Install dependencies:
    ```bash
    pip install -r app/requirements.txt
+   pip install -r app/requirements-extensions.txt   # for RAG / semantic search
    ```
-3. Run:
+3. Pre-download the embedding model (one-off, ~90 MB):
    ```bash
-   # Windows — double-click:
-   START_HERE_Windows.vbs
-
-   # Mac — double-click:
-   START_HERE_Mac.command
+   python build/fetch_model.py
    ```
-4. Enter your Anthropic API key in Settings or on first launch
+4. Run:
+   ```bash
+   python app/main.py
+   ```
 
 ## Optional: Local models (recommended)
 
