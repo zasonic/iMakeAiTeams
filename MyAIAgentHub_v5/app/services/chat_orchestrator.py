@@ -26,13 +26,28 @@ import uuid
 from datetime import datetime, timezone
 
 import db as _db
-from models import ChatResult, ExecutionTarget
+from models import ChatResult, ExecutionTarget, RoutingDecision, TaskDescriptor
+from services.hub_router import HubRouter
+from services import qwen_thinking
 from services.security_engine import (
     quarantine_chunks, render_quarantined_context, enforce_context_rules,
     validate_fact_for_storage, RiskLedger, RiskCategory, SecurityAssessment,
 )
 
 log = logging.getLogger("MyAIEnv.chat")
+
+
+def _list_routable_agents() -> list[dict]:
+    """Provider for the HubRouter's Qwen /no_think fallback (Phase 3).
+
+    Returns the minimal columns the routing prompt needs. Lives at module
+    scope so the closure captured at orchestrator init does not pin a stale
+    DB snapshot — every fallback call re-queries.
+    """
+    rows = _db.fetchall(
+        "SELECT id, name, role, skills, model_preference FROM agents"
+    )
+    return [dict(r) for r in rows]
 
 MAX_HISTORY_MESSAGES = 40  # 20 user/assistant turns
 MAX_CONTEXT_CHARS = 80_000  # ~20K tokens — safe for 128K context models
@@ -109,13 +124,25 @@ def _log_router_event(
 
 
 class ChatOrchestrator:
-    def __init__(self, claude_client, local_client, router, memory, settings):
+    def __init__(self, claude_client, local_client, router, memory, settings,
+                 hub_router: HubRouter | None = None):
         self.claude = claude_client
         self.local = local_client
         self.router = router
         self.memory = memory
         self._settings = settings
         self._risk_ledgers: dict[str, RiskLedger] = {}  # per-conversation
+        # Single boundary for worker invocation (Phase 1) with Phase 3 LLM
+        # fallback wired through Qwen3 /no_think for routing decisions that
+        # have no deterministic skill match.
+        if hub_router is None:
+            fallback = qwen_thinking.make_no_think_router(
+                local_client, _list_routable_agents,
+            )
+            hub_router = HubRouter(
+                claude_client, local_client, settings, llm_fallback=fallback,
+            )
+        self.hub_router = hub_router
 
     # ── Conversation management ──────────────────────────────────────────────
 
@@ -509,8 +536,32 @@ class ChatOrchestrator:
                     "outside this list."
                 )
 
+        # ── Phase 1: Build routing decision through the HubRouter ────────────
+        # The TaskRouter above decided which *backend* to use; the HubRouter
+        # decides which *worker* and authorizes the dispatch. When the caller
+        # specified an agent_id we go through ``route_for_agent`` (which can
+        # raise AuthorizationError); when no agent is specified we synthesize
+        # a hub-direct decision so the chat path keeps working without forcing
+        # every caller to declare a worker.
+        task = TaskDescriptor(
+            text=user_message,
+            preferred_agent_id=agent_id,
+            backend_hint=route_model,
+        )
+        if agent_id:
+            decision = self.hub_router.route_for_agent(agent_id, task)
+        else:
+            decision = RoutingDecision(
+                agent_id="",
+                backend=route_model,
+                score=1.0,
+                reasoning=route_reason,
+                used_fallback=False,
+                skill_matched="",
+            )
+
         # ── Improvement 6: Resolve execution target ──────────────────────────
-        target = self._resolve_target(route_model, agent)
+        target = self._resolve_target(decision.backend, agent)
 
         # ══════════════════════════════════════════════════════════════════════
         # SECURITY ENGINE: Structural enforcement before model inference
@@ -631,39 +682,17 @@ class ChatOrchestrator:
                 log.debug("Extended thinking skipped: %s", exc)
 
         # ── Execute (normal path if decomposition/reasoning didn't produce output) ─
+        # Phase 1: All worker invocations route through HubRouter.invoke().
+        # The orchestrator no longer calls model clients directly here.
         if not response_text:
-            try:
-                if target.backend == "claude":
-                    if on_token:
-                        response_text, usage = self.claude.stream_multi_turn(
-                            full_system, messages, on_token,
-                            max_tokens=target.max_tokens,
-                        )
-                        if usage is not None:
-                            tokens_in = getattr(usage, "input_tokens", 0) or 0
-                            tokens_out = getattr(usage, "output_tokens", 0) or 0
-                    else:
-                        result = self.claude.chat_multi_turn(
-                            full_system, messages,
-                            max_tokens=target.max_tokens,
-                        )
-                        response_text = result["text"]
-                        tokens_in = result.get("input_tokens", 0)
-                        tokens_out = result.get("output_tokens", 0)
-                else:
-                    if on_token:
-                        response_text = self.local.stream_multi_turn(
-                            full_system, messages, on_token,
-                            max_tokens=target.max_tokens,
-                        )
-                    else:
-                        response_text = self.local.chat_multi_turn(
-                            full_system, messages,
-                            max_tokens=target.max_tokens,
-                        )
-            except Exception as exc:
-                log.error(f"Chat execution failed: {exc}")
-                response_text = f"[Error: {exc}]"
+            worker_result = self.hub_router.invoke(
+                decision, full_system, messages,
+                max_tokens=target.max_tokens, on_token=on_token,
+            )
+            response_text = worker_result.text
+            tokens_in = worker_result.input_tokens
+            tokens_out = worker_result.output_tokens
+            if worker_result.had_error:
                 had_error = True
 
         # ── Local response quality gate ─────────────────────────────────────
@@ -699,23 +728,24 @@ class ChatOrchestrator:
                                     # re-streaming from Claude — prevents the
                                     # user seeing both responses concatenated.
                                     on_token("\x00__CLEAR__")
-                                    response_text, usage = self.claude.stream_multi_turn(
-                                        full_system, messages, on_token,
-                                        max_tokens=target.max_tokens,
-                                    )
-                                    if usage:
-                                        tokens_in = getattr(usage, "input_tokens", 0) or 0
-                                        tokens_out = getattr(usage, "output_tokens", 0) or 0
-                                else:
-                                    result = self.claude.chat_multi_turn(
-                                        full_system, messages,
-                                        max_tokens=target.max_tokens,
-                                    )
-                                    response_text = result["text"]
-                                    tokens_in = result.get("input_tokens", 0)
-                                    tokens_out = result.get("output_tokens", 0)
+                                # Phase 1: escalation also goes through the hub.
+                                escalation = RoutingDecision(
+                                    agent_id=decision.agent_id,
+                                    backend="claude",
+                                    score=decision.score,
+                                    reasoning="local response failed quality gate; escalated",
+                                    used_fallback=False,
+                                    skill_matched=decision.skill_matched,
+                                )
+                                esc_result = self.hub_router.invoke(
+                                    escalation, full_system, messages,
+                                    max_tokens=target.max_tokens, on_token=on_token,
+                                )
+                                response_text = esc_result.text
+                                tokens_in = esc_result.input_tokens
+                                tokens_out = esc_result.output_tokens
                                 route_model = "claude"
-                                model_name = self.claude._model
+                                model_name = esc_result.model_name
                             except Exception as esc_exc:
                                 log.debug("Escalation to Claude failed: %s", esc_exc)
             except Exception:

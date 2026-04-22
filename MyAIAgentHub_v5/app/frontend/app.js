@@ -157,9 +157,72 @@ function handleEvent(event, payload) {
       showConnResult(payload.backend, payload.ok);
       break;
     case "security_scan": handleSecurityScanEvent(payload); break;
+    case "lifecycle_confirmation_required":
+      showLifecycleConfirmation(payload);
+      break;
     default:
       console.debug("Unhandled event:", event, payload);
   }
+}
+
+// ── Phase 4: Lifecycle confirmation dialog ───────────────────────────────────
+let _lifecycleFocusReturn = null;
+
+function showLifecycleConfirmation(payload) {
+  const dialog = document.getElementById("lifecycle-confirm-dialog");
+  const body = document.getElementById("lc-body");
+  const cancelBtn = document.getElementById("lc-cancel-btn");
+  const confirmBtn = document.getElementById("lc-confirm-btn");
+  if(!dialog || !body || !cancelBtn || !confirmBtn) return;
+
+  const token = payload.token;
+  const plain = payload.plain_english ||
+    `Agent '${payload.requester_name||payload.requester_id}' is asking to shut down agent '${payload.target_name||payload.target_id}'.`;
+  body.textContent = plain;
+
+  _lifecycleFocusReturn = document.activeElement;
+
+  const cleanup = () => {
+    cancelBtn.removeEventListener("click", onCancel);
+    confirmBtn.removeEventListener("click", onConfirm);
+    dialog.removeEventListener("cancel", onEsc);
+    dialog.removeEventListener("keydown", onTrap);
+    if(dialog.open) dialog.close();
+    if(_lifecycleFocusReturn && typeof _lifecycleFocusReturn.focus === "function") {
+      try { _lifecycleFocusReturn.focus(); } catch(e) {}
+    }
+    _lifecycleFocusReturn = null;
+  };
+
+  const onCancel = async () => { cleanup(); await api("deny_shutdown", token); };
+  const onConfirm = async () => { cleanup(); await api("confirm_shutdown", token); };
+  // <dialog>'s built-in cancel event fires for Esc; treat as deny.
+  const onEsc = (ev) => { ev.preventDefault(); onCancel(); };
+  // Trap Tab inside the dialog so focus does not leak to the page behind.
+  const onTrap = (ev) => {
+    if(ev.key !== "Tab") return;
+    const focusables = [cancelBtn, confirmBtn];
+    const i = focusables.indexOf(document.activeElement);
+    if(ev.shiftKey) {
+      if(i <= 0) { ev.preventDefault(); focusables[focusables.length - 1].focus(); }
+    } else {
+      if(i === focusables.length - 1) { ev.preventDefault(); focusables[0].focus(); }
+    }
+  };
+
+  cancelBtn.addEventListener("click", onCancel);
+  confirmBtn.addEventListener("click", onConfirm);
+  dialog.addEventListener("cancel", onEsc);
+  dialog.addEventListener("keydown", onTrap);
+
+  if(typeof dialog.showModal === "function") {
+    dialog.showModal();
+  } else {
+    // Fallback for environments where <dialog> isn't fully supported.
+    dialog.setAttribute("open", "");
+  }
+  // Initial focus on the safer choice.
+  setTimeout(() => cancelBtn.focus(), 0);
 }
 
 // ── Structured event handler ──────────────────────────────────────────────────
@@ -767,26 +830,43 @@ document.getElementById("new-agent-btn").addEventListener("click", () => openAge
 
 function openAgentModal(agentId) {
   const agent = agentId ? state.agents.find(a=>a.id===agentId) : null;
+  const initialBudget = (agent && agent.thinking_budget != null) ? agent.thinking_budget : 2048;
   showModal(agent ? "Edit Agent" : "New Agent", `
     <div class="form-group"><label class="form-label">Name</label><input class="form-input" id="m-agent-name" value="${escAttr(agent?.name||"")}"></div>
     <div class="form-group"><label class="form-label">Specialty / Domain</label><input class="form-input" id="m-agent-domain" value="${escAttr(agent?.domain||"")}" placeholder="e.g. Code review, Legal analysis…"></div>
     <div class="form-group"><label class="form-label">System Prompt</label><textarea class="form-input" id="m-agent-prompt" style="height:120px;resize:vertical;font-family:var(--mono);font-size:12px;">${escHtml(agent?.system_prompt||"")}</textarea></div>
     <div class="form-group"><label class="form-label">Model</label><select class="form-input" id="m-agent-model"><option value="auto">Auto (smart routing)</option><option value="claude">Always Claude</option><option value="local">Always Local (free)</option></select></div>
+    <div class="form-group">
+      <label class="form-label">Thinking budget <span style="font-weight:400;color:var(--text3);">(local Qwen3 only — 0 disables /think)</span></label>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <input type="range" id="m-agent-thinking" min="0" max="8192" step="256" value="${initialBudget}" style="flex:1;">
+        <span id="m-agent-thinking-val" style="font-family:var(--mono);font-size:12px;color:var(--text2);min-width:60px;text-align:right;">${initialBudget} tok</span>
+      </div>
+    </div>
   `, async () => {
     const name = document.getElementById("m-agent-name").value.trim();
     if(!name) { showToast("Name required","error"); return false; }
+    const budget = parseInt(document.getElementById("m-agent-thinking").value, 10);
     const data = {
       name,
       domain: document.getElementById("m-agent-domain").value.trim(),
       system_prompt: document.getElementById("m-agent-prompt").value.trim(),
       model_preference: document.getElementById("m-agent-model").value,
       description: document.getElementById("m-agent-domain").value.trim(),
+      thinking_budget: isNaN(budget) ? 2048 : budget,
     };
     if(agentId) await api("agent_update", agentId, data);
     else await api("agent_create", data.name, data.description, data.system_prompt, data.model_preference);
     loadAgents();
   });
   if(agent) { setTimeout(()=>{ const sel=document.getElementById("m-agent-model"); if(sel) sel.value=agent.model_preference||"auto"; },50); }
+  setTimeout(() => {
+    const slider = document.getElementById("m-agent-thinking");
+    const out = document.getElementById("m-agent-thinking-val");
+    if(slider && out) {
+      slider.addEventListener("input", () => { out.textContent = `${slider.value} tok`; });
+    }
+  }, 50);
 }
 
 function editAgent(id) { openAgentModal(id); }
@@ -1081,7 +1161,86 @@ async function loadSettings() {
   setToggle("s-firewall",  get("firewall_enabled")              !== false);
 
   renderServiceStatus();
+  renderMcpServers();
 }
+
+// ── MCP Servers (Phase 2) ────────────────────────────────────────────────────
+async function renderMcpServers() {
+  const list = document.getElementById("mcp-servers-list");
+  if(!list) return;
+  list.innerHTML = "";
+  const r = await api("list_mcp_servers");
+  const servers = (r && r.servers) || [];
+  if(servers.length === 0) {
+    const empty = document.createElement("div");
+    empty.style.cssText = "font-size:12px;color:var(--text3);padding:8px;text-align:center;background:var(--bg3);border-radius:6px;";
+    empty.textContent = "No MCP servers installed yet.";
+    list.appendChild(empty);
+    return;
+  }
+  for(const s of servers) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:10px;padding:10px;border-radius:6px;background:var(--bg3);";
+    const info = document.createElement("div");
+    info.style.cssText = "flex:1;min-width:0;";
+    const title = document.createElement("div");
+    title.style.cssText = "font-weight:600;color:var(--text);font-size:13px;";
+    title.textContent = `${s.name} `;
+    const ver = document.createElement("span");
+    ver.style.cssText = "font-weight:400;color:var(--text3);font-size:11px;";
+    ver.textContent = `v${s.version} · ${s.tool_count} tool${s.tool_count===1?"":"s"}`;
+    title.appendChild(ver);
+    const sub = document.createElement("div");
+    sub.style.cssText = "font-size:11px;color:var(--text3);font-family:var(--mono);";
+    sub.textContent = s.server_id;
+    info.appendChild(title);
+    info.appendChild(sub);
+    const toggle = document.createElement("label");
+    toggle.className = "toggle";
+    toggle.innerHTML = `<input type="checkbox"${s.enabled?" checked":""}><span class="toggle-slider"></span>`;
+    toggle.querySelector("input").addEventListener("change", async (ev) => {
+      await api("set_mcp_server_enabled", s.server_id, ev.target.checked);
+    });
+    const remove = document.createElement("button");
+    remove.className = "btn";
+    remove.style.cssText = "padding:6px 10px;font-size:12px;";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", async () => {
+      if(!confirm(`Remove MCP server "${s.name}"? This deletes its installed folder.`)) return;
+      const out = await api("remove_mcp_server", s.server_id);
+      if(out && out.ok) renderMcpServers();
+      else showToast(out?.error || "Failed to remove server", "error");
+    });
+    row.appendChild(info);
+    row.appendChild(toggle);
+    row.appendChild(remove);
+    list.appendChild(row);
+  }
+}
+
+document.getElementById("mcp-add-btn")?.addEventListener("click", async () => {
+  const resultEl = document.getElementById("mcp-add-result");
+  resultEl.textContent = "Opening folder picker…";
+  resultEl.style.color = "var(--text3)";
+  let r = await api("pick_mcp_server_folder", false);
+  if(r && !r.ok && r.needs_overwrite_confirm) {
+    if(confirm(r.error + " Overwrite?")) {
+      r = await api("pick_mcp_server_folder", true);
+    } else {
+      resultEl.textContent = "";
+      return;
+    }
+  }
+  if(!r || (!r.ok && !r.cancelled)) {
+    resultEl.textContent = "✗ " + (r?.error || "Failed to install server");
+    resultEl.style.color = "#f44336";
+    return;
+  }
+  if(r.cancelled) { resultEl.textContent = ""; return; }
+  resultEl.textContent = `✓ Installed ${r.name}${r.overwritten ? " (replaced existing)" : ""}`;
+  resultEl.style.color = "#4caf50";
+  renderMcpServers();
+});
 
 // Shared across the Settings → Subsystem status block and the first-run
 // wizard summary so both surfaces use identical human-readable names.
@@ -1362,6 +1521,24 @@ function wizPopulateLocalStep(data) {
   if(data.ram_gb) {
     ramHint.style.display = "block";
     ramHint.textContent = "System RAM: " + data.ram_gb + " GB — recommended model: " + (data.recommended_model || "phi3:mini");
+  }
+  // Phase 3: surface Qwen3-30B-A3B detection / fallback notice in plain English.
+  const qwenStatus = data.qwen_status;
+  if(qwenStatus) {
+    let qwenEl = document.getElementById("wz-qwen-status");
+    if(!qwenEl) {
+      qwenEl = document.createElement("div");
+      qwenEl.id = "wz-qwen-status";
+      qwenEl.style.cssText = "margin-top:10px;padding:10px;border-radius:6px;font-size:12px;line-height:1.5;";
+      ramHint.parentNode.insertBefore(qwenEl, ramHint.nextSibling);
+    }
+    if(qwenStatus.detected) {
+      qwenEl.style.cssText += "background:rgba(76,175,80,0.12);color:#4caf50;border:1px solid rgba(76,175,80,0.3);";
+      qwenEl.textContent = "✓ Qwen3-30B-A3B detected (" + qwenStatus.model_id + ") — hybrid thinking ready.";
+    } else {
+      qwenEl.style.cssText += "background:rgba(240,173,78,0.12);color:#f0ad4e;border:1px solid rgba(240,173,78,0.3);";
+      qwenEl.textContent = qwenStatus.fallback_reason || "Qwen3-30B-A3B not detected.";
+    }
   }
 }
 document.getElementById("wz-next-2").addEventListener("click", () => wizGoToStep(3));

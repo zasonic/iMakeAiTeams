@@ -582,6 +582,16 @@ _MIGRATIONS = [
             created_at        TEXT
         )""",
     ]),
+
+    # ── Phase 1: Hub routing — agents declare skills for deterministic match ─
+    ("phase1.skills", [
+        "ALTER TABLE agents ADD COLUMN skills TEXT DEFAULT '[]'",
+    ]),
+
+    # ── Phase 3: Per-agent thinking budget (Qwen3 hybrid /think mode) ──────
+    ("phase3.thinking_budget", [
+        "ALTER TABLE agents ADD COLUMN thinking_budget INTEGER DEFAULT 2048",
+    ]),
 ]
 
 

@@ -772,6 +772,21 @@ button{cursor:pointer;}
     </div>
 
     <div class="settings-section">
+      <div class="settings-heading">🧰 MCP Servers</div>
+      <div class="settings-card">
+        <div style="font-size:12px;color:var(--text3);margin-bottom:10px;">
+          Drop a folder containing an <code>mcp.json</code> manifest to install a tool server.
+          Servers are stored under your user data folder and discovered automatically.
+        </div>
+        <div id="mcp-servers-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px;"></div>
+        <div class="s-input-block" style="margin-bottom:0;">
+          <button class="btn btn-primary" style="width:100%;" id="mcp-add-btn">Add Server Folder…</button>
+          <div id="mcp-add-result" style="font-size:12px;color:var(--text3);text-align:center;margin-top:6px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <div class="settings-heading">⚙️ Advanced</div>
       <div class="settings-card">
         <div class="s-input-block"><label>System Prompt</label><textarea id="s-system" style="height:80px;resize:vertical;font-family:var(--mono);font-size:12px;" placeholder="You are a helpful assistant."></textarea></div>
@@ -900,6 +915,34 @@ button{cursor:pointer;}
     </div>
   </div>
 </div>
+
+<!-- ── Phase 4: Lifecycle confirmation dialog ────────────────────────────── -->
+<dialog id="lifecycle-confirm-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="lc-title"
+        aria-describedby="lc-body"
+        aria-live="assertive"
+        style="border:none;border-radius:10px;padding:0;background:transparent;max-width:520px;width:90vw;">
+  <div style="background:var(--bg2);color:var(--text);padding:22px 22px 18px;border-radius:10px;border:1px solid var(--bord);box-shadow:0 12px 40px rgba(0,0,0,0.4);">
+    <h2 id="lc-title" style="margin:0 0 12px;font-size:16px;color:var(--text);">
+      Confirm agent shutdown
+    </h2>
+    <p id="lc-body" style="margin:0 0 18px;font-size:14px;line-height:1.55;color:var(--text2);">
+      <!-- populated by JS -->
+    </p>
+    <div style="display:flex;gap:10px;justify-content:flex-end;">
+      <button id="lc-cancel-btn" type="button"
+              style="min-width:88px;min-height:44px;padding:0 18px;border-radius:6px;border:1px solid var(--bord);background:var(--bg3);color:var(--text);font-size:14px;cursor:pointer;">
+        Cancel
+      </button>
+      <button id="lc-confirm-btn" type="button"
+              style="min-width:88px;min-height:44px;padding:0 18px;border-radius:6px;border:1px solid #c62828;background:#c62828;color:#fff;font-size:14px;font-weight:600;cursor:pointer;">
+        Shut down agent
+      </button>
+    </div>
+  </div>
+</dialog>
 
 <script src="app.js"></script>
 

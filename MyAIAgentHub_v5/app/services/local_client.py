@@ -12,8 +12,13 @@ Fix applied:
 
 import json
 import logging
+import re
 import requests
 from core.settings import Settings
+
+# Phase 3: Qwen3-30B-A3B detection. Matches LM Studio's typical id forms
+# such as "qwen3-30b-a3b", "Qwen/Qwen3-30B-A3B-Instruct", "qwen3-30b-a3b-q4_k_m".
+_QWEN3_30B_A3B_ID = re.compile(r"qwen3.*30b.*a3b", re.IGNORECASE)
 
 log = logging.getLogger("MyAIEnv.local")
 
@@ -59,6 +64,66 @@ class LocalClient:
         except Exception as exc:
             log.warning(f"list_models failed for backend '{b}': {exc}")
             return []
+
+    def list_models_detailed(self, backend: str | None = None) -> list[dict]:
+        """Return available models as list of {id, raw} dicts.
+
+        Phase 3 needs structured model info for Qwen3 detection while keeping
+        ``list_models()`` (string list) backward-compatible for existing
+        callers that just need names.
+        """
+        b = self._backend(backend)
+        url = self._url(b)
+        try:
+            if b == "ollama":
+                r = requests.get(url + "/api/tags", timeout=5)
+                r.raise_for_status()
+                return [{"id": m["name"], "raw": m} for m in r.json().get("models", [])]
+            r = requests.get(url + "/v1/models", timeout=5)
+            r.raise_for_status()
+            return [{"id": m["id"], "raw": m} for m in r.json().get("data", [])]
+        except Exception as exc:
+            log.warning(f"list_models_detailed failed for backend '{b}': {exc}")
+            return []
+
+    def detect_qwen3_30b_a3b(self, backend: str | None = None) -> dict:
+        """Probe LM Studio (or Ollama) for a Qwen3-30B-A3B GGUF.
+
+        Returns ``{"detected": bool, "model_id": str, "fallback_reason": str}``.
+
+        - On hit: ``model_id`` is the matching id; ``fallback_reason`` is empty.
+        - On miss with other models present: ``model_id`` is the first available
+          model id; ``fallback_reason`` is a plain-English notice the UI can
+          display verbatim.
+        - On no backend reachable: empty ``model_id`` and a plain-English reason.
+        """
+        models = self.list_models_detailed(backend)
+        for m in models:
+            if _QWEN3_30B_A3B_ID.search(str(m.get("id", ""))):
+                return {
+                    "detected":        True,
+                    "model_id":        m["id"],
+                    "fallback_reason": "",
+                }
+        if not models:
+            return {
+                "detected":        False,
+                "model_id":        "",
+                "fallback_reason": (
+                    "No local model server is reachable. Start LM Studio (or "
+                    "Ollama), load a model, then come back to this screen."
+                ),
+            }
+        fallback = models[0]["id"]
+        return {
+            "detected":        False,
+            "model_id":        fallback,
+            "fallback_reason": (
+                f"Qwen3-30B-A3B not detected — falling back to '{fallback}'. "
+                "Hybrid thinking will use a single budget cap; install a "
+                "Qwen3-30B-A3B GGUF in LM Studio for the recommended setup."
+            ),
+        }
 
     def chat(self, system: str, user_message: str, model: str | None = None,
              max_tokens: int = 2048) -> str:

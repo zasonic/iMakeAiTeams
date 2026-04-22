@@ -137,9 +137,20 @@ class SettingsAPI(BaseAPI):
             lmstudio_running = self._local.is_available(backend="lmstudio")
             ollama_models = self._local.list_models(backend="ollama") if ollama_running else []
             lmstudio_models = self._local.list_models(backend="lmstudio") if lmstudio_running else []
+            # Phase 3: probe both backends for the recommended Qwen3-30B-A3B
+            # GGUF. LM Studio is the canonical target per the spec; Ollama is
+            # checked as a courtesy. The first detected hit wins.
+            qwen_status = self._local.detect_qwen3_30b_a3b(backend="lmstudio")
+            if not qwen_status.get("detected"):
+                qwen_status = self._local.detect_qwen3_30b_a3b(backend="ollama")
         else:
             ollama_running = lmstudio_running = False
             ollama_models = lmstudio_models = []
+            qwen_status = {
+                "detected":        False,
+                "model_id":        "",
+                "fallback_reason": "Local model client not initialized.",
+            }
 
         return {
             "ram_gb": ram_gb,
@@ -149,6 +160,7 @@ class SettingsAPI(BaseAPI):
             "ollama_models": ollama_models,
             "lmstudio_running": lmstudio_running,
             "lmstudio_models": lmstudio_models,
+            "qwen_status": qwen_status,
         }
 
     def get_model_prices(self) -> dict:

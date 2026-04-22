@@ -154,6 +154,12 @@ def extensions_dir() -> Path:
     return d
 
 
+def mcp_servers_dir() -> Path:
+    d = user_dir() / "mcp_servers"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def bundled_model_dir(name: str = "all-MiniLM-L6-v2") -> Path:
     """
     Resolve the sentence-transformers model bundled with the installer.

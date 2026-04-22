@@ -30,6 +30,41 @@ def _now() -> str:
 # ── Theory of Mind helpers ──────────────────────────────────────────────────
 
 # Role descriptors for the 6 built-in agents (used by ToM builder)
+# Default skill declarations per built-in role. Used by HubRouter for
+# deterministic skill-match routing (Phase 1). Custom agents start with no
+# skills and must declare their own.
+_DEFAULT_ROLE_SKILLS: dict[str, list[dict]] = {
+    "coordinator": [{"name": "coordinator", "scopes": ["read", "write"]}],
+    "researcher":  [{"name": "researcher",  "scopes": ["read"]}],
+    "analyst":     [{"name": "analyst",     "scopes": ["read"]}],
+    "writer":      [{"name": "writer",      "scopes": ["write"]}],
+    "coder":       [{"name": "coder",       "scopes": ["read", "write"]}],
+    "reviewer":    [{"name": "reviewer",    "scopes": ["read"]}],
+}
+
+
+def default_skills_for_role(role_key: str) -> list[dict]:
+    """Return the default skill list for a built-in role, or [] for custom."""
+    return [dict(s) for s in _DEFAULT_ROLE_SKILLS.get(role_key, [])]
+
+
+# Phase 3: per-role thinking budget defaults. Hub-style roles (coordinator,
+# reviewer) get larger budgets because they synthesize over multiple inputs.
+# Workers default to 2048 tokens. Roles not listed inherit 2048.
+_DEFAULT_ROLE_THINKING_BUDGET: dict[str, int] = {
+    "coordinator": 4096,
+    "reviewer":    4096,
+    "researcher":  2048,
+    "analyst":     2048,
+    "writer":      2048,
+    "coder":       2048,
+}
+
+
+def default_thinking_budget_for_role(role_key: str) -> int:
+    return int(_DEFAULT_ROLE_THINKING_BUDGET.get(role_key, 2048))
+
+
 _BUILTIN_ROLE_DESCRIPTORS: dict[str, dict] = {
     "coordinator": {
         "domain": "task orchestration and cross-agent coordination",
@@ -144,6 +179,57 @@ def build_theory_of_mind_section(
     return "\n".join(lines)
 
 
+# ── Phase 4: Critic anonymization ──────────────────────────────────────────
+#
+# Reviewer-role agents must not see the identity of the agents they review.
+# Names and (any future) model identifiers are replaced with stable opaque
+# tokens ("Author A", "Author B", …) before the Theory-of-Mind block is
+# assembled. Domain / scope / visibility text is preserved so the reviewer
+# can still reason about role boundaries.
+
+CRITIC_ROLES: frozenset[str] = frozenset({"reviewer"})
+
+
+def _opaque_label(index: int) -> str:
+    """Return a stable opaque label for teammate position ``index`` (0-based).
+
+    'Author A', 'Author B', …, 'Author Z', 'Author AA', 'Author AB', …
+    """
+    if index < 0:
+        raise ValueError("index must be non-negative")
+    out = ""
+    n = index
+    while True:
+        out = chr(ord("A") + (n % 26)) + out
+        n = n // 26 - 1
+        if n < 0:
+            break
+    return f"Author {out}"
+
+
+def _anonymize_teammates_for_critic(teammates: list[dict]) -> list[dict]:
+    """Replace each teammate's identifying fields with opaque tokens.
+
+    Stable across calls for the same teammate set (sorted by original name).
+    Returns a new list — does not mutate the caller's structures.
+    """
+    ordered = sorted(teammates, key=lambda t: str(t.get("name", "")).lower())
+    out: list[dict] = []
+    for i, tm in enumerate(ordered):
+        clone = dict(tm)
+        clone["name"] = _opaque_label(i)
+        # Forward-safe: if a future ToM ever surfaces a teammate's model name,
+        # redact it the same way.
+        if "model" in clone:
+            clone["model"] = "(model redacted)"
+        out.append(clone)
+    return out
+
+
+def is_critic_role(role_key: str | None) -> bool:
+    return (role_key or "").strip().lower() in CRITIC_ROLES
+
+
 def _strip_tom_block(prompt: str) -> str:
     """Remove an existing ToM block from a system prompt (delimited by ---\\n## Team Awareness)."""
     marker_start = "\n---\n## Team Awareness & Communication Protocol\n"
@@ -201,6 +287,11 @@ def refresh_team_tom(team_id: str) -> list[str]:
                 "visible_outputs": other_role.get("visible_outputs", "your final outputs as passed by the coordinator"),
                 "cannot_see":     other_role.get("cannot_see", "your internal reasoning process"),
             })
+
+        # Phase 4: critics never see peer identifiers. Anonymize before the
+        # ToM block is built so the resulting prompt is identifier-clean.
+        if is_critic_role(agent.get("role")):
+            teammates = _anonymize_teammates_for_critic(teammates)
 
         base_prompt  = _strip_tom_block(agent["system_prompt"] or "")
         new_tom      = build_theory_of_mind_section(
@@ -269,6 +360,10 @@ def _make_tom_seed_prompt(role_key: str, base_prompt: str) -> str:
             "visible_outputs": info["visible_outputs"],
             "cannot_see":     info["cannot_see"],
         })
+
+    # Phase 4: critic seed prompts must not name their reviewees.
+    if is_critic_role(role_key):
+        teammates = _anonymize_teammates_for_critic(teammates)
 
     tom = build_theory_of_mind_section(
         agent_name   = {
@@ -386,18 +481,109 @@ def seed_agents() -> int:
         else:
             full_prompt = a["system_prompt_base"]
 
+        skills_json = json.dumps(default_skills_for_role(role_key))
+        thinking_budget = default_thinking_budget_for_role(role_key)
+
         _db.execute(
             "INSERT INTO agents (id, name, description, system_prompt, model_preference, "
-            "role, tom_enabled, is_builtin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "role, tom_enabled, is_builtin, skills, thinking_budget, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (str(uuid.uuid4()), a["name"], a["description"], full_prompt,
              a["model_preference"], role_key, a.get("tom_enabled", 1),
-             a["is_builtin"], _now(), _now()),
+             a["is_builtin"], skills_json, thinking_budget, _now(), _now()),
         )
         count += 1
 
     if count:
         _db.commit()
     return count
+
+
+def seed_default_skills() -> int:
+    """
+    Backfill default skills on built-in agents whose skills column is empty.
+    Idempotent — re-runs are safe and only touch rows with empty skills.
+    Called on app startup (after seed_agents) so existing installs pick up
+    skill declarations introduced by the Phase 1 hub-routing change.
+    """
+    updated = 0
+    for a in _SEED_AGENTS:
+        row = _db.fetchone(
+            "SELECT id, skills FROM agents WHERE name = ? AND is_builtin = 1",
+            (a["name"],),
+        )
+        if not row:
+            continue
+        current = (row["skills"] or "").strip()
+        if current and current != "[]":
+            continue  # already set (possibly by user) — never overwrite
+        defaults = default_skills_for_role(a.get("role", "custom"))
+        if not defaults:
+            continue
+        _db.execute(
+            "UPDATE agents SET skills = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(defaults), _now(), row["id"]),
+        )
+        updated += 1
+    if updated:
+        _db.commit()
+        log.info("Seeded default skills on %d built-in agent(s)", updated)
+    return updated
+
+
+def anonymize_existing_critic_prompts() -> int:
+    """Re-render every critic-role agent's prompt with anonymized teammates.
+
+    Called from the bootstrap so installs upgrading to Phase 4 immediately
+    purge any previously-leaked peer identifiers from reviewer prompts.
+    Idempotent — safe to run on every startup.
+    """
+    rows = _db.fetchall(
+        "SELECT id, name, role, domain, scope, system_prompt, tom_enabled "
+        "FROM agents"
+    )
+    if not rows:
+        return 0
+    all_agents = [dict(r) for r in rows]
+    updated = 0
+    for agent in all_agents:
+        if not is_critic_role(agent.get("role")):
+            continue
+        if not agent.get("tom_enabled", 1):
+            continue
+        teammates: list[dict] = []
+        for other in all_agents:
+            if other["id"] == agent["id"]:
+                continue
+            other_role = _BUILTIN_ROLE_DESCRIPTORS.get(other.get("role") or "custom", {})
+            teammates.append({
+                "name":           other["name"],
+                "domain":         other.get("domain") or other_role.get("domain", "their assigned domain"),
+                "visible_outputs": other_role.get("visible_outputs", "your final outputs as passed by the coordinator"),
+                "cannot_see":     other_role.get("cannot_see", "your internal reasoning process"),
+            })
+        anon = _anonymize_teammates_for_critic(teammates)
+        role_info = _BUILTIN_ROLE_DESCRIPTORS.get(agent.get("role") or "custom", {})
+        domain = agent.get("domain") or role_info.get("domain", "their assigned domain")
+        base_prompt = _strip_tom_block(agent["system_prompt"] or "")
+        new_tom = build_theory_of_mind_section(
+            agent_name=agent["name"],
+            agent_role=agent.get("role") or "custom",
+            agent_domain=domain,
+            teammates=anon,
+            custom_scope=agent.get("scope"),
+        )
+        new_prompt = base_prompt.rstrip() + "\n" + new_tom
+        if new_prompt != agent["system_prompt"]:
+            _db.execute(
+                "UPDATE agents SET system_prompt = ?, updated_at = ? WHERE id = ?",
+                (new_prompt, _now(), agent["id"]),
+            )
+            updated += 1
+    if updated:
+        _db.commit()
+        log.info("Anonymized critic prompts for %d agent(s)", updated)
+    return updated
 
 
 def update_builtin_tom() -> int:
@@ -467,6 +653,7 @@ def create_agent(
     domain: str = "",
     scope: str = "",
     tom_enabled: bool = True,
+    skills: str | None = None,
 ) -> dict:
     aid = str(uuid.uuid4())
     now = _now()
@@ -481,13 +668,17 @@ def create_agent(
         )
         final_prompt = system_prompt.rstrip() + "\n" + tom
 
+    if skills is None:
+        skills = json.dumps(default_skills_for_role(role))
+
     _db.execute(
         "INSERT INTO agents (id, name, description, system_prompt, model_preference, "
-        "allowed_tools, temperature, max_tokens, role, domain, scope, tom_enabled, is_builtin, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+        "allowed_tools, temperature, max_tokens, role, domain, scope, tom_enabled, "
+        "skills, is_builtin, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
         (aid, name, description, final_prompt, model_preference,
          allowed_tools, temperature, max_tokens, role, domain, scope,
-         1 if tom_enabled else 0, now, now),
+         1 if tom_enabled else 0, skills, now, now),
     )
     _db.commit()
     return {"id": aid, "name": name}
@@ -496,7 +687,8 @@ def create_agent(
 _AGENT_UPDATABLE_FIELDS = {
     "name", "description", "system_prompt", "model_preference",
     "allowed_tools", "temperature", "max_tokens",
-    "role", "domain", "scope", "tom_enabled",
+    "role", "domain", "scope", "tom_enabled", "skills",
+    "thinking_budget",
 }
 
 
@@ -533,6 +725,7 @@ def duplicate_agent(agent_id: str, new_name: str) -> dict:
         domain=agent.get("domain") or "",
         scope=agent.get("scope") or "",
         tom_enabled=bool(agent.get("tom_enabled", 1)),
+        skills=agent.get("skills") or json.dumps(default_skills_for_role(agent.get("role") or "custom")),
     )
 
 

@@ -323,6 +323,68 @@ def validate_handoff_packet(packet: HandoffPacket) -> HandoffPacket:
     return packet
 
 
+# ── Phase 1: Hub routing contracts (NEW) ─────────────────────────────────────
+#
+# These types support the deterministic HubRouter that selects a worker by
+# declared skill match. They are distinct from RouteDecision above, which
+# selects a *model backend* (Claude vs local) for a single chat exchange.
+# RouteDecision answers "which model"; the types below answer "which worker".
+
+
+@dataclass(frozen=True)
+class Skill:
+    """A capability declared by an agent. Matched against a TaskDescriptor."""
+    name:   str
+    scopes: tuple[str, ...] = ()  # e.g. ("read",), ("read", "write")
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Skill":
+        raw_scopes = d.get("scopes", []) or []
+        return cls(
+            name=str(d.get("name", "")).strip(),
+            scopes=tuple(str(s).strip() for s in raw_scopes if str(s).strip()),
+        )
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "scopes": list(self.scopes)}
+
+
+@dataclass(frozen=True)
+class TaskDescriptor:
+    """A unit of work submitted to the hub for routing."""
+    text:             str
+    required_skills:  tuple[str, ...] = ()    # any-of match
+    required_scopes:  tuple[str, ...] = ()    # subset of chosen skill's scopes
+    preferred_agent_id: Optional[str] = None  # caller's hint; still authz'd
+    backend_hint:     Optional[str] = None    # "claude" | "local" | None
+
+
+@dataclass(frozen=True)
+class RoutingDecision:
+    """Result of HubRouter.route() — names the chosen worker and why."""
+    agent_id:    str           # selected worker
+    backend:     str           # "claude" | "local"
+    score:       float         # 0.0-1.0 specificity of match
+    reasoning:   str           # human-readable selection reason
+    used_fallback: bool = False  # True if LLM /no_think fallback fired
+    skill_matched: str = ""    # which declared skill won
+    # Phase 3: per-decision Qwen3 thinking budget. 0 means "no thinking" —
+    # local dispatch goes through the plain path with no /think directive,
+    # preserving compatibility with non-Qwen local models.
+    thinking_budget: int = 0
+
+
+@dataclass(frozen=True)
+class WorkerResult:
+    """Output of HubRouter.invoke() — wraps the model response uniformly."""
+    text:          str
+    backend:       str
+    model_name:    str
+    input_tokens:  int = 0
+    output_tokens: int = 0
+    had_error:     bool = False
+
+
 def extract_handoff_packet(
     raw_response: str,
     agent_id:     str,
