@@ -157,9 +157,72 @@ function handleEvent(event, payload) {
       showConnResult(payload.backend, payload.ok);
       break;
     case "security_scan": handleSecurityScanEvent(payload); break;
+    case "lifecycle_confirmation_required":
+      showLifecycleConfirmation(payload);
+      break;
     default:
       console.debug("Unhandled event:", event, payload);
   }
+}
+
+// ── Phase 4: Lifecycle confirmation dialog ───────────────────────────────────
+let _lifecycleFocusReturn = null;
+
+function showLifecycleConfirmation(payload) {
+  const dialog = document.getElementById("lifecycle-confirm-dialog");
+  const body = document.getElementById("lc-body");
+  const cancelBtn = document.getElementById("lc-cancel-btn");
+  const confirmBtn = document.getElementById("lc-confirm-btn");
+  if(!dialog || !body || !cancelBtn || !confirmBtn) return;
+
+  const token = payload.token;
+  const plain = payload.plain_english ||
+    `Agent '${payload.requester_name||payload.requester_id}' is asking to shut down agent '${payload.target_name||payload.target_id}'.`;
+  body.textContent = plain;
+
+  _lifecycleFocusReturn = document.activeElement;
+
+  const cleanup = () => {
+    cancelBtn.removeEventListener("click", onCancel);
+    confirmBtn.removeEventListener("click", onConfirm);
+    dialog.removeEventListener("cancel", onEsc);
+    dialog.removeEventListener("keydown", onTrap);
+    if(dialog.open) dialog.close();
+    if(_lifecycleFocusReturn && typeof _lifecycleFocusReturn.focus === "function") {
+      try { _lifecycleFocusReturn.focus(); } catch(e) {}
+    }
+    _lifecycleFocusReturn = null;
+  };
+
+  const onCancel = async () => { cleanup(); await api("deny_shutdown", token); };
+  const onConfirm = async () => { cleanup(); await api("confirm_shutdown", token); };
+  // <dialog>'s built-in cancel event fires for Esc; treat as deny.
+  const onEsc = (ev) => { ev.preventDefault(); onCancel(); };
+  // Trap Tab inside the dialog so focus does not leak to the page behind.
+  const onTrap = (ev) => {
+    if(ev.key !== "Tab") return;
+    const focusables = [cancelBtn, confirmBtn];
+    const i = focusables.indexOf(document.activeElement);
+    if(ev.shiftKey) {
+      if(i <= 0) { ev.preventDefault(); focusables[focusables.length - 1].focus(); }
+    } else {
+      if(i === focusables.length - 1) { ev.preventDefault(); focusables[0].focus(); }
+    }
+  };
+
+  cancelBtn.addEventListener("click", onCancel);
+  confirmBtn.addEventListener("click", onConfirm);
+  dialog.addEventListener("cancel", onEsc);
+  dialog.addEventListener("keydown", onTrap);
+
+  if(typeof dialog.showModal === "function") {
+    dialog.showModal();
+  } else {
+    // Fallback for environments where <dialog> isn't fully supported.
+    dialog.setAttribute("open", "");
+  }
+  // Initial focus on the safer choice.
+  setTimeout(() => cancelBtn.focus(), 0);
 }
 
 // ── Structured event handler ──────────────────────────────────────────────────

@@ -52,9 +52,14 @@ from services import prompt_library
 from services.router import TaskRouter
 from services.memory import MemoryManager
 from services.chat_orchestrator import ChatOrchestrator
-from services.agent_registry import seed_agents, update_builtin_tom, seed_default_skills
+from services.agent_registry import (
+    seed_agents, update_builtin_tom, seed_default_skills,
+    anonymize_existing_critic_prompts,
+)
 from services import input_sanitizer
 from services.mcp_registry import MCPRegistry
+from services.audit_log import AuditLog
+from services.lifecycle import LifecycleManager
 
 import db as _db_module
 
@@ -64,6 +69,7 @@ from .memory import MemoryAPI
 from .rag import RagAPI
 from .settings import SettingsAPI
 from .mcp import MCPAPI
+from .lifecycle import LifecycleAPI
 
 
 class API:
@@ -116,6 +122,8 @@ class API:
         self._safe_init("agents_seed", seed_agents)
         self._safe_init("theory_of_mind", update_builtin_tom)
         self._safe_init("hub_skills_seed", seed_default_skills)
+        # Phase 4: scrub any pre-existing reviewer prompts of peer identifiers.
+        self._safe_init("critic_anonymization", anonymize_existing_critic_prompts)
 
         def _firewall_init():
             has_key = bool(self._settings.get("claude_api_key", "").strip())
@@ -154,6 +162,16 @@ class API:
             lambda: MCPRegistry(paths.mcp_servers_dir(), self._settings),
         )
 
+        # Phase 4: append-only audit log + human-in-loop lifecycle gate.
+        self._audit_log = self._safe_init(
+            "audit_log",
+            lambda: AuditLog(paths.user_dir() / "lifecycle_audit.jsonl"),
+        )
+        self._lifecycle = self._safe_init(
+            "lifecycle",
+            lambda: LifecycleManager(self._audit_log, emit=self._emit),
+        )
+
         # Deferred services — mark pending so the UI renders a spinner row.
         for _name in ("embedder", "rag_load", "semantic_search",
                       "semantic_search_indexer"):
@@ -166,6 +184,7 @@ class API:
         self._rag_api = RagAPI(self)
         self._settings_api = SettingsAPI(self)
         self._mcp_api = MCPAPI(self)
+        self._lifecycle_api = LifecycleAPI(self)
 
     # ── Deferred initialization ───────────────────────────────────────────────
 
@@ -852,3 +871,20 @@ class API:
 
     def refresh_mcp_registry(self):
         return self._mcp_api.refresh_mcp_registry()
+
+    # ── Lifecycle (Phase 4) ──────────────────────────────────────────────────
+
+    def confirm_shutdown(self, token):
+        return self._lifecycle_api.confirm_shutdown(token)
+
+    def deny_shutdown(self, token):
+        return self._lifecycle_api.deny_shutdown(token)
+
+    def list_lifecycle_audit(self, limit=100):
+        return self._lifecycle_api.list_lifecycle_audit(limit)
+
+    def request_agent_shutdown_demo(self, target_id="agent-b",
+                                     requester_id="agent-a", reason="demo"):
+        return self._lifecycle_api.request_agent_shutdown_demo(
+            target_id, requester_id, reason,
+        )
