@@ -54,6 +54,7 @@ from services.memory import MemoryManager
 from services.chat_orchestrator import ChatOrchestrator
 from services.agent_registry import seed_agents, update_builtin_tom, seed_default_skills
 from services import input_sanitizer
+from services.mcp_registry import MCPRegistry
 
 import db as _db_module
 
@@ -62,6 +63,7 @@ from .agents import AgentsAPI
 from .memory import MemoryAPI
 from .rag import RagAPI
 from .settings import SettingsAPI
+from .mcp import MCPAPI
 
 
 class API:
@@ -146,6 +148,12 @@ class API:
             ),
         )
 
+        # Phase 2: MCP tool registry (catalog only; execution deferred).
+        self._mcp_registry = self._safe_init(
+            "mcp_registry",
+            lambda: MCPRegistry(paths.mcp_servers_dir(), self._settings),
+        )
+
         # Deferred services — mark pending so the UI renders a spinner row.
         for _name in ("embedder", "rag_load", "semantic_search",
                       "semantic_search_indexer"):
@@ -157,6 +165,7 @@ class API:
         self._memory_api = MemoryAPI(self)
         self._rag_api = RagAPI(self)
         self._settings_api = SettingsAPI(self)
+        self._mcp_api = MCPAPI(self)
 
     # ── Deferred initialization ───────────────────────────────────────────────
 
@@ -820,3 +829,26 @@ class API:
 
     def studio_mode_set(self, enabled):
         return self._settings_api.studio_mode_set(enabled)
+
+    # ── MCP servers (Phase 2) ─────────────────────────────────────────────────
+
+    def list_mcp_servers(self):
+        return self._mcp_api.list_mcp_servers()
+
+    def pick_mcp_server_folder(self, overwrite=False):
+        return self._mcp_api.pick_mcp_server_folder(overwrite=bool(overwrite))
+
+    def remove_mcp_server(self, server_id):
+        return self._mcp_api.remove_mcp_server(server_id)
+
+    def set_mcp_server_enabled(self, server_id, enabled):
+        return self._mcp_api.set_mcp_server_enabled(server_id, bool(enabled))
+
+    def set_mcp_secret(self, server_id, key, value):
+        return self._mcp_api.set_mcp_secret(server_id, key, value)
+
+    def clear_mcp_secret(self, server_id, key):
+        return self._mcp_api.clear_mcp_secret(server_id, key)
+
+    def refresh_mcp_registry(self):
+        return self._mcp_api.refresh_mcp_registry()

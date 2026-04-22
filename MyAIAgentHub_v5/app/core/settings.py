@@ -120,6 +120,10 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     # Agent / project
     "agent_project_root":            (str,   ""),
 
+    # Phase 2: MCP servers (per-server enable list lives in this setting; the
+    # registry itself reads server folders from paths.mcp_servers_dir()).
+    "mcp_servers_disabled":          ((list, type(None)), []),
+
     # Advanced (complex types)
     "model_prices":                  ((dict, type(None)),  None),
     "hooks":                         ((list, type(None)),  None),

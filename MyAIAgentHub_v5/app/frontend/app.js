@@ -1081,7 +1081,86 @@ async function loadSettings() {
   setToggle("s-firewall",  get("firewall_enabled")              !== false);
 
   renderServiceStatus();
+  renderMcpServers();
 }
+
+// ── MCP Servers (Phase 2) ────────────────────────────────────────────────────
+async function renderMcpServers() {
+  const list = document.getElementById("mcp-servers-list");
+  if(!list) return;
+  list.innerHTML = "";
+  const r = await api("list_mcp_servers");
+  const servers = (r && r.servers) || [];
+  if(servers.length === 0) {
+    const empty = document.createElement("div");
+    empty.style.cssText = "font-size:12px;color:var(--text3);padding:8px;text-align:center;background:var(--bg3);border-radius:6px;";
+    empty.textContent = "No MCP servers installed yet.";
+    list.appendChild(empty);
+    return;
+  }
+  for(const s of servers) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:10px;padding:10px;border-radius:6px;background:var(--bg3);";
+    const info = document.createElement("div");
+    info.style.cssText = "flex:1;min-width:0;";
+    const title = document.createElement("div");
+    title.style.cssText = "font-weight:600;color:var(--text);font-size:13px;";
+    title.textContent = `${s.name} `;
+    const ver = document.createElement("span");
+    ver.style.cssText = "font-weight:400;color:var(--text3);font-size:11px;";
+    ver.textContent = `v${s.version} · ${s.tool_count} tool${s.tool_count===1?"":"s"}`;
+    title.appendChild(ver);
+    const sub = document.createElement("div");
+    sub.style.cssText = "font-size:11px;color:var(--text3);font-family:var(--mono);";
+    sub.textContent = s.server_id;
+    info.appendChild(title);
+    info.appendChild(sub);
+    const toggle = document.createElement("label");
+    toggle.className = "toggle";
+    toggle.innerHTML = `<input type="checkbox"${s.enabled?" checked":""}><span class="toggle-slider"></span>`;
+    toggle.querySelector("input").addEventListener("change", async (ev) => {
+      await api("set_mcp_server_enabled", s.server_id, ev.target.checked);
+    });
+    const remove = document.createElement("button");
+    remove.className = "btn";
+    remove.style.cssText = "padding:6px 10px;font-size:12px;";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", async () => {
+      if(!confirm(`Remove MCP server "${s.name}"? This deletes its installed folder.`)) return;
+      const out = await api("remove_mcp_server", s.server_id);
+      if(out && out.ok) renderMcpServers();
+      else showToast(out?.error || "Failed to remove server", "error");
+    });
+    row.appendChild(info);
+    row.appendChild(toggle);
+    row.appendChild(remove);
+    list.appendChild(row);
+  }
+}
+
+document.getElementById("mcp-add-btn")?.addEventListener("click", async () => {
+  const resultEl = document.getElementById("mcp-add-result");
+  resultEl.textContent = "Opening folder picker…";
+  resultEl.style.color = "var(--text3)";
+  let r = await api("pick_mcp_server_folder", false);
+  if(r && !r.ok && r.needs_overwrite_confirm) {
+    if(confirm(r.error + " Overwrite?")) {
+      r = await api("pick_mcp_server_folder", true);
+    } else {
+      resultEl.textContent = "";
+      return;
+    }
+  }
+  if(!r || (!r.ok && !r.cancelled)) {
+    resultEl.textContent = "✗ " + (r?.error || "Failed to install server");
+    resultEl.style.color = "#f44336";
+    return;
+  }
+  if(r.cancelled) { resultEl.textContent = ""; return; }
+  resultEl.textContent = `✓ Installed ${r.name}${r.overwritten ? " (replaced existing)" : ""}`;
+  resultEl.style.color = "#4caf50";
+  renderMcpServers();
+});
 
 // Shared across the Settings → Subsystem status block and the first-run
 // wizard summary so both surfaces use identical human-readable names.
