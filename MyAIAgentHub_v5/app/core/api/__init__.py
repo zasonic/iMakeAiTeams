@@ -52,7 +52,7 @@ from services import prompt_library
 from services.router import TaskRouter
 from services.memory import MemoryManager
 from services.chat_orchestrator import ChatOrchestrator
-from services.agent_registry import seed_agents, update_builtin_tom
+from services.agent_registry import seed_agents, update_builtin_tom, seed_default_skills
 from services import input_sanitizer
 
 import db as _db_module
@@ -113,6 +113,7 @@ class API:
         self._safe_init("prompts_seed", prompt_library.seed_prompts)
         self._safe_init("agents_seed", seed_agents)
         self._safe_init("theory_of_mind", update_builtin_tom)
+        self._safe_init("hub_skills_seed", seed_default_skills)
 
         def _firewall_init():
             has_key = bool(self._settings.get("claude_api_key", "").strip())

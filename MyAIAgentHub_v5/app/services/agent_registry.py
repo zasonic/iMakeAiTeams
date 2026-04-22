@@ -30,6 +30,24 @@ def _now() -> str:
 # ── Theory of Mind helpers ──────────────────────────────────────────────────
 
 # Role descriptors for the 6 built-in agents (used by ToM builder)
+# Default skill declarations per built-in role. Used by HubRouter for
+# deterministic skill-match routing (Phase 1). Custom agents start with no
+# skills and must declare their own.
+_DEFAULT_ROLE_SKILLS: dict[str, list[dict]] = {
+    "coordinator": [{"name": "coordinator", "scopes": ["read", "write"]}],
+    "researcher":  [{"name": "researcher",  "scopes": ["read"]}],
+    "analyst":     [{"name": "analyst",     "scopes": ["read"]}],
+    "writer":      [{"name": "writer",      "scopes": ["write"]}],
+    "coder":       [{"name": "coder",       "scopes": ["read", "write"]}],
+    "reviewer":    [{"name": "reviewer",    "scopes": ["read"]}],
+}
+
+
+def default_skills_for_role(role_key: str) -> list[dict]:
+    """Return the default skill list for a built-in role, or [] for custom."""
+    return [dict(s) for s in _DEFAULT_ROLE_SKILLS.get(role_key, [])]
+
+
 _BUILTIN_ROLE_DESCRIPTORS: dict[str, dict] = {
     "coordinator": {
         "domain": "task orchestration and cross-agent coordination",
@@ -386,18 +404,53 @@ def seed_agents() -> int:
         else:
             full_prompt = a["system_prompt_base"]
 
+        skills_json = json.dumps(default_skills_for_role(role_key))
+
         _db.execute(
             "INSERT INTO agents (id, name, description, system_prompt, model_preference, "
-            "role, tom_enabled, is_builtin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "role, tom_enabled, is_builtin, skills, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (str(uuid.uuid4()), a["name"], a["description"], full_prompt,
              a["model_preference"], role_key, a.get("tom_enabled", 1),
-             a["is_builtin"], _now(), _now()),
+             a["is_builtin"], skills_json, _now(), _now()),
         )
         count += 1
 
     if count:
         _db.commit()
     return count
+
+
+def seed_default_skills() -> int:
+    """
+    Backfill default skills on built-in agents whose skills column is empty.
+    Idempotent — re-runs are safe and only touch rows with empty skills.
+    Called on app startup (after seed_agents) so existing installs pick up
+    skill declarations introduced by the Phase 1 hub-routing change.
+    """
+    updated = 0
+    for a in _SEED_AGENTS:
+        row = _db.fetchone(
+            "SELECT id, skills FROM agents WHERE name = ? AND is_builtin = 1",
+            (a["name"],),
+        )
+        if not row:
+            continue
+        current = (row["skills"] or "").strip()
+        if current and current != "[]":
+            continue  # already set (possibly by user) — never overwrite
+        defaults = default_skills_for_role(a.get("role", "custom"))
+        if not defaults:
+            continue
+        _db.execute(
+            "UPDATE agents SET skills = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(defaults), _now(), row["id"]),
+        )
+        updated += 1
+    if updated:
+        _db.commit()
+        log.info("Seeded default skills on %d built-in agent(s)", updated)
+    return updated
 
 
 def update_builtin_tom() -> int:
@@ -467,6 +520,7 @@ def create_agent(
     domain: str = "",
     scope: str = "",
     tom_enabled: bool = True,
+    skills: str | None = None,
 ) -> dict:
     aid = str(uuid.uuid4())
     now = _now()
@@ -481,13 +535,17 @@ def create_agent(
         )
         final_prompt = system_prompt.rstrip() + "\n" + tom
 
+    if skills is None:
+        skills = json.dumps(default_skills_for_role(role))
+
     _db.execute(
         "INSERT INTO agents (id, name, description, system_prompt, model_preference, "
-        "allowed_tools, temperature, max_tokens, role, domain, scope, tom_enabled, is_builtin, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+        "allowed_tools, temperature, max_tokens, role, domain, scope, tom_enabled, "
+        "skills, is_builtin, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
         (aid, name, description, final_prompt, model_preference,
          allowed_tools, temperature, max_tokens, role, domain, scope,
-         1 if tom_enabled else 0, now, now),
+         1 if tom_enabled else 0, skills, now, now),
     )
     _db.commit()
     return {"id": aid, "name": name}
@@ -496,7 +554,7 @@ def create_agent(
 _AGENT_UPDATABLE_FIELDS = {
     "name", "description", "system_prompt", "model_preference",
     "allowed_tools", "temperature", "max_tokens",
-    "role", "domain", "scope", "tom_enabled",
+    "role", "domain", "scope", "tom_enabled", "skills",
 }
 
 
@@ -533,6 +591,7 @@ def duplicate_agent(agent_id: str, new_name: str) -> dict:
         domain=agent.get("domain") or "",
         scope=agent.get("scope") or "",
         tom_enabled=bool(agent.get("tom_enabled", 1)),
+        skills=agent.get("skills") or json.dumps(default_skills_for_role(agent.get("role") or "custom")),
     )
 
 

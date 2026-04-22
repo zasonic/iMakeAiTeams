@@ -582,6 +582,11 @@ _MIGRATIONS = [
             created_at        TEXT
         )""",
     ]),
+
+    # ── Phase 1: Hub routing — agents declare skills for deterministic match ─
+    ("phase1.skills", [
+        "ALTER TABLE agents ADD COLUMN skills TEXT DEFAULT '[]'",
+    ]),
 ]
 
 
