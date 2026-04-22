@@ -28,12 +28,26 @@ from datetime import datetime, timezone
 import db as _db
 from models import ChatResult, ExecutionTarget, RoutingDecision, TaskDescriptor
 from services.hub_router import HubRouter
+from services import qwen_thinking
 from services.security_engine import (
     quarantine_chunks, render_quarantined_context, enforce_context_rules,
     validate_fact_for_storage, RiskLedger, RiskCategory, SecurityAssessment,
 )
 
 log = logging.getLogger("MyAIEnv.chat")
+
+
+def _list_routable_agents() -> list[dict]:
+    """Provider for the HubRouter's Qwen /no_think fallback (Phase 3).
+
+    Returns the minimal columns the routing prompt needs. Lives at module
+    scope so the closure captured at orchestrator init does not pin a stale
+    DB snapshot — every fallback call re-queries.
+    """
+    rows = _db.fetchall(
+        "SELECT id, name, role, skills, model_preference FROM agents"
+    )
+    return [dict(r) for r in rows]
 
 MAX_HISTORY_MESSAGES = 40  # 20 user/assistant turns
 MAX_CONTEXT_CHARS = 80_000  # ~20K tokens — safe for 128K context models
@@ -118,10 +132,17 @@ class ChatOrchestrator:
         self.memory = memory
         self._settings = settings
         self._risk_ledgers: dict[str, RiskLedger] = {}  # per-conversation
-        # Single boundary for worker invocation (Phase 1). Constructed on
-        # demand so callers that don't inject one keep working — the
-        # HubRouter only owns dispatch, not classification.
-        self.hub_router = hub_router or HubRouter(claude_client, local_client, settings)
+        # Single boundary for worker invocation (Phase 1) with Phase 3 LLM
+        # fallback wired through Qwen3 /no_think for routing decisions that
+        # have no deterministic skill match.
+        if hub_router is None:
+            fallback = qwen_thinking.make_no_think_router(
+                local_client, _list_routable_agents,
+            )
+            hub_router = HubRouter(
+                claude_client, local_client, settings, llm_fallback=fallback,
+            )
+        self.hub_router = hub_router
 
     # ── Conversation management ──────────────────────────────────────────────
 

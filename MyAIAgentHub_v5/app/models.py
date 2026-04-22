@@ -368,6 +368,10 @@ class RoutingDecision:
     reasoning:   str           # human-readable selection reason
     used_fallback: bool = False  # True if LLM /no_think fallback fired
     skill_matched: str = ""    # which declared skill won
+    # Phase 3: per-decision Qwen3 thinking budget. 0 means "no thinking" —
+    # local dispatch goes through the plain path with no /think directive,
+    # preserving compatibility with non-Qwen local models.
+    thinking_budget: int = 0
 
 
 @dataclass(frozen=True)

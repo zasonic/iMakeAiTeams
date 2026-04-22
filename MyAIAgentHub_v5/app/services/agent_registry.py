@@ -48,6 +48,23 @@ def default_skills_for_role(role_key: str) -> list[dict]:
     return [dict(s) for s in _DEFAULT_ROLE_SKILLS.get(role_key, [])]
 
 
+# Phase 3: per-role thinking budget defaults. Hub-style roles (coordinator,
+# reviewer) get larger budgets because they synthesize over multiple inputs.
+# Workers default to 2048 tokens. Roles not listed inherit 2048.
+_DEFAULT_ROLE_THINKING_BUDGET: dict[str, int] = {
+    "coordinator": 4096,
+    "reviewer":    4096,
+    "researcher":  2048,
+    "analyst":     2048,
+    "writer":      2048,
+    "coder":       2048,
+}
+
+
+def default_thinking_budget_for_role(role_key: str) -> int:
+    return int(_DEFAULT_ROLE_THINKING_BUDGET.get(role_key, 2048))
+
+
 _BUILTIN_ROLE_DESCRIPTORS: dict[str, dict] = {
     "coordinator": {
         "domain": "task orchestration and cross-agent coordination",
@@ -405,14 +422,15 @@ def seed_agents() -> int:
             full_prompt = a["system_prompt_base"]
 
         skills_json = json.dumps(default_skills_for_role(role_key))
+        thinking_budget = default_thinking_budget_for_role(role_key)
 
         _db.execute(
             "INSERT INTO agents (id, name, description, system_prompt, model_preference, "
-            "role, tom_enabled, is_builtin, skills, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "role, tom_enabled, is_builtin, skills, thinking_budget, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (str(uuid.uuid4()), a["name"], a["description"], full_prompt,
              a["model_preference"], role_key, a.get("tom_enabled", 1),
-             a["is_builtin"], skills_json, _now(), _now()),
+             a["is_builtin"], skills_json, thinking_budget, _now(), _now()),
         )
         count += 1
 
@@ -555,6 +573,7 @@ _AGENT_UPDATABLE_FIELDS = {
     "name", "description", "system_prompt", "model_preference",
     "allowed_tools", "temperature", "max_tokens",
     "role", "domain", "scope", "tom_enabled", "skills",
+    "thinking_budget",
 }
 
 

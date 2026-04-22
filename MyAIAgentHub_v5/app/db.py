@@ -587,6 +587,11 @@ _MIGRATIONS = [
     ("phase1.skills", [
         "ALTER TABLE agents ADD COLUMN skills TEXT DEFAULT '[]'",
     ]),
+
+    # ── Phase 3: Per-agent thinking budget (Qwen3 hybrid /think mode) ──────
+    ("phase3.thinking_budget", [
+        "ALTER TABLE agents ADD COLUMN thinking_budget INTEGER DEFAULT 2048",
+    ]),
 ]
 
 

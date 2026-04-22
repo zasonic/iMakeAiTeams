@@ -124,6 +124,10 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     # registry itself reads server folders from paths.mcp_servers_dir()).
     "mcp_servers_disabled":          ((list, type(None)), []),
 
+    # Phase 3: Qwen3 hybrid thinking. Per-agent budget overrides live on the
+    # agents table; this is the global ceiling enforced for any agent.
+    "qwen_thinking_global_budget_cap": (int, 8192),
+
     # Advanced (complex types)
     "model_prices":                  ((dict, type(None)),  None),
     "hooks":                         ((list, type(None)),  None),

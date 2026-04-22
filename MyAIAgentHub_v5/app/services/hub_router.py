@@ -132,7 +132,7 @@ class HubRouter:
     def route_for_agent(self, agent_id: str, task: TaskDescriptor) -> RoutingDecision:
         """Caller-specified agent path. Validates authz; never runs the LLM."""
         row = _db.fetchone(
-            "SELECT id, model_preference, skills FROM agents WHERE id = ?",
+            "SELECT id, model_preference, skills, thinking_budget FROM agents WHERE id = ?",
             (agent_id,),
         )
         if not row:
@@ -153,6 +153,8 @@ class HubRouter:
             )
 
         backend = self._resolve_backend(row["model_preference"], task.backend_hint)
+        # Phase 3: Cap the per-agent thinking budget by the global ceiling.
+        budget = self._capped_budget(row)
         return RoutingDecision(
             agent_id=row["id"],
             backend=backend,
@@ -160,7 +162,21 @@ class HubRouter:
             reasoning=f"caller-selected agent {agent_id}",
             used_fallback=False,
             skill_matched=matched,
+            thinking_budget=budget,
         )
+
+    def _capped_budget(self, row) -> int:
+        """Resolve a per-agent thinking budget capped by the global setting."""
+        try:
+            agent_budget = int(row["thinking_budget"] or 0)
+        except (KeyError, IndexError, ValueError, TypeError):
+            agent_budget = 0
+        if agent_budget <= 0:
+            return 0
+        cap = int(self._settings.get("qwen_thinking_global_budget_cap", 8192) or 0)
+        if cap <= 0:
+            return agent_budget
+        return min(agent_budget, cap)
 
     def route(self, task: TaskDescriptor) -> RoutingDecision:
         """No-agent-specified path. Picks by skill match across all agents."""
@@ -168,10 +184,11 @@ class HubRouter:
             return self.route_for_agent(task.preferred_agent_id, task)
 
         rows = _db.fetchall(
-            "SELECT id, model_preference, skills FROM agents WHERE skills IS NOT NULL AND skills != '[]'"
+            "SELECT id, model_preference, skills, thinking_budget FROM agents "
+            "WHERE skills IS NOT NULL AND skills != '[]'"
         )
 
-        best_id: Optional[str] = None
+        best_row = None
         best_backend: str = "claude"
         best_score: float = 0.0
         best_skill: str = ""
@@ -180,18 +197,19 @@ class HubRouter:
             score, matched = self._score_match(declared, task)
             if score > best_score:
                 best_score = score
-                best_id = r["id"]
+                best_row = r
                 best_backend = self._resolve_backend(r["model_preference"], task.backend_hint)
                 best_skill = matched
 
-        if best_id is not None and best_score >= MIN_SKILL_MATCH_SCORE:
+        if best_row is not None and best_score >= MIN_SKILL_MATCH_SCORE:
             return RoutingDecision(
-                agent_id=best_id,
+                agent_id=best_row["id"],
                 backend=best_backend,
                 score=best_score,
                 reasoning=f"skill-match on '{best_skill}' (score {best_score:.2f})",
                 used_fallback=False,
                 skill_matched=best_skill,
+                thinking_budget=self._capped_budget(best_row),
             )
 
         # No deterministic winner — use LLM fallback if Phase 3 wired one.
@@ -223,7 +241,10 @@ class HubRouter:
         """Dispatch a routed task to its model client. Single source of truth."""
         if decision.backend == "claude":
             return self._invoke_claude(system, messages, max_tokens, on_token)
-        return self._invoke_local(system, messages, max_tokens, on_token)
+        return self._invoke_local(
+            system, messages, max_tokens, on_token,
+            thinking_budget=int(decision.thinking_budget or 0),
+        )
 
     def target_for(self, decision: RoutingDecision, max_tokens: int) -> ExecutionTarget:
         """Public helper so the orchestrator can build an ExecutionTarget."""
@@ -290,10 +311,22 @@ class HubRouter:
                 had_error=True,
             )
 
-    def _invoke_local(self, system, messages, max_tokens, on_token) -> WorkerResult:
+    def _invoke_local(self, system, messages, max_tokens, on_token,
+                      thinking_budget: int = 0) -> WorkerResult:
         local_max = min(max_tokens, 2048)
         try:
-            if on_token:
+            if thinking_budget > 0:
+                # Phase 3: route through qwen_thinking so the /think directive
+                # and per-agent budget cap are applied. Imported lazily so the
+                # router module stays import-cheap and qwen_thinking can use
+                # types defined in models.py without a cycle.
+                from services import qwen_thinking
+                budget = min(thinking_budget, local_max)
+                text = qwen_thinking.worker_think(
+                    self._local, system, messages,
+                    budget_tokens=budget, on_token=on_token,
+                )
+            elif on_token:
                 text = self._local.stream_multi_turn(
                     system, messages, on_token, max_tokens=local_max,
                 )

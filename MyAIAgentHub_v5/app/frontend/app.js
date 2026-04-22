@@ -767,26 +767,43 @@ document.getElementById("new-agent-btn").addEventListener("click", () => openAge
 
 function openAgentModal(agentId) {
   const agent = agentId ? state.agents.find(a=>a.id===agentId) : null;
+  const initialBudget = (agent && agent.thinking_budget != null) ? agent.thinking_budget : 2048;
   showModal(agent ? "Edit Agent" : "New Agent", `
     <div class="form-group"><label class="form-label">Name</label><input class="form-input" id="m-agent-name" value="${escAttr(agent?.name||"")}"></div>
     <div class="form-group"><label class="form-label">Specialty / Domain</label><input class="form-input" id="m-agent-domain" value="${escAttr(agent?.domain||"")}" placeholder="e.g. Code review, Legal analysis…"></div>
     <div class="form-group"><label class="form-label">System Prompt</label><textarea class="form-input" id="m-agent-prompt" style="height:120px;resize:vertical;font-family:var(--mono);font-size:12px;">${escHtml(agent?.system_prompt||"")}</textarea></div>
     <div class="form-group"><label class="form-label">Model</label><select class="form-input" id="m-agent-model"><option value="auto">Auto (smart routing)</option><option value="claude">Always Claude</option><option value="local">Always Local (free)</option></select></div>
+    <div class="form-group">
+      <label class="form-label">Thinking budget <span style="font-weight:400;color:var(--text3);">(local Qwen3 only — 0 disables /think)</span></label>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <input type="range" id="m-agent-thinking" min="0" max="8192" step="256" value="${initialBudget}" style="flex:1;">
+        <span id="m-agent-thinking-val" style="font-family:var(--mono);font-size:12px;color:var(--text2);min-width:60px;text-align:right;">${initialBudget} tok</span>
+      </div>
+    </div>
   `, async () => {
     const name = document.getElementById("m-agent-name").value.trim();
     if(!name) { showToast("Name required","error"); return false; }
+    const budget = parseInt(document.getElementById("m-agent-thinking").value, 10);
     const data = {
       name,
       domain: document.getElementById("m-agent-domain").value.trim(),
       system_prompt: document.getElementById("m-agent-prompt").value.trim(),
       model_preference: document.getElementById("m-agent-model").value,
       description: document.getElementById("m-agent-domain").value.trim(),
+      thinking_budget: isNaN(budget) ? 2048 : budget,
     };
     if(agentId) await api("agent_update", agentId, data);
     else await api("agent_create", data.name, data.description, data.system_prompt, data.model_preference);
     loadAgents();
   });
   if(agent) { setTimeout(()=>{ const sel=document.getElementById("m-agent-model"); if(sel) sel.value=agent.model_preference||"auto"; },50); }
+  setTimeout(() => {
+    const slider = document.getElementById("m-agent-thinking");
+    const out = document.getElementById("m-agent-thinking-val");
+    if(slider && out) {
+      slider.addEventListener("input", () => { out.textContent = `${slider.value} tok`; });
+    }
+  }, 50);
 }
 
 function editAgent(id) { openAgentModal(id); }
@@ -1441,6 +1458,24 @@ function wizPopulateLocalStep(data) {
   if(data.ram_gb) {
     ramHint.style.display = "block";
     ramHint.textContent = "System RAM: " + data.ram_gb + " GB — recommended model: " + (data.recommended_model || "phi3:mini");
+  }
+  // Phase 3: surface Qwen3-30B-A3B detection / fallback notice in plain English.
+  const qwenStatus = data.qwen_status;
+  if(qwenStatus) {
+    let qwenEl = document.getElementById("wz-qwen-status");
+    if(!qwenEl) {
+      qwenEl = document.createElement("div");
+      qwenEl.id = "wz-qwen-status";
+      qwenEl.style.cssText = "margin-top:10px;padding:10px;border-radius:6px;font-size:12px;line-height:1.5;";
+      ramHint.parentNode.insertBefore(qwenEl, ramHint.nextSibling);
+    }
+    if(qwenStatus.detected) {
+      qwenEl.style.cssText += "background:rgba(76,175,80,0.12);color:#4caf50;border:1px solid rgba(76,175,80,0.3);";
+      qwenEl.textContent = "✓ Qwen3-30B-A3B detected (" + qwenStatus.model_id + ") — hybrid thinking ready.";
+    } else {
+      qwenEl.style.cssText += "background:rgba(240,173,78,0.12);color:#f0ad4e;border:1px solid rgba(240,173,78,0.3);";
+      qwenEl.textContent = qwenStatus.fallback_reason || "Qwen3-30B-A3B not detected.";
+    }
   }
 }
 document.getElementById("wz-next-2").addEventListener("click", () => wizGoToStep(3));
