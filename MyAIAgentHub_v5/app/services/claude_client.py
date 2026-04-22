@@ -69,6 +69,18 @@ class ClaudeClient:
         content.append({"type": "text", "text": user_message})
         return content
 
+    def _build_system(self, system: str) -> str | list:
+        """Wrap the system prompt with cache_control when caching is enabled."""
+        if not system or not self._use_caching:
+            return system
+        return [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
     # ── Single-turn chat ──────────────────────────────────────────────────────
 
     def chat(self, system: str, project_summary: str, user_message: str,
@@ -78,7 +90,7 @@ class ClaudeClient:
         kwargs: dict = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._build_system(system),
             "messages": [{"role": "user", "content": content}],
         }
         response = self._client.messages.create(**kwargs)
@@ -102,7 +114,7 @@ class ClaudeClient:
         kwargs: dict = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._build_system(system),
             "messages": [{"role": "user", "content": content}],
         }
         full_text = ""
@@ -122,7 +134,7 @@ class ClaudeClient:
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._build_system(system),
             "messages": messages,
         }
         response = self._client.messages.create(**kwargs)
@@ -150,7 +162,7 @@ class ClaudeClient:
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._build_system(system),
             "messages": messages,
         }
         full_text = ""
@@ -184,7 +196,7 @@ class ClaudeClient:
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._build_system(system),
             "messages": messages,
             "tools": tools,
         }
@@ -256,15 +268,31 @@ class ClaudeClient:
         user_message: str,
         budget_tokens: int = 10000,
         model: str | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> dict:
         """
         Run a chat with extended thinking enabled.
+
+        When on_thinking is provided, streams the response so thinking text
+        appears incrementally. Falls back to blocking call if streaming fails.
+
         Returns a dict with keys "thinking" and "answer".
         """
         thinking_model = model or self._model
+        max_tokens = budget_tokens + 8192
+
+        if on_thinking:
+            try:
+                return self._stream_thinking(
+                    thinking_model, system, user_message,
+                    budget_tokens, max_tokens, on_thinking,
+                )
+            except Exception:
+                pass
+
         response = self._client.messages.create(
             model=thinking_model,
-            max_tokens=16000,
+            max_tokens=max_tokens,
             system=system,
             thinking={
                 "type": "enabled",
@@ -279,4 +307,39 @@ class ClaudeClient:
                 thinking_text = block.thinking
             elif block.type == "text":
                 answer_text = block.text
+        return {"thinking": thinking_text, "answer": answer_text}
+
+    def _stream_thinking(
+        self,
+        model: str,
+        system: str,
+        user_message: str,
+        budget_tokens: int,
+        max_tokens: int,
+        on_thinking: Callable[[str], None],
+    ) -> dict:
+        thinking_text = ""
+        answer_text = ""
+        with self._client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            thinking={
+                "type": "enabled",
+                "budget_tokens": budget_tokens,
+            },
+            messages=[{"role": "user", "content": user_message}],
+        ) as stream:
+            for event in stream:
+                if hasattr(event, "type"):
+                    if event.type == "content_block_start":
+                        pass
+                    elif event.type == "content_block_delta":
+                        delta = getattr(event, "delta", None)
+                        if delta and getattr(delta, "type", "") == "thinking_delta":
+                            chunk = getattr(delta, "thinking", "")
+                            thinking_text += chunk
+                            on_thinking(chunk)
+                        elif delta and getattr(delta, "type", "") == "text_delta":
+                            answer_text += getattr(delta, "text", "")
         return {"thinking": thinking_text, "answer": answer_text}
