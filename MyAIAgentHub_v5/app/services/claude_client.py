@@ -53,6 +53,16 @@ class ClaudeClient:
 
     # ── Content helpers ───────────────────────────────────────────────────────
 
+    def _cached_system(self, system: str) -> list | str:
+        """Wrap the system prompt for prompt caching when enabled.
+
+        Cached system prompts cost 90% less on cache hits and reduce
+        latency by up to 85% for long prompts.
+        """
+        if self._use_caching and system:
+            return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+        return system
+
     def _build_content(self, project_summary: str, user_message: str) -> list:
         """
         Build the content list for a standard chat request.
@@ -78,7 +88,7 @@ class ClaudeClient:
         kwargs: dict = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._cached_system(system),
             "messages": [{"role": "user", "content": content}],
         }
         response = self._client.messages.create(**kwargs)
@@ -102,7 +112,7 @@ class ClaudeClient:
         kwargs: dict = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._cached_system(system),
             "messages": [{"role": "user", "content": content}],
         }
         full_text = ""
@@ -122,7 +132,7 @@ class ClaudeClient:
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._cached_system(system),
             "messages": messages,
         }
         response = self._client.messages.create(**kwargs)
@@ -150,7 +160,7 @@ class ClaudeClient:
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._cached_system(system),
             "messages": messages,
         }
         full_text = ""
@@ -184,7 +194,7 @@ class ClaudeClient:
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._cached_system(system),
             "messages": messages,
             "tools": tools,
         }
@@ -258,20 +268,38 @@ class ClaudeClient:
         model: str | None = None,
     ) -> dict:
         """
-        Run a chat with extended thinking enabled.
+        Run a chat with adaptive thinking enabled.
+
+        Uses the adaptive thinking API (Claude 4.6+) which lets the model
+        dynamically decide when and how deeply to reason based on problem
+        complexity. Falls back to explicit budget-based thinking on older
+        models or API errors.
+
         Returns a dict with keys "thinking" and "answer".
         """
         thinking_model = model or self._model
-        response = self._client.messages.create(
-            model=thinking_model,
-            max_tokens=16000,
-            system=system,
-            thinking={
-                "type": "enabled",
-                "budget_tokens": budget_tokens,
-            },
-            messages=[{"role": "user", "content": user_message}],
-        )
+
+        try:
+            response = self._client.messages.create(
+                model=thinking_model,
+                max_tokens=16000,
+                system=self._cached_system(system),
+                thinking={"type": "adaptive"},
+                messages=[{"role": "user", "content": user_message}],
+            )
+        except Exception:
+            # Fallback for models that don't support adaptive thinking
+            response = self._client.messages.create(
+                model=thinking_model,
+                max_tokens=16000,
+                system=self._cached_system(system),
+                thinking={
+                    "type": "enabled",
+                    "budget_tokens": budget_tokens,
+                },
+                messages=[{"role": "user", "content": user_message}],
+            )
+
         thinking_text = ""
         answer_text = ""
         for block in response.content:
