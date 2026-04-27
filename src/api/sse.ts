@@ -1,0 +1,72 @@
+// src/api/sse.ts — EventSource wrapper for the sidecar's /api/events stream.
+//
+// EventSource doesn't support custom headers, so the Bearer token is appended
+// as a `?token=` query parameter (the sidecar's BearerAuthMiddleware accepts
+// either header or query for SSE).
+//
+// Usage:
+//   const sub = subscribeEvents({
+//     chat_token: (data) => ...,
+//     chat_done: (data) => ...,
+//   });
+//   sub.close();
+
+import type { SidecarInfo } from "@/env";
+
+export type EventHandler = (data: unknown) => void;
+
+export interface EventSubscription {
+  close: () => void;
+}
+
+export interface EventStreamOptions {
+  /** Map of event-name → handler. Unknown event names are ignored silently. */
+  handlers: Record<string, EventHandler>;
+  /** Called when the stream connects (or reconnects). */
+  onOpen?: () => void;
+  /** Called when the stream errors out. */
+  onError?: (err: Event) => void;
+}
+
+let currentSource: EventSource | null = null;
+
+export function subscribeEvents(
+  info: SidecarInfo,
+  opts: EventStreamOptions,
+): EventSubscription {
+  // Tear down any previous stream — only one is supported at a time.
+  closeEventStream();
+
+  const url = `http://127.0.0.1:${info.port}/api/events?token=${encodeURIComponent(info.token)}`;
+  const source = new EventSource(url);
+  currentSource = source;
+
+  source.onopen = () => opts.onOpen?.();
+  source.onerror = (err) => opts.onError?.(err);
+
+  // Wire one listener per registered event name. The server sends
+  // `event: <name>\ndata: <json>` so the browser fires a named CustomEvent.
+  for (const [name, handler] of Object.entries(opts.handlers)) {
+    source.addEventListener(name, (e: MessageEvent) => {
+      try {
+        handler(JSON.parse(e.data));
+      } catch (err) {
+        console.warn(`[sse] failed to parse event ${name}:`, err);
+      }
+    });
+  }
+
+  return {
+    close: () => {
+      if (currentSource === source) currentSource = null;
+      source.close();
+    },
+  };
+}
+
+export function closeEventStream(): void {
+  if (currentSource) {
+    currentSource.close();
+    currentSource = null;
+  }
+}

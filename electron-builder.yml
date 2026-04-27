@@ -1,0 +1,45 @@
+appId: com.imakeaiteams.app
+productName: iMakeAiTeams
+copyright: Copyright © 2026 iMakeAiTeams
+asar: true
+
+directories:
+  output: dist
+  buildResources: resources
+
+files:
+  - out/**/*
+  - package.json
+  - "!**/*.{md,map,ts,tsx}"
+  - "!**/{tsconfig*,*.config.*,.eslintrc*}"
+
+extraResources:
+  - from: resources/backend
+    to: backend
+    filter: ["**/*"]
+  - from: resources/icon.png
+    to: icon.png
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: resources/icon.png
+  artifactName: "${productName}-Setup-${version}.${ext}"
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: iMakeAiTeams
+  uninstallDisplayName: iMakeAiTeams
+  deleteAppDataOnUninstall: false
+
+publish:
+  - provider: github
+    owner: zasonic
+    repo: imakeaiteams
+    releaseType: release
