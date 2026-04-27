@@ -292,7 +292,7 @@ class API:
             b64 = base64.b64encode(raw.encode()).decode()
             self._window.evaluate_js(f"window.__emit('{event}', atob('{b64}'))")
         except Exception as e:
-            self._log.debug(f"_emit failed for '{event}': {e}")
+            self._log.debug("_emit failed for '%s': %s", event, e)
 
     # ── OS notification ──────────────────────────────────────────────────────
 
@@ -353,10 +353,21 @@ class API:
             path = result[0] if isinstance(result, (list, tuple)) else result
             if not path:
                 return {"ok": False, "cancelled": True}
-            Path(path).write_text(content, encoding="utf-8")
-            return {"ok": True, "path": str(path)}
+            # Guard against path traversal: resolved path must be inside the
+            # user's home directory. The OS save dialog normally enforces this,
+            # but an explicit check defends against edge cases on some platforms.
+            resolved = Path(path).resolve()
+            try:
+                resolved.relative_to(Path.home())
+            except ValueError:
+                self._log.warning(
+                    "save_file_dialog: blocked write outside home dir: %s", resolved
+                )
+                return {"ok": False, "error": "Export path must be within your home directory."}
+            resolved.write_text(content, encoding="utf-8")
+            return {"ok": True, "path": str(resolved)}
         except Exception as exc:
-            self._log.warning(f"save_file_dialog failed: {exc}")
+            self._log.warning("save_file_dialog failed: %s", exc)
             return {"ok": False, "error": str(exc)}
 
     def pick_files(self) -> list[str]:
@@ -669,7 +680,7 @@ class API:
         if isinstance(url, str) and url.startswith(("http://", "https://")):
             webbrowser.open(url)
         else:
-            self._log.warning(f"open_url blocked non-http URL: {url!r}")
+            self._log.warning("open_url blocked non-http URL: %r", url)
 
     def shutdown(self) -> None:
         self._log.info("Shutting down services…")

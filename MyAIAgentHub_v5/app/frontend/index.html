@@ -243,17 +243,9 @@ button{cursor:pointer;}
 .ts-ic.spin{color:var(--accent);animation:spin 1s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
 
-/* Goal decomposition step tracker */
-.decomp-track{display:flex;align-items:center;gap:3px;flex-wrap:wrap;padding:4px 0 2px;}
-.decomp-step{
-  display:flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;
-  font-size:11px;font-weight:600;background:var(--bg4);color:var(--text3);
-  border:1px solid var(--border);transition:all .25s;
-}
-.decomp-step.running{background:var(--accent-s);color:var(--accent);border-color:rgba(139,124,246,.4);}
-.decomp-step.done{background:var(--green-s);color:var(--green);border-color:rgba(61,214,140,.3);}
-.decomp-step.error{background:var(--red-s);color:var(--red);}
-.decomp-arrow{color:var(--text3);font-size:11px;}
+/* Memory review badge */
+.pending-badge{display:none;background:var(--accent);color:#fff;border-radius:10px;font-size:10px;font-weight:700;padding:1px 5px;margin-left:4px;}
+.pending-badge.visible{display:inline;}
 
 /* ── Typing indicator ── */
 #typing-indicator{
@@ -627,7 +619,7 @@ button{cursor:pointer;}
   <div class="nav-section" style="margin-top:auto;">
     <div class="nav-item" data-nav="settings">
       <div class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
-      <span class="nav-text">Settings</span><span class="nav-tooltip">Settings</span>
+      <span class="nav-text">Settings<span class="pending-badge" id="pending-badge"></span></span><span class="nav-tooltip">Settings</span>
     </div>
   </div>
   <div class="sidebar-footer">
@@ -792,6 +784,17 @@ button{cursor:pointer;}
         <div class="s-input-block"><label>System Prompt</label><textarea id="s-system" style="height:80px;resize:vertical;font-family:var(--mono);font-size:12px;" placeholder="You are a helpful assistant."></textarea></div>
         <div class="s-input-block"><label>Conversation Budget USD <span style="color:var(--text3);font-weight:400;">(0 = unlimited)</span></label><input type="number" id="s-budget" placeholder="5.00" min="0" max="1000" step="0.50" style="width:140px;"></div>
         <div class="s-input-block"><button class="btn btn-primary" style="width:100%;" id="save-all-btn">Save All Settings</button></div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-heading">🧠 Memory Review <span class="pending-badge" id="pending-badge-settings" style="font-size:11px;"></span></div>
+      <div class="settings-card">
+        <div style="font-size:12px;color:var(--text3);margin-bottom:10px;">
+          Facts flagged for review before being stored in memory. Approve to save, reject to discard.
+        </div>
+        <div id="pending-review-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+        <div id="pending-review-empty" style="font-size:12px;color:var(--text3);display:none;">No items pending review.</div>
       </div>
     </div>
 

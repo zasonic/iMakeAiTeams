@@ -112,6 +112,8 @@ class ClaudeClient:
             "messages": [{"role": "user", "content": content}],
         }
         response = self._client.messages.create(**kwargs)
+        if not response.content:
+            return ""
         return response.content[0].text
 
     # ── Single-turn streaming ─────────────────────────────────────────────────────────────────────
@@ -135,12 +137,12 @@ class ClaudeClient:
             "system": system,
             "messages": [{"role": "user", "content": content}],
         }
-        full_text = ""
+        tokens: list[str] = []
         with self._client.messages.stream(**kwargs) as stream:
             for token in stream.text_stream:
                 on_token(token)
-                full_text += token
-        return full_text
+                tokens.append(token)
+        return "".join(tokens)
 
     # ── Multi-turn chat ──────────────────────────────────────────────────────────────────────────
 
@@ -157,7 +159,7 @@ class ClaudeClient:
         }
         response = self._client.messages.create(**kwargs)
         return {
-            "text": response.content[0].text,
+            "text": response.content[0].text if response.content else "",
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
         }
@@ -183,17 +185,17 @@ class ClaudeClient:
             "system": self._build_system(system),
             "messages": messages,
         }
-        full_text = ""
+        tokens: list[str] = []
         usage = None
         with self._client.messages.stream(**kwargs) as stream:
             for token in stream.text_stream:
                 on_token(token)
-                full_text += token
+                tokens.append(token)
             try:
                 usage = stream.get_final_usage()
             except Exception:
                 pass  # usage unavailable — caller handles gracefully
-        return full_text, usage
+        return "".join(tokens), usage
 
     # ── Tool use (agentic loop) ─────────────────────────────────────────────────────
 
@@ -276,6 +278,8 @@ class ClaudeClient:
             messages=[{"role": "user", "content": content}],
             extra_headers={"anthropic-beta": "files-api-2025-04-14"},
         )
+        if not response.content:
+            return ""
         return response.content[0].text
 
     # ── Extended thinking ────────────────────────────────────────────────────────────────────────

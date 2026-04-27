@@ -25,6 +25,7 @@ OWASP Agentic Top 10 alignment:
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -90,13 +91,21 @@ class GovernanceEngine:
     def __init__(self, settings=None) -> None:
         self._settings = settings
         self._policies = dict(_DEFAULT_POLICIES)
-        self._tool_counts: dict[str, int] = {}  # task_key -> count
-        self._token_counts: dict[str, int] = {}  # task_key -> tokens used
+        self._tool_counts: dict[str, int] = {}    # task_key -> count
+        self._token_counts: dict[str, int] = {}   # task_key -> tokens used
+        self._counter_timestamps: dict[str, float] = {}  # task_key -> first-seen epoch
         self._enabled = True
+
+        # Build O(1) lookup indexes so _get_policy() doesn't iterate all policies
+        # on every tool call.  Rebuilt after _load_custom_policies() adds entries.
+        self._by_agent_id:   dict[str, AgentPolicy] = {}
+        self._by_agent_role: dict[str, AgentPolicy] = {}
+        self._rebuild_indexes()
 
         # Load custom policies from settings
         if settings:
             self._load_custom_policies(settings)
+            self._rebuild_indexes()
 
     def _load_custom_policies(self, settings) -> None:
         """Load governance_policies from settings.json."""
@@ -115,19 +124,23 @@ class GovernanceEngine:
                     forbidden_patterns=policy_data.get("forbidden_patterns", []),
                 )
 
+    def _rebuild_indexes(self) -> None:
+        """Rebuild O(1) lookup dicts from the current policies dict."""
+        self._by_agent_id = {
+            p.agent_id: p for p in self._policies.values() if p.agent_id
+        }
+        self._by_agent_role = {
+            p.agent_role: p for p in self._policies.values() if p.agent_role
+        }
+
     # ── Policy lookup ─────────────────────────────────────────────────────
 
     def _get_policy(self, agent_id: str = "", agent_role: str = "") -> AgentPolicy:
-        """Find the most specific policy for an agent."""
-        # Check agent-specific policy first
-        for policy in self._policies.values():
-            if policy.agent_id and policy.agent_id == agent_id:
-                return policy
-        # Then role-based policy
-        for policy in self._policies.values():
-            if policy.agent_role and policy.agent_role == agent_role:
-                return policy
-        # Default
+        """Find the most specific policy for an agent. O(1) via index dicts."""
+        if agent_id and agent_id in self._by_agent_id:
+            return self._by_agent_id[agent_id]
+        if agent_role and agent_role in self._by_agent_role:
+            return self._by_agent_role[agent_role]
         return self._policies.get("default", AgentPolicy())
 
     # ── Evaluation ────────────────────────────────────────────────────────
@@ -170,6 +183,8 @@ class GovernanceEngine:
 
         # Check tool call budget
         if policy.max_tool_calls > 0 and task_key:
+            if task_key not in self._counter_timestamps:
+                self._counter_timestamps[task_key] = time.monotonic()
             count = self._tool_counts.get(task_key, 0)
             if count >= policy.max_tool_calls:
                 verdict = PolicyVerdict(
@@ -200,6 +215,8 @@ class GovernanceEngine:
         if policy.max_tokens <= 0:
             return PolicyVerdict(allowed=True)
 
+        if task_key not in self._counter_timestamps:
+            self._counter_timestamps[task_key] = time.monotonic()
         current = self._token_counts.get(task_key, 0) + tokens_used
         if current > policy.max_tokens:
             return PolicyVerdict(
@@ -211,9 +228,17 @@ class GovernanceEngine:
         return PolicyVerdict(allowed=True)
 
     def reset_task_counters(self, task_key: str) -> None:
-        """Reset tool and token counters for a task."""
+        """Reset counters for a task and evict stale entries older than 24 h."""
+        _ttl = 86_400  # seconds
+        now = time.monotonic()
+        stale = [k for k, ts in self._counter_timestamps.items() if now - ts > _ttl]
+        for k in stale:
+            self._tool_counts.pop(k, None)
+            self._token_counts.pop(k, None)
+            self._counter_timestamps.pop(k, None)
         self._tool_counts.pop(task_key, None)
         self._token_counts.pop(task_key, None)
+        self._counter_timestamps.pop(task_key, None)
 
     # ── Audit logging ─────────────────────────────────────────────────────
 

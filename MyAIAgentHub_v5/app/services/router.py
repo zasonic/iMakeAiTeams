@@ -173,10 +173,10 @@ class TaskRouter:
             )
             return route
         except Exception as exc:
-            log.warning(f"Router classification failed: {exc} — defaulting to Claude")
+            log.warning("Router classification failed: %s — defaulting to Claude", exc)
             return RouteDecision(model="claude", complexity="complex",
                                 reasoning=f"router error: {exc}",
-                                confidence=0.0, needs_context=True)
+                                confidence=0.5, needs_context=True)
 
     def _adaptive_threshold(self) -> float:
         """
@@ -200,8 +200,12 @@ class TaskRouter:
 
             error_rate = row["bad"] / row["total"]
             if error_rate > ADAPTIVE_ERROR_FLOOR:
-                # Tighten: raise threshold proportionally (max 0.85)
-                adjusted = min(0.85, ESCALATION_THRESHOLD + (error_rate - ADAPTIVE_ERROR_FLOOR))
+                # Scale threshold linearly from base to cap across the error range
+                # so the full range of error_rate maps to the full threshold range.
+                # Old formula added raw delta (max +0.25); this gives proportional response.
+                _range = 0.85 - ESCALATION_THRESHOLD
+                _span  = max(1e-6, 1.0 - ADAPTIVE_ERROR_FLOOR)
+                adjusted = min(0.85, ESCALATION_THRESHOLD + _range * (error_rate - ADAPTIVE_ERROR_FLOOR) / _span)
                 log.debug(
                     "Adaptive threshold: local error rate %.1f%% -> threshold %.2f",
                     error_rate * 100, adjusted,

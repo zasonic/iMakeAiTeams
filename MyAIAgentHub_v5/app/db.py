@@ -487,6 +487,57 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_pr_created ON pending_review(created_at)"
         )
 
+        # ── Performance indexes on high-traffic FK and timestamp columns ─────────
+        # messages is joined on conversation_id every chat turn and ordered by
+        # created_at for history retrieval — without indexes these are full scans.
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_conv    ON messages(conversation_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_ts      ON messages(created_at)"
+        )
+        # token_usage is summed per conversation_id on every send() for budget tracking
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_token_conv       ON token_usage(conversation_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_token_ts         ON token_usage(created_at)"
+        )
+        # router_log is scanned per conversation and by date for get_router_stats()
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rlog_conv        ON router_log(conversation_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rlog_ts          ON router_log(created_at)"
+        )
+        # session_facts is queried per conversation_id on every memory recall
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sfacts_conv      ON session_facts(conversation_id)"
+        )
+        # conversations is listed sorted by updated_at in the sidebar
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conv_updated     ON conversations(updated_at)"
+        )
+        # background indexer polls for embedding_status='dirty' on every cycle
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mement_status    ON memory_entries(embedding_status)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_docs_status      ON documents(embedding_status)"
+        )
+        # workflow/task FK chains used by orchestrator queries
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_workflow   ON tasks(workflow_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status     ON tasks(status)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_aruns_task       ON agent_runs(task_id)"
+        )
+        # idx_govlog_agent is created by the v5.0.0 / v5.1.indexes migrations
+        # (governance_log table does not exist yet during fresh schema creation)
+
         conn.commit()
 
 
@@ -568,6 +619,7 @@ _MIGRATIONS = [
             task_key       TEXT,
             created_at     TEXT
         )""",
+        "CREATE INDEX IF NOT EXISTS idx_govlog_agent ON governance_log(agent_id)",
         "ALTER TABLE tasks ADD COLUMN locked_by TEXT",
         "ALTER TABLE tasks ADD COLUMN locked_until TEXT",
         """CREATE TABLE IF NOT EXISTS artifact_versions (
@@ -591,6 +643,26 @@ _MIGRATIONS = [
     # ── Phase 3: Per-agent thinking budget (Qwen3 hybrid /think mode) ──────
     ("phase3.thinking_budget", [
         "ALTER TABLE agents ADD COLUMN thinking_budget INTEGER DEFAULT 2048",
+    ]),
+
+    # ── v5.1: Performance indexes on high-traffic FK and timestamp columns ───
+    # These are also added in _create_schema (IF NOT EXISTS) for fresh installs.
+    # This migration ensures existing databases are indexed on upgrade.
+    ("v5.1.indexes", [
+        "CREATE INDEX IF NOT EXISTS idx_messages_conv    ON messages(conversation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_ts      ON messages(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_token_conv       ON token_usage(conversation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_token_ts         ON token_usage(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_rlog_conv        ON router_log(conversation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rlog_ts          ON router_log(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_sfacts_conv      ON session_facts(conversation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_conv_updated     ON conversations(updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_mement_status    ON memory_entries(embedding_status)",
+        "CREATE INDEX IF NOT EXISTS idx_docs_status      ON documents(embedding_status)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_workflow   ON tasks(workflow_id)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_status     ON tasks(status)",
+        "CREATE INDEX IF NOT EXISTS idx_aruns_task       ON agent_runs(task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_govlog_agent     ON governance_log(agent_id)",
     ]),
 ]
 

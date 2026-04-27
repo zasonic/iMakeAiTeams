@@ -65,8 +65,6 @@ const state = {
   _thinkingBlock: null,
   _thinkingSteps: [],
   _thinkingSummaryParts: [],
-  _decompositionSteps: {},  // step_num → state (pending/running/done/error)
-  _totalDecompSteps: 0,
   _convoSearchFilter: "",
   _searchMethod: "hybrid",
 };
@@ -74,7 +72,11 @@ const state = {
 // ── API helper ────────────────────────────────────────────────────────────────
 async function api(method, ...args) {
   try { return await window.pywebview.api[method](...args); }
-  catch(e) { console.error("API error:", method, e); return null; }
+  catch(e) {
+    console.error("API error:", method, e);
+    showToast(`Error: ${method} failed — ${e.message || e}`, "error");
+    return null;
+  }
 }
 
 // ── Event bus ─────────────────────────────────────────────────────────────────
@@ -305,8 +307,6 @@ function startThinkingBlock() {
   state._thinkingBlock = null;
   state._thinkingSteps = [];
   state._thinkingSummaryParts = [];
-  state._decompositionSteps = {};
-  state._totalDecompSteps = 0;
 }
 
 function addThinkingStep({ icon="•", label="", detail="", status="", summaryChip="", expandContent="" }) {
@@ -355,24 +355,6 @@ function renderThinkingBlock() {
     <div class="thinking-steps">${stepsHTML}</div>`;
 
   scrollToBottom();
-}
-
-function buildDecompTracker(steps) {
-  return `<div class="decomp-track" id="decomp-track">${
-    steps.map((s,i) => [
-      `<div class="decomp-step" data-step="${s.step}" title="${escHtml(s.task)}">${s.step}. ${escHtml((s.task||"").substring(0,20))}…</div>`,
-      i < steps.length-1 ? '<span class="decomp-arrow">→</span>' : ""
-    ].join("")).join("")
-  }</div>`;
-}
-
-function renderDecompTracker() {
-  const track = document.getElementById("decomp-track");
-  if(!track) return;
-  track.querySelectorAll(".decomp-step").forEach(el => {
-    const step = parseInt(el.dataset.step);
-    el.className = "decomp-step " + (state._decompositionSteps[step]||"pending");
-  });
 }
 
 function clearThinkingBlock() {
@@ -1162,6 +1144,8 @@ async function loadSettings() {
 
   renderServiceStatus();
   renderMcpServers();
+  loadPendingReview();
+  refreshPendingBadge();
 }
 
 // ── MCP Servers (Phase 2) ────────────────────────────────────────────────────
@@ -1301,6 +1285,56 @@ async function renderServiceStatus() {
 }
 
 document.getElementById("service-status-refresh")?.addEventListener("click", renderServiceStatus);
+
+// ── Memory pending review ─────────────────────────────────────────────────────
+async function loadPendingReview() {
+  const items = await api("memory_get_pending_review");
+  const list = document.getElementById("pending-review-list");
+  const empty = document.getElementById("pending-review-empty");
+  if(!list) return;
+  list.innerHTML = "";
+  if(!items || !items.length) {
+    if(empty) empty.style.display = "";
+    return;
+  }
+  if(empty) empty.style.display = "none";
+  for(const item of items) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:flex-start;gap:8px;padding:8px;background:var(--bg3);border-radius:8px;";
+    row.innerHTML = `
+      <div style="flex:1;font-size:12px;word-break:break-word;">
+        <span style="color:var(--text3);font-size:11px;">${escHtml(item.key || "")}</span>
+        <div style="color:var(--text1);margin-top:2px;">${escHtml(item.value || "")}</div>
+      </div>
+      <button class="btn" style="font-size:11px;padding:2px 8px;color:var(--green);" data-id="${escAttr(item.id)}" data-action="approve">✓</button>
+      <button class="btn" style="font-size:11px;padding:2px 8px;color:var(--red);" data-id="${escAttr(item.id)}" data-action="reject">✗</button>`;
+    list.appendChild(row);
+  }
+  list.addEventListener("click", async e => {
+    const btn = e.target.closest("button[data-action]");
+    if(!btn) return;
+    const id = btn.dataset.id;
+    const action = btn.dataset.action;
+    if(action === "approve") await api("memory_approve_pending", id);
+    else await api("memory_reject_pending", id);
+    await loadPendingReview();
+    await refreshPendingBadge();
+  }, {once: true});
+}
+
+async function refreshPendingBadge() {
+  const count = await api("memory_get_pending_count");
+  const n = count && count.count ? count.count : 0;
+  for(const id of ["pending-badge", "pending-badge-settings"]) {
+    const el = document.getElementById(id);
+    if(!el) continue;
+    el.textContent = n > 0 ? n : "";
+    el.classList.toggle("visible", n > 0);
+  }
+}
+
+// Poll every 60 s for new pending items
+setInterval(refreshPendingBadge, 60_000);
 
 function setToggle(id, val) {
   const el = document.getElementById(id);
@@ -1663,8 +1697,15 @@ function showModal(title, bodyHtml, onConfirm) {
   overlay.classList.add("open");
   document.getElementById("modal-cancel-btn").addEventListener("click", closeModal);
   document.getElementById("modal-confirm-btn").addEventListener("click", async () => {
-    const result = onConfirm ? await onConfirm() : true;
-    if(result !== false) closeModal();
+    const btn = document.getElementById("modal-confirm-btn");
+    if(btn.disabled) return;
+    btn.disabled = true;
+    try {
+      const result = onConfirm ? await onConfirm() : true;
+      if(result !== false) closeModal();
+    } finally {
+      btn.disabled = false;
+    }
   });
 }
 function closeModal() { document.getElementById("modal-overlay").classList.remove("open"); }
@@ -1710,6 +1751,7 @@ async function init() {
   await initStudioMode();
   await loadConversations();
   await loadAgentsForSelect();
+  refreshPendingBadge();
 
   // Check first run
   const settings = await api("get_settings");
