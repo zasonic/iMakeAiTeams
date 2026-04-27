@@ -1,4 +1,4 @@
-# ── Tier 1 (always shipped — lite + full installers) ─────────────────────────
+# ── Tier 1 (always shipped — lite + full installers) ───────────────────────────
 #
 # Minimum surface needed for the chat, memory-buffer, router, agents, teams,
 # prompt library, security engine, and settings to work end-to-end. Keeps the
@@ -9,17 +9,19 @@
 # so the lite build runs fine without them — service_status() reports them as
 # unavailable and the UI degrades gracefully.
 
-# ── Core / UI ────────────────────────────────────────────────────────────────
+# ── Core / UI ──────────────────────────────────────────────────────────────────
 pywebview>=4.4.1
 requests>=2.31.0
 psutil>=5.9.0
 numpy>=1.26.0
 platformdirs>=4.0.0
 
-# ── Anthropic ─────────────────────────────────────────────────────────────────
-anthropic>=0.40.0
+# ── Anthropic ───────────────────────────────────────────────────────────────────────
+# 0.50.0+ is required for stable streaming-thinking event types used by
+# stream_extended_thinking_chat() in claude_client.py.
+anthropic>=0.50.0
 
-# ── Resilience ────────────────────────────────────────────────────────────────
+# ── Resilience ──────────────────────────────────────────────────────────────────
 tenacity>=8.3.0
 pydantic>=2.7.0
 
