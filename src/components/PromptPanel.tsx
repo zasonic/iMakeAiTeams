@@ -19,7 +19,12 @@ export function PromptPanel() {
     if (!ready) return;
     Prompts.list()
       .then((rows) => setPrompts(rows as PromptRow[]))
-      .catch((err) => pushToast({ kind: "error", text: err.message }));
+      .catch((err) =>
+        pushToast({
+          kind: "error",
+          text: err instanceof Error ? err.message : "Could not load prompts",
+        }),
+      );
   }, [ready, pushToast]);
 
   return (
