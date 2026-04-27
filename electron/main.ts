@@ -224,10 +224,11 @@ app.whenReady().then(async () => {
   });
 });
 
-app.on("window-all-closed", async () => {
-  await sidecar?.stop().catch(() => {});
-  sidecar = null;
-  mainLogStream?.end();
+app.on("window-all-closed", () => {
+  // On macOS the app conventionally stays alive with no windows; the dock
+  // icon's "activate" event will reopen one. Keep the sidecar and log stream
+  // running so reopening doesn't land on a dead backend. before-quit handles
+  // teardown when the user actually quits.
   if (process.platform !== "darwin") app.quit();
 });
 

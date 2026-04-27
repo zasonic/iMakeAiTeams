@@ -25,7 +25,12 @@ export function AgentPanel() {
         if (alive) setAgents(rows as AgentRow[]);
       })
       .catch((err) => {
-        if (alive) pushToast({ kind: "error", text: err.message });
+        if (alive) {
+          pushToast({
+            kind: "error",
+            text: err instanceof Error ? err.message : "Could not load agents",
+          });
+        }
       })
       .finally(() => alive && setLoading(false));
     return () => {

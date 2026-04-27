@@ -83,9 +83,11 @@ export function FirstRunWizard({ onComplete }: Props) {
             <button
               className="btn-ghost w-full"
               onClick={() =>
-                window.electronAPI.openExternal(
-                  "https://console.anthropic.com/settings/keys",
-                )
+                window.electronAPI
+                  .openExternal("https://console.anthropic.com/settings/keys")
+                  .catch(() =>
+                    pushToast({ kind: "error", text: "Could not open browser" }),
+                  )
               }
             >
               Get a key from console.anthropic.com

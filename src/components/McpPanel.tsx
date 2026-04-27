@@ -80,8 +80,15 @@ export function McpPanel() {
               <button
                 className={`pill ${s.enabled ? "text-ok border-ok/40" : "text-ink-faint"}`}
                 onClick={async () => {
-                  await Mcp.setEnabled(s.server_id, !s.enabled);
-                  refresh();
+                  try {
+                    await Mcp.setEnabled(s.server_id, !s.enabled);
+                    refresh();
+                  } catch (err) {
+                    pushToast({
+                      kind: "error",
+                      text: err instanceof Error ? err.message : "Toggle failed",
+                    });
+                  }
                 }}
               >
                 {s.enabled ? "Enabled" : "Disabled"}

@@ -87,8 +87,16 @@ export function RagPanel() {
           <button
             className="btn-ghost"
             onClick={async () => {
-              await Rag.clear();
-              setStatus(await Rag.status() as RagStatus);
+              try {
+                await Rag.clear();
+                setStatus(await Rag.status() as RagStatus);
+                pushToast({ kind: "success", text: "RAG index cleared" });
+              } catch (err) {
+                pushToast({
+                  kind: "error",
+                  text: err instanceof Error ? err.message : "Clear failed",
+                });
+              }
             }}
             disabled={!ready || busy}
           >
