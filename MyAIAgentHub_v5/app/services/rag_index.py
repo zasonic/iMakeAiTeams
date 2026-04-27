@@ -134,10 +134,24 @@ class RAGIndex:
                 rel = str(filepath)
             self.add_text(content, source=rel)
 
+    MAX_FILE_BYTES = 100 * 1024 * 1024  # 100 MB — reading beyond this risks OOM
+
     def add_file(self, file_path: Path) -> int:
         """Add a single file to the index. Returns number of chunks added."""
+        file_path = Path(file_path)
         try:
-            content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+            size = file_path.stat().st_size
+            if size > self.MAX_FILE_BYTES:
+                log.warning(
+                    "add_file: %s is %.1f MB — skipping (limit %d MB). "
+                    "Split the file into smaller parts to index it.",
+                    file_path.name, size / 1_048_576, self.MAX_FILE_BYTES // 1_048_576,
+                )
+                return 0
+        except OSError:
+            return 0
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return 0
         if not content.strip():

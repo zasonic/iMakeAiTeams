@@ -35,7 +35,13 @@ def _keyring_get(key: str) -> str | None:
         import keyring
         return keyring.get_password(KEYRING_SERVICE, key)
     except BaseException as exc:
-        log.debug("keyring.get_password(%s) failed: %s", key, exc)
+        # Warn so the user can diagnose why their API key appears missing.
+        # A broken keyring makes stored secrets inaccessible, which looks
+        # like an empty API key rather than a configuration problem.
+        log.warning(
+            "keyring.get_password(%s) failed: %s — stored secrets may be "
+            "inaccessible. Check your OS keyring/SecretService setup.", key, exc
+        )
         return None
 
 
