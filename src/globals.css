@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    background: theme(colors.bg.DEFAULT);
+    color: theme(colors.ink.DEFAULT);
+    font-family: theme(fontFamily.sans);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: theme(colors.bg.3);
+    border-radius: 8px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: theme(colors.bg.4);
+  }
+}
+
+@layer components {
+  .glass {
+    @apply bg-bg-2/60 backdrop-blur border border-line/50 rounded-xl;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg
+           px-3 py-1.5 text-sm font-medium transition
+           focus:outline-none focus:ring-1 focus:ring-accent;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-white hover:bg-accent-dark;
+  }
+  .btn-ghost {
+    @apply btn text-ink-dim hover:text-ink hover:bg-bg-2;
+  }
+  .btn-danger {
+    @apply btn bg-err/15 text-err hover:bg-err/25;
+  }
+  .input {
+    @apply w-full rounded-lg bg-bg-2 border border-line px-3 py-2
+           text-sm placeholder:text-ink-faint
+           focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent;
+  }
+  .label {
+    @apply block text-xs font-semibold text-ink-dim uppercase tracking-wide mb-1;
+  }
+  .card {
+    @apply bg-bg-1 border border-line rounded-xl p-4;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1 rounded-full bg-bg-2 border border-line
+           px-2 py-0.5 text-xs text-ink-dim;
+  }
+}
