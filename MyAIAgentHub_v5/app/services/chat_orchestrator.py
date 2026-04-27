@@ -596,8 +596,12 @@ class ChatOrchestrator:
             )
             security.context_violations = violations
 
-            # --- Risk Ledger: track cumulative risk ---
-            ledger = self._risk_ledgers.setdefault(conversation_id, RiskLedger())
+            # --- Risk Ledger: track cumulative risk for THIS turn only ---
+            # A fresh ledger is created each turn because DATA_READ + EXTERNAL_API
+            # accumulate to 0.35 per message; persisting across turns causes the
+            # conversation to hit the 3.0 abort threshold after ~9 messages.
+            ledger = RiskLedger()
+            self._risk_ledgers[conversation_id] = ledger
             ledger.record(
                 RiskCategory.DATA_READ,
                 f"Context assembled: {len(mem.rag_chunks)} RAG chunks, "

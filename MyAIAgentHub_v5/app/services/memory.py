@@ -424,6 +424,18 @@ class MemoryManager:
                     log.debug("Discarded ungrounded fact (%.0f%% overlap): %s",
                               ratio * 100, fact[:80])
 
+            # Guard: the local model call above can take several seconds.
+            # If the conversation was deleted in the meantime, skip to avoid
+            # inserting orphaned session_facts rows.
+            if not _db.fetchone(
+                "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+            ):
+                log.debug(
+                    "extract_facts: conversation %s was deleted during extraction; discarding facts",
+                    conversation_id[:8],
+                )
+                return
+
             existing_rows = _db.fetchall(
                 "SELECT fact FROM session_facts WHERE conversation_id = ?",
                 (conversation_id,),

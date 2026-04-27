@@ -58,7 +58,7 @@ class RouteDecision:
             )
         except Exception:
             return cls(model="claude", complexity="complex",
-                       reasoning="parse failed", confidence=0.0)
+                       reasoning="parse failed", confidence=0.5)
 
 
 @dataclass(frozen=True)
