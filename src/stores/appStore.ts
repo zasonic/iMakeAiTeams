@@ -156,13 +156,22 @@ export const useAppStore = create<AppState>()(
       setHasCompletedFirstRun: (done) => set({ hasCompletedFirstRun: done }),
       setSidecarStatus: (s) => set({ sidecarStatus: s }),
       setServiceStatus: (s) => set({ serviceStatus: s }),
-      pushToast: (msg) =>
-        set((state) => ({
-          toasts: [
-            ...state.toasts,
-            { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, ...msg },
-          ],
-        })),
+      pushToast: (msg) => {
+        // crypto.randomUUID is on every browser Electron 33 ships, but fall
+        // back to a longer random suffix on older runtimes just in case.
+        const id =
+          typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+        set((state) => ({ toasts: [...state.toasts, { id, ...msg }] }));
+        // Auto-dismiss so a misbehaving sidecar can't flood the UI with
+        // service_unavailable toasts that pile up forever. Errors and
+        // warnings stick around longer so the user has time to read them.
+        const ms = msg.kind === "error" || msg.kind === "warn" ? 8000 : 4000;
+        setTimeout(() => {
+          set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) }));
+        }, ms);
+      },
       dismissToast: (id) =>
         set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) })),
       startChatStream: (conversationId) =>
@@ -170,8 +179,16 @@ export const useAppStore = create<AppState>()(
       appendChatToken: (token) =>
         set((state) => {
           if (!state.activeChat) return state;
+          // Cap the streaming buffer so a long response doesn't pin the
+          // whole transcript in memory and quadratic-copy it on every
+          // token. The renderer only displays a window of recent text;
+          // once we cross MAX, drop the head and keep the tail.
+          const MAX = 1_000_000; // ~1 MiB of streamed text
+          const KEEP = 500_000;
+          const next = state.activeChat.buffer + token;
+          const trimmed = next.length > MAX ? next.slice(next.length - KEEP) : next;
           return {
-            activeChat: { ...state.activeChat, buffer: state.activeChat.buffer + token },
+            activeChat: { ...state.activeChat, buffer: trimmed },
           };
         }),
       appendChatEvent: (type, data) =>
