@@ -10,7 +10,7 @@
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
 import { autoUpdater } from "electron-updater";
-import { createWriteStream, existsSync, mkdirSync, statSync, renameSync, WriteStream } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, statSync, renameSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,14 +21,20 @@ const PROJECT_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 let mainWindow: BrowserWindow | null = null;
 let sidecar: SidecarManager | null = null;
-let mainLogStream: WriteStream | null = null;
+let mainLogPath: string | null = null;
 let updaterTimer: NodeJS.Timeout | null = null;
 
 const MAIN_LOG_MAX_BYTES = 10 * 1024 * 1024; // 10MB
 
 function logToFile(text: string): void {
+  // Synchronous append: a buffered WriteStream lost its tail when the
+  // app exited via OS shutdown / kill on macOS (where window-all-closed
+  // doesn't trigger before-quit and the stream's .end() never ran).
+  // Volume here is tiny — a handful of writes per session — so the
+  // sync cost is irrelevant.
+  if (!mainLogPath) return;
   try {
-    mainLogStream?.write(text);
+    appendFileSync(mainLogPath, text);
   } catch {
     /* ignore */
   }
@@ -48,7 +54,7 @@ function bootMainLog(userDataDir: string): void {
   } catch {
     /* ignore */
   }
-  mainLogStream = createWriteStream(path, { flags: "a" });
+  mainLogPath = path;
   logToFile(`\n=== main starting at ${new Date().toISOString()} ===\n`);
 }
 
@@ -308,7 +314,6 @@ app.on("before-quit", async (event) => {
       /* ignore */
     }
     sidecar = null;
-    mainLogStream?.end();
     app.exit(0);
   }
 });
