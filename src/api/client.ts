@@ -137,6 +137,7 @@ export interface SettingsPayload {
   power_mode_model_provider: string;
   power_mode_model_name: string;
   power_mode_api_key: string;
+  power_mode_api_key_set: boolean;
   power_mode_autostart: boolean;
   power_mode_gateway_port: number;
 }

@@ -41,7 +41,6 @@ log = logging.getLogger("MyAIEnv.execution_bridge")
 
 APPROVAL_TIMEOUT_SEC = 60.0
 STREAM_CONNECT_TIMEOUT_SEC = 10.0
-STREAM_READ_TIMEOUT_SEC = None  # OpenClaw streams as long as the task runs.
 HISTORY_TURNS = 5  # Last N messages of context to send with the task.
 
 

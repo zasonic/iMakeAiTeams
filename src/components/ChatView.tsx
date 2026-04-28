@@ -33,21 +33,31 @@ export function ChatView() {
   const pushToast = useAppStore((s) => s.pushToast);
   const powerModeRuns = useAppStore((s) => s.powerModeRuns);
   const resolvePowerModeApproval = useAppStore((s) => s.resolvePowerModeApproval);
+  const powerModeEnabled = useAppStore((s) => s.powerModeEnabled);
+  const setPowerModeEnabled = useAppStore((s) => s.setPowerModeEnabled);
 
   const [conversations, setConversations] = useState<ConversationRow[]>([]);
   const [activeId, setActiveId] = useState<string>("");
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [input, setInput] = useState<string>("");
-  const [busy, setBusy] = useState(false);
+  // Send phase explicitly drives the Send button's disabled state and the
+  // cleanup effects below. "classifying" covers the (potentially LLM-backed)
+  // classify round-trip; while in that state, neither the chat-stream nor
+  // Power Mode cleanup effects should fire.
+  const [sendPhase, setSendPhase] = useState<
+    "idle" | "classifying" | "chat" | "execution"
+  >("idle");
   const [activeTaskId, setActiveTaskId] = useState<string>("");
   const [loadError, setLoadError] = useState<string>("");
-  const [powerModeEnabled, setPowerModeEnabled] = useState(false);
+
+  const busy = sendPhase !== "idle";
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const ready = status?.status === "ready";
 
-  // Load Power Mode flag once the sidecar is ready, and refresh whenever the
-  // user toggles it from Settings (cheap GET; called on view focus).
+  // Sync the Power Mode flag from the sidecar on first ready. After that the
+  // appStore owns the value — SettingsPanel updates it whenever the toggle
+  // changes, so a refetch here would race with that.
   useEffect(() => {
     if (!ready) return;
     let alive = true;
@@ -59,7 +69,7 @@ export function ChatView() {
     return () => {
       alive = false;
     };
-  }, [ready]);
+  }, [ready, setPowerModeEnabled]);
 
   // Load conversation list once the sidecar is ready.
   useEffect(() => {
@@ -122,7 +132,7 @@ export function ChatView() {
     if (!activeId || !input.trim() || busy) return;
     const text = input;
     setInput("");
-    setBusy(true);
+    setSendPhase("classifying");
     setMessages((prev) => [
       ...prev,
       { id: `local-${Date.now()}`, role: "user", content: text },
@@ -144,6 +154,7 @@ export function ChatView() {
             const r = await Docker.execute(activeId, text);
             if (r.ok && r.task_id) {
               setActiveTaskId(r.task_id);
+              setSendPhase("execution");
               routedToExecution = true;
             } else if (r.error) {
               pushToast({ kind: "error", text: r.error });
@@ -172,6 +183,7 @@ export function ChatView() {
 
     if (routedToExecution) return;
 
+    setSendPhase("chat");
     startChatStream(activeId);
     try {
       await Chat.send(activeId, text);
@@ -180,45 +192,53 @@ export function ChatView() {
         kind: "error",
         text: err instanceof Error ? err.message : "chat send failed",
       });
-      setBusy(false);
+      setSendPhase("idle");
       endChatStream();
     }
   };
 
   // When a chat stream ends, drop busy and reload persisted messages.
+  // Only fires for the chat path; Power Mode and classifying phases use their
+  // own cleanup so this effect can't clear busy mid-flight.
   useEffect(() => {
-    if (!busy) return;
-    if (activeTaskId) return; // Power Mode owns the busy flag.
+    if (sendPhase !== "chat") return;
     if (activeChat) return; // chat still streaming
-    setBusy(false);
+    setSendPhase("idle");
     if (!activeId) return;
     Chat.messages(activeId)
       .then((rows) => setMessages(rows as MessageRow[]))
       .catch(() => {});
-  }, [activeChat, busy, activeId, activeTaskId]);
+  }, [activeChat, sendPhase, activeId]);
 
   // When the active Power Mode run finishes, drop busy.
   const activeRun = activeTaskId ? powerModeRuns[activeTaskId] : null;
   useEffect(() => {
+    if (sendPhase !== "execution") return;
     if (!activeTaskId) return;
     if (!activeRun) return;
     if (activeRun.done) {
-      setBusy(false);
+      setSendPhase("idle");
     }
-  }, [activeRun, activeTaskId]);
+  }, [activeRun, activeTaskId, sendPhase]);
 
   const cancelActive = async () => {
-    if (activeTaskId) {
+    if (sendPhase === "execution" && activeTaskId) {
       try {
         await Docker.cancel(activeTaskId);
       } catch {
         /* ignore */
       }
       setActiveTaskId("");
-      setBusy(false);
+      setSendPhase("idle");
       return;
     }
-    Chat.stop().catch(() => {});
+    if (sendPhase === "chat") {
+      Chat.stop().catch(() => {});
+      // The chat stream end effect will flip back to "idle".
+      return;
+    }
+    // Classifying — abandon the in-flight request and reset.
+    setSendPhase("idle");
   };
 
   const approve = async (taskId: string, approvalId: string, allow: boolean) => {

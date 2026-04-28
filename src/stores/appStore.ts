@@ -109,6 +109,7 @@ export interface AppState {
   // Power Mode runtime
   powerModeRuns: Record<string, PowerModeRun>;
   dockerStatus: DockerStatusSnapshot | null;
+  powerModeEnabled: boolean;
 
   // Actions
   setActiveView: (v: ActiveView) => void;
@@ -124,6 +125,7 @@ export interface AppState {
   endChatStream: () => void;
 
   // Power Mode actions
+  setPowerModeEnabled: (on: boolean) => void;
   setDockerStatus: (s: DockerStatusSnapshot | null) => void;
   startPowerModeRun: (taskId: string, conversationId: string) => void;
   upsertPowerModeStep: (taskId: string, step: ExecutionStep) => void;
@@ -147,6 +149,7 @@ export const useAppStore = create<AppState>()(
       serviceStatus: {},
       powerModeRuns: {},
       dockerStatus: null,
+      powerModeEnabled: false,
 
       setActiveView: (v) => set({ activeView: v }),
       setStudioMode: (on) => set({ studioMode: on }),
@@ -184,6 +187,7 @@ export const useAppStore = create<AppState>()(
       endChatStream: () => set({ activeChat: null }),
 
       // ── Power Mode actions ────────────────────────────────────────────
+      setPowerModeEnabled: (on) => set({ powerModeEnabled: on }),
       setDockerStatus: (s) => set({ dockerStatus: s }),
       startPowerModeRun: (taskId, conversationId) =>
         set((state) => ({

@@ -14,7 +14,12 @@ import { SecurityPanel } from "@/components/SecurityPanel";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBar } from "@/components/StatusBar";
-import { useAppStore } from "@/stores/appStore";
+import {
+  useAppStore,
+  type DockerStatusSnapshot,
+  type ExecutionStep,
+  type ExecutionStepKind,
+} from "@/stores/appStore";
 
 export function App() {
   const view = useAppStore((s) => s.activeView);
@@ -121,7 +126,7 @@ export function App() {
           },
           // ── Power Mode (v3) ──────────────────────────────────────────
           power_mode_status: (data) => {
-            setDockerStatus(data as never);
+            setDockerStatus(data as DockerStatusSnapshot);
           },
           power_mode_event: (data) => {
             const evt = data as { phase?: string; message?: string };
@@ -139,18 +144,21 @@ export function App() {
             }
           },
           power_mode_step: (data) => {
-            const evt = data as {
-              task_id?: string;
-              step_id?: string;
-              kind?: string;
+            const raw = data as Record<string, unknown>;
+            const taskId = typeof raw.task_id === "string" ? raw.task_id : "";
+            const stepId = typeof raw.step_id === "string" ? raw.step_id : "";
+            if (!taskId || !stepId) return;
+            // Spread the raw event first so any backend-provided fields are
+            // captured, then write our normalized values last so they win
+            // even when the backend omits a field (e.g. status defaults to
+            // "done" rather than undefined).
+            const step: ExecutionStep = {
+              ...raw,
+              step_id: stepId,
+              kind: (typeof raw.kind === "string" ? raw.kind : "other") as ExecutionStepKind,
+              status: ((raw.status as "running" | "done" | "error") ?? "done"),
             };
-            if (!evt.task_id || !evt.step_id) return;
-            upsertPowerModeStep(evt.task_id, {
-              step_id: evt.step_id,
-              kind: ((evt.kind as never) ?? "other"),
-              status: ((data as { status?: string }).status as never) ?? "done",
-              ...(data as object),
-            } as never);
+            upsertPowerModeStep(taskId, step);
           },
           power_mode_approval: (data) => {
             const evt = data as {

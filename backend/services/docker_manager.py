@@ -35,7 +35,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 log = logging.getLogger("MyAIEnv.docker_manager")
 
@@ -148,7 +148,14 @@ class DockerManager:
         self._templates_dir = Path(templates_dir)
         self._emit = emit or (lambda _e, _p: None)
 
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        # Reentrant: lifecycle ops (start/stop) call helpers (_refresh_status,
+        # _publish_status) that re-acquire the lock for state mutations.
+        # Without RLock the second acquire would deadlock the same thread.
+        self._lifecycle_lock = threading.Lock()
+        # Lifecycle lock serializes start/stop against each other but is
+        # released for status reads, so the renderer can poll /docker/status
+        # without blocking on a slow `docker compose up`.
         self._last_status = DockerStatus(platform=platform.system().lower())
         self._compose_path = self._user_data_dir / "openclaw" / COMPOSE_FILENAME
         self._data_dir = self._user_data_dir / "openclaw-data"
@@ -175,18 +182,19 @@ class DockerManager:
 
     def start_openclaw(self) -> StartResult:
         """Render compose, run `docker compose up -d`, then poll until healthy."""
-        with self._lock:
-            return self._start_locked()
+        with self._lifecycle_lock:
+            return self._start_unlocked()
 
     def stop_openclaw(self) -> StartResult:
-        with self._lock:
-            return self._stop_locked()
+        with self._lifecycle_lock:
+            return self._stop_unlocked()
 
     def restart_openclaw(self) -> StartResult:
         """Manual restart — clears the auto-restart attempt counter."""
-        self._restart_attempts = 0
-        self.stop_openclaw()
-        return self.start_openclaw()
+        with self._lifecycle_lock:
+            self._restart_attempts = 0
+            self._stop_unlocked()
+            return self._start_unlocked()
 
     def health_check(self) -> bool:
         """Single health probe against the OpenClaw API. Never raises."""
@@ -201,7 +209,8 @@ class DockerManager:
     def shutdown(self) -> None:
         """Best-effort container teardown on app quit. Never raises."""
         try:
-            self._stop_locked()
+            with self._lifecycle_lock:
+                self._stop_unlocked()
         except Exception as exc:
             log.debug("docker_manager.shutdown: %s", exc)
 
@@ -298,18 +307,20 @@ class DockerManager:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
 
-    # ── Compose render & lifecycle (lock held) ──────────────────────────────
+    # ── Compose render & lifecycle (lifecycle lock held; state lock used
+    # only for the brief reads/writes that touch _last_status) ──────────────
 
-    def _start_locked(self) -> StartResult:
+    def _start_unlocked(self) -> StartResult:
         # Refresh first so we don't fight a half-initialized cache.
         self._refresh_status()
-        if not self._last_status.docker_installed:
+        snap = self._snapshot()
+        if not snap.docker_installed:
             msg = ("Power Mode requires Docker Desktop. "
                    "Install it from https://www.docker.com/products/docker-desktop/ "
                    "and click Re-check.")
             self._publish_status(error=msg)
             return StartResult(ok=False, error=msg)
-        if not self._last_status.docker_running:
+        if not snap.docker_running:
             msg = "Docker Desktop is installed but not running. Start it and click Re-check."
             self._publish_status(error=msg)
             return StartResult(ok=False, error=msg)
@@ -368,7 +379,7 @@ class DockerManager:
         self._publish_status(error=msg)
         return StartResult(ok=False, error=msg)
 
-    def _stop_locked(self) -> StartResult:
+    def _stop_unlocked(self) -> StartResult:
         if not self._compose_path.exists():
             # Nothing to stop. Silently succeed.
             self._refresh_status()
@@ -401,10 +412,14 @@ class DockerManager:
         return StartResult(ok=True, detail="OpenClaw stopped.")
 
     def _publish_status(self, *, error: str = "") -> None:
-        snap = DockerStatus(**self._last_status.to_dict())
+        snap = self._snapshot()
         if error:
             snap.last_error = error
         self._emit("power_mode_status", snap.to_dict())
+
+    def _snapshot(self) -> DockerStatus:
+        with self._lock:
+            return DockerStatus(**self._last_status.to_dict())
 
     # ── Compose rendering ───────────────────────────────────────────────────
 

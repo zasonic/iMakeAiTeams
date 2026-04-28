@@ -15,6 +15,7 @@ export function SettingsPanel() {
   const pushToast = useAppStore((s) => s.pushToast);
   const dockerStatus = useAppStore((s) => s.dockerStatus);
   const setDockerStatus = useAppStore((s) => s.setDockerStatus);
+  const setPowerModeEnabled = useAppStore((s) => s.setPowerModeEnabled);
   const [config, setConfig] = useState<SettingsPayload | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [verifying, setVerifying] = useState(false);
@@ -23,7 +24,11 @@ export function SettingsPanel() {
 
   const reload = async () => {
     try {
-      setConfig(await Settings.get());
+      const fresh = await Settings.get();
+      setConfig(fresh);
+      // Mirror the toggle into the store so the StatusBar / ChatView pick up
+      // changes without each having to fetch /api/settings on a timer.
+      setPowerModeEnabled(!!fresh.power_mode_enabled);
     } catch (err) {
       pushToast({
         kind: "error",
@@ -422,8 +427,8 @@ function PowerModeSection({
                   value={pmApiKey}
                   onChange={(e) => setPmApiKey(e.target.value)}
                   placeholder={
-                    config.power_mode_api_key
-                      ? "•••••••• (saved in keyring)"
+                    config.power_mode_api_key_set
+                      ? `${config.power_mode_api_key} (saved in keyring)`
                       : "Stored in OS keyring"
                   }
                 />

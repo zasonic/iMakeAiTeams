@@ -13,8 +13,9 @@ export function StatusBar() {
   const status = useAppStore((s) => s.sidecarStatus);
   const dockerStatus = useAppStore((s) => s.dockerStatus);
   const setDockerStatus = useAppStore((s) => s.setDockerStatus);
+  const powerModeEnabled = useAppStore((s) => s.powerModeEnabled);
+  const setPowerModeEnabled = useAppStore((s) => s.setPowerModeEnabled);
   const [version, setVersion] = useState<string>("");
-  const [powerModeEnabled, setPowerModeEnabled] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -26,7 +27,10 @@ export function StatusBar() {
     };
   }, []);
 
-  // Track the Power Mode flag + Docker status so the badge reflects reality.
+  // First-load sync: pull Power Mode flag + Docker status from the sidecar.
+  // Subsequent changes propagate via the appStore: the SettingsPanel writes
+  // `powerModeEnabled` on save/reload, and App.tsx writes `dockerStatus`
+  // whenever a `power_mode_status` SSE event fires.
   useEffect(() => {
     if (status?.status !== "ready") return;
     let alive = true;
@@ -43,7 +47,7 @@ export function StatusBar() {
     return () => {
       alive = false;
     };
-  }, [status, setDockerStatus]);
+  }, [status, setDockerStatus, setPowerModeEnabled]);
 
   const dot = (() => {
     if (!status) return "bg-ink-faint";

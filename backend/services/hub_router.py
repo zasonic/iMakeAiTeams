@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Callable, Optional
 
 import db as _db
@@ -370,13 +371,11 @@ class RoutingError(RuntimeError):
 #      scoped JSON-only prompt. Parse + validate. On any failure, fall back
 #      to the deterministic verdict so the user never sees a hang.
 
-import re
-
 # Verbs that almost always describe a real-world action.
 _EXECUTION_VERBS = (
     "write a", "create a", "make a", "build me", "build a",
     "download", "install", "run ", "execute", "compile", "deploy",
-    "rename", "move ", "delete ", "organize", "scrape", "scrape ",
+    "rename", "move ", "delete ", "organize", "scrape",
     "fill out", "submit ", "send the", "open the", "edit the",
     "fix the", "patch the", "refactor", "generate a", "save to",
     "save it to", "write to", "list processes", "check disk",

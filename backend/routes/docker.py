@@ -19,7 +19,7 @@ Endpoints:
 
 from __future__ import annotations
 
-import threading
+import asyncio
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -78,44 +78,37 @@ class ApproveIn(BaseModel):
 
 @router.get("/status")
 async def status(request: Request) -> dict:
-    return _docker(request).status().to_dict()
+    mgr = _docker(request)
+    snap = await asyncio.to_thread(mgr.status)
+    return snap.to_dict()
 
 
 @router.post("/start")
 async def start(request: Request) -> dict:
-    # Run the (potentially long) start in a worker thread so we don't tie up
-    # the asyncio loop. The handler still waits for the result so the caller
-    # gets a clear ok/error verdict; live progress is published via SSE.
+    # `start_openclaw` is synchronous and may block for tens of seconds while
+    # `docker compose up -d` runs and the gateway becomes healthy. Run it on
+    # a worker thread so the asyncio event loop (and other in-flight requests
+    # like /docker/status polled by the renderer) keep moving.
     mgr = _docker(request)
-    result_holder: dict = {}
-
-    def _work():
-        try:
-            r = mgr.start_openclaw()
-            result_holder["result"] = {"ok": r.ok, "error": r.error,
-                                       "gateway_url": r.gateway_url,
-                                       "detail": r.detail}
-        except Exception as exc:
-            result_holder["result"] = {"ok": False, "error": str(exc)}
-
-    t = threading.Thread(target=_work, daemon=True, name="docker-start")
-    t.start()
-    t.join()
-    out = result_holder.get("result", {"ok": False, "error": "no result"})
-    if not out.get("ok"):
-        raise HTTPException(status_code=409, detail=out.get("error", "start failed"))
+    r = await asyncio.to_thread(mgr.start_openclaw)
+    out = {"ok": r.ok, "error": r.error,
+           "gateway_url": r.gateway_url, "detail": r.detail}
+    if not out["ok"]:
+        raise HTTPException(status_code=409, detail=out.get("error") or "start failed")
     return out
 
 
 @router.post("/stop")
 async def stop(request: Request) -> dict:
-    r = _docker(request).stop_openclaw()
+    mgr = _docker(request)
+    r = await asyncio.to_thread(mgr.stop_openclaw)
     return {"ok": r.ok, "error": r.error, "detail": r.detail}
 
 
 @router.post("/restart")
 async def restart(request: Request) -> dict:
-    r = _docker(request).restart_openclaw()
+    mgr = _docker(request)
+    r = await asyncio.to_thread(mgr.restart_openclaw)
     if not r.ok:
         raise HTTPException(status_code=409, detail=r.error or "restart failed")
     return {"ok": r.ok, "error": r.error, "gateway_url": r.gateway_url,
@@ -126,7 +119,7 @@ async def restart(request: Request) -> dict:
 async def health(request: Request) -> dict:
     mgr = _docker(request)
     return {
-        "ok": mgr.health_check(),
+        "ok": await asyncio.to_thread(mgr.health_check),
         "gateway_url": mgr.gateway_url(),
     }
 
@@ -136,7 +129,9 @@ async def health(request: Request) -> dict:
 @router.post("/classify")
 async def classify(body: ClassifyIn, request: Request) -> dict:
     classifier = _classifier(request)
-    return classifier.classify(body.user_message)
+    # The classifier may call out to an LLM for ambiguous messages — keep the
+    # event loop responsive by running it on a worker thread.
+    return await asyncio.to_thread(classifier.classify, body.user_message)
 
 
 @router.post("/execute")
@@ -146,20 +141,27 @@ async def execute(body: ExecuteIn, request: Request) -> dict:
     history: list[dict] = []
     try:
         if body.conversation_id:
-            rows = api.chat_get_messages(body.conversation_id, limit=20)
-            history = [
-                {"role": r.get("role"), "content": r.get("content")}
-                for r in rows if r.get("role") in ("user", "assistant")
-            ]
+            rows = await asyncio.to_thread(
+                api.chat_get_messages, body.conversation_id, 20,
+            )
+            for r in rows or []:
+                role = r.get("role") if isinstance(r, dict) else None
+                content = r.get("content") if isinstance(r, dict) else None
+                if role in ("user", "assistant") and content:
+                    history.append({"role": role, "content": content})
     except Exception:
         # Missing history is non-fatal — OpenClaw can run without it.
         history = []
-    return bridge.submit(body.conversation_id, body.user_message, history)
+    return await asyncio.to_thread(
+        bridge.submit, body.conversation_id, body.user_message, history,
+    )
 
 
 @router.post("/cancel")
 async def cancel(body: CancelIn, request: Request) -> dict:
-    return _bridge(request).cancel(body.task_id)
+    # cancel makes a best-effort POST to the OpenClaw gateway, so run it on a
+    # worker thread to keep the event loop responsive.
+    return await asyncio.to_thread(_bridge(request).cancel, body.task_id)
 
 
 @router.post("/approve")
