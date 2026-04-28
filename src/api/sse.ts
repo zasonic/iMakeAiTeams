@@ -1,8 +1,8 @@
 // src/api/sse.ts — EventSource wrapper for the sidecar's /api/events stream.
 //
-// EventSource doesn't support custom headers, so the Bearer token is appended
-// as a `?token=` query parameter (the sidecar's BearerAuthMiddleware accepts
-// either header or query for SSE).
+// EventSource can't set custom headers, but the Electron main process injects
+// `Authorization: Bearer <token>` for every loopback request via a webRequest
+// hook, so the URL stays clean and the token never appears in logs/history.
 //
 // Usage:
 //   const sub = subscribeEvents({
@@ -37,7 +37,7 @@ export function subscribeEvents(
   // Tear down any previous stream — only one is supported at a time.
   closeEventStream();
 
-  const url = `http://127.0.0.1:${info.port}/api/events?token=${encodeURIComponent(info.token)}`;
+  const url = `http://127.0.0.1:${info.port}/api/events`;
   const source = new EventSource(url);
   currentSource = source;
 

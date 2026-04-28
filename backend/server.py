@@ -58,12 +58,11 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     """Reject any request that doesn't carry the right Bearer token.
 
     /health is intentionally token-optional so Electron's pre-ready poller can
-    detect liveness before it has been told the token (it has been; we keep
-    the loose check anyway as defense in depth — `/health` returns nothing
-    sensitive).
-
-    SSE clients can't set headers; they're allowed to pass `token` as a query
-    string parameter.
+    detect liveness before it has been told the token. Every other route must
+    present ``Authorization: Bearer <token>``. Electron's main process injects
+    that header for the renderer via a webRequest hook, so EventSource works
+    without a query-string token (which would otherwise leak into history,
+    referers, and access logs).
     """
 
     def __init__(self, app, *, expected_token: str) -> None:
@@ -79,8 +78,6 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         auth = request.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             supplied = auth[7:].strip()
-        if not supplied:
-            supplied = request.query_params.get("token", "")
 
         if not supplied or not secrets.compare_digest(supplied, self._expected):
             return JSONResponse(

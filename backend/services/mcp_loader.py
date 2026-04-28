@@ -42,6 +42,22 @@ MANIFEST_FILENAME = "mcp.json"
 _VALID_SERVER_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
+def validate_server_id(server_id: str) -> str:
+    """Return the stripped server_id if it matches the manifest schema.
+
+    Raises ``ValueError`` for any value that could escape the per-server
+    namespace (path traversal in folder operations, keyring service-name
+    injection, etc.). Use this at every API boundary that accepts a server_id
+    from the renderer or HTTP routes.
+    """
+    if not isinstance(server_id, str):
+        raise ValueError("server_id must be a string")
+    cleaned = server_id.strip()
+    if not _VALID_SERVER_ID.match(cleaned):
+        raise ValueError(f"Invalid server_id {server_id!r}")
+    return cleaned
+
+
 @dataclass(frozen=True)
 class ToolSchema:
     """A single MCP tool descriptor as resolved from a server manifest."""
@@ -240,6 +256,7 @@ def ingest_folder(source: Path, root: Path, *, overwrite: bool = False) -> Inges
 
 def remove_server(server_id: str, root: Path) -> bool:
     """Delete an installed server folder. Returns True if anything was removed."""
+    server_id = validate_server_id(server_id)
     target = Path(root) / server_id
     if not target.exists():
         return False

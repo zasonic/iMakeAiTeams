@@ -338,7 +338,14 @@ class DockerManager:
             "message": "Starting OpenClaw container…",
         })
 
-        cmd = ["docker", "compose", "-f", str(self._compose_path), "up", "-d"]
+        # --project-directory anchors `.env` discovery to the compose folder
+        # (where _render_compose wrote it), independent of the sidecar's CWD.
+        cmd = [
+            "docker", "compose",
+            "--project-directory", str(self._compose_path.parent),
+            "-f", str(self._compose_path),
+            "up", "-d",
+        ]
         try:
             r = _run(cmd, timeout=120.0)
         except subprocess.TimeoutExpired as exc:
@@ -386,7 +393,12 @@ class DockerManager:
             self._publish_status()
             return StartResult(ok=True, detail="No compose file present.")
 
-        cmd = ["docker", "compose", "-f", str(self._compose_path), "down"]
+        cmd = [
+            "docker", "compose",
+            "--project-directory", str(self._compose_path.parent),
+            "-f", str(self._compose_path),
+            "down",
+        ]
         try:
             r = _run(cmd, timeout=60.0)
         except subprocess.TimeoutExpired as exc:
@@ -447,7 +459,15 @@ class DockerManager:
         ws_dir = self.workspace_dir()
         ws_dir.mkdir(parents=True, exist_ok=True)
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        self._compose_path.parent.mkdir(parents=True, exist_ok=True)
+        compose_dir = self._compose_path.parent
+        compose_dir.mkdir(parents=True, exist_ok=True)
+        # Restrict the directory holding .env to owner-only on POSIX. chmod is
+        # a no-op for ACLs on Windows but harmless; the user profile dir is
+        # already access-controlled there.
+        try:
+            os.chmod(compose_dir, 0o700)
+        except OSError:
+            pass
 
         provider = (self._settings.get("power_mode_model_provider") or "anthropic").strip()
         model = (self._settings.get("power_mode_model_name") or "claude-sonnet-4-6").strip()
@@ -456,20 +476,45 @@ class DockerManager:
 
         memory_limit_mb = self._memory_limit_mb()
 
+        # Write the API key to a sibling .env file (chmod 0600) and reference
+        # it from the compose template via ${OPENCLAW_API_KEY:?…} so the key
+        # never lands in the world-readable compose YAML.
+        self._write_env_file(compose_dir / ".env", {"OPENCLAW_API_KEY": api_key})
+
         rendered = tmpl.render(
             image=DEFAULT_OPENCLAW_IMAGE,
             container_name=CONTAINER_NAME,
             gateway_port=gateway_port,
             provider=provider,
             model=model,
-            api_key=api_key,
             workspace_dir=str(ws_dir),
             data_dir=str(self._data_dir),
             memory_limit_mb=memory_limit_mb,
             extra_env={},
         )
         self._compose_path.write_text(rendered, encoding="utf-8")
+        try:
+            os.chmod(self._compose_path, 0o640)
+        except OSError:
+            pass
         return self._compose_path
+
+    @staticmethod
+    def _write_env_file(env_path: Path, values: dict[str, str]) -> None:
+        """Atomically write a docker-compose .env file with mode 0600.
+
+        Atomic replace avoids a window where a partial / world-readable file
+        exists. On Windows, chmod only honors the read-only bit, but the user
+        profile dir already ACL-restricts access.
+        """
+        tmp_path = env_path.with_suffix(env_path.suffix + ".tmp")
+        body = "".join(f"{k}={v}\n" for k, v in values.items())
+        tmp_path.write_text(body, encoding="utf-8")
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp_path, env_path)
 
     @staticmethod
     def _memory_limit_mb() -> int:
