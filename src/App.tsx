@@ -156,15 +156,30 @@ export function App() {
             const taskId = typeof raw.task_id === "string" ? raw.task_id : "";
             const stepId = typeof raw.step_id === "string" ? raw.step_id : "";
             if (!taskId || !stepId) return;
-            // Spread the raw event first so any backend-provided fields are
-            // captured, then write our normalized values last so they win
-            // even when the backend omits a field (e.g. status defaults to
-            // "done" rather than undefined).
+            // Whitelist the typed ExecutionStep fields. Spreading `...raw`
+            // (the previous implementation) let any extra backend field
+            // pollute the Zustand store and quietly broke the type contract.
+            const pickStr = (k: string) =>
+              typeof raw[k] === "string" ? (raw[k] as string) : undefined;
+            const pickNum = (k: string) =>
+              typeof raw[k] === "number" ? (raw[k] as number) : undefined;
             const step: ExecutionStep = {
-              ...raw,
               step_id: stepId,
               kind: (typeof raw.kind === "string" ? raw.kind : "other") as ExecutionStepKind,
               status: ((raw.status as "running" | "done" | "error") ?? "done"),
+              title: pickStr("title"),
+              detail: pickStr("detail"),
+              path: pickStr("path"),
+              preview: pickStr("preview"),
+              command: pickStr("command"),
+              stdout: pickStr("stdout"),
+              stderr: pickStr("stderr"),
+              exit_code: pickNum("exit_code"),
+              url: pickStr("url"),
+              summary: pickStr("summary"),
+              args: raw.args,
+              result: raw.result,
+              bytes: pickNum("bytes"),
             };
             upsertPowerModeStep(taskId, step);
           },
