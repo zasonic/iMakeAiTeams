@@ -457,12 +457,15 @@ function ApprovalCard({
   onDeny,
 }: ApprovalCardProps) {
   const [, force] = useState(0);
+  const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
   useEffect(() => {
+    // Stop ticking once the deadline has passed. With multiple stacked
+    // approvals the previous code kept N timers running forever, each
+    // forcing a re-render every second.
+    if (remaining === 0) return;
     const id = window.setInterval(() => force((n) => n + 1), 1000);
     return () => window.clearInterval(id);
-  }, []);
-
-  const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+  }, [remaining === 0]);
   const tone = danger === "high"
     ? "border-err/50 bg-err/5"
     : danger === "low"
