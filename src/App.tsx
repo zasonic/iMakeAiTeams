@@ -78,11 +78,19 @@ export function App() {
   }, [setSidecarStatus]);
 
   // ── SSE event stream wiring ────────────────────────────────────────────
+  // Pull the primitives off the discriminated union so the effect's deps
+  // are stable across status emits — without this, every setSidecarStatus
+  // call (even with the same port/token) tears down and re-creates the
+  // EventSource and drops in-flight events.
+  const sidecarReady = sidecarStatus?.status === "ready";
+  const sidecarPort = sidecarReady ? sidecarStatus.port : null;
+  const sidecarToken = sidecarReady ? sidecarStatus.token : null;
+
   useEffect(() => {
-    if (sidecarStatus?.status !== "ready") return;
+    if (sidecarPort == null || sidecarToken == null) return;
 
     const sub = subscribeEvents(
-      { port: sidecarStatus.port, token: sidecarStatus.token },
+      { port: sidecarPort, token: sidecarToken },
       {
         handlers: {
           chat_token: (data) => {
@@ -197,8 +205,31 @@ export function App() {
             if (evt.task_id) endPowerModeRun(evt.task_id);
           },
         },
-        onError: () => {
-          // EventSource auto-reconnects; only surface persistent failures.
+        onError: (_err, { closed }) => {
+          // EventSource handles transient blips on its own. Only act when
+          // it has given up (readyState === CLOSED) — at that point ask
+          // Electron for the current sidecar info; if the port changed
+          // (e.g. user clicked Restart Backend) the new value will flow
+          // through setSidecarStatus and this effect will re-subscribe
+          // with the right URL.
+          if (!closed) return;
+          pushToast({
+            kind: "warn",
+            text: "Lost connection to backend. Reconnecting…",
+          });
+          window.electronAPI
+            .getSidecarInfo()
+            .then((info) => {
+              if (info) {
+                setSidecarStatus({
+                  status: "ready",
+                  port: info.port,
+                  token: info.token,
+                });
+                resetSidecarInfo(info);
+              }
+            })
+            .catch(() => {});
         },
       },
     );
@@ -207,7 +238,8 @@ export function App() {
       sub.close();
     };
   }, [
-    sidecarStatus,
+    sidecarPort,
+    sidecarToken,
     appendChatToken,
     appendChatEvent,
     endChatStream,
@@ -220,6 +252,7 @@ export function App() {
     setPowerModeMessage,
     setPowerModeError,
     endPowerModeRun,
+    setSidecarStatus,
   ]);
 
   // ── First-run check ────────────────────────────────────────────────────

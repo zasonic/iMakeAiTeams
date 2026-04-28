@@ -24,8 +24,9 @@ export interface EventStreamOptions {
   handlers: Record<string, EventHandler>;
   /** Called when the stream connects (or reconnects). */
   onOpen?: () => void;
-  /** Called when the stream errors out. */
-  onError?: (err: Event) => void;
+  /** Called when the stream errors out. ``closed`` is true when the
+   *  EventSource has given up reconnecting (`readyState === CLOSED`). */
+  onError?: (err: Event, info: { closed: boolean }) => void;
 }
 
 let currentSource: EventSource | null = null;
@@ -42,7 +43,13 @@ export function subscribeEvents(
   currentSource = source;
 
   source.onopen = () => opts.onOpen?.();
-  source.onerror = (err) => opts.onError?.(err);
+  source.onerror = (err) => {
+    // EventSource auto-reconnects on transient errors (CONNECTING state).
+    // Only forward "really gave up" closures so callers can wire recovery
+    // (re-fetch sidecar info, re-subscribe) without flapping on every blip.
+    const closed = source.readyState === EventSource.CLOSED;
+    opts.onError?.(err, { closed });
+  };
 
   // Wire one listener per registered event name. The server sends
   // `event: <name>\ndata: <json>` so the browser fires a named CustomEvent.
