@@ -684,18 +684,36 @@ def create_agent(
     return {"id": aid, "name": name}
 
 
-_AGENT_UPDATABLE_FIELDS = {
+_AGENT_UPDATABLE_FIELDS = frozenset({
     "name", "description", "system_prompt", "model_preference",
     "allowed_tools", "temperature", "max_tokens",
     "role", "domain", "scope", "tom_enabled", "skills",
     "thinking_budget",
-}
+})
+
+# Sanity check: SQLite doesn't accept `?` placeholders for column names, so
+# `update_agent` interpolates field names into the UPDATE statement. The
+# allowlist above is the only thing standing between user input and SQL,
+# so make sure each entry is a plain identifier. Run at import time.
+_IDENTIFIER_RE = __import__("re").compile(r"^[a-z_][a-z0-9_]*$")
+for _f in _AGENT_UPDATABLE_FIELDS:
+    if not _IDENTIFIER_RE.match(_f):
+        raise RuntimeError(
+            f"_AGENT_UPDATABLE_FIELDS entry {_f!r} is not a safe SQL identifier"
+        )
 
 
 def update_agent(agent_id: str, **fields) -> None:
+    # Two layers of defense for the f-string SQL below: every key must be
+    # in the allowlist *and* match _IDENTIFIER_RE. The second check is
+    # belt-and-suspenders: if someone ever adds an unsafe entry to the
+    # allowlist by mistake, this catches it before it reaches the DB.
     unknown = set(fields) - _AGENT_UPDATABLE_FIELDS
     if unknown:
         raise ValueError(f"Unknown/disallowed agent fields: {unknown}")
+    for k in fields:
+        if not _IDENTIFIER_RE.match(k):
+            raise ValueError(f"Invalid agent field name: {k!r}")
     if not fields:
         return
     agent = _db.fetchone("SELECT is_builtin FROM agents WHERE id = ?", (agent_id,))
