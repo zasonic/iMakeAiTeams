@@ -22,7 +22,9 @@ numpy>=1.26.0
 platformdirs>=4.0.0
 
 # ── Anthropic SDK ────────────────────────────────────────────────────────────
-anthropic>=0.40.0
+# >=0.50.0 required for stable thinking_delta / text_delta event types in
+# messages.stream(), used by ClaudeClient.stream_extended_thinking_chat().
+anthropic>=0.50.0
 
 # ── Resilience ───────────────────────────────────────────────────────────────
 tenacity>=8.3.0
