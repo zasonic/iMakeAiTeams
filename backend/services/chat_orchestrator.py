@@ -385,14 +385,32 @@ class ChatOrchestrator:
         now = datetime.now(timezone.utc).isoformat()
 
         # ── Improvement 2: Token budget enforcement ──────────────────────────
+        # Hold the db lock across the SUM and the INSERT so two concurrent
+        # chat_send calls on the same conversation can't both pass the cap
+        # before either has recorded its user message.
         budget = self._settings.get("max_conversation_budget_usd", 5.0)
         warn_pct = self._settings.get("budget_warning_threshold_pct", 80.0)
-        row = _db.fetchone(
-            "SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage WHERE conversation_id = ?",
-            (conversation_id,),
-        )
-        spent = row["total"] if row else 0.0
-        if budget > 0 and spent >= budget:
+        user_msg_id = str(uuid.uuid4())
+        budget_exceeded = False
+        spent = 0.0
+        with _db._lock:
+            conn = _db.get_db()
+            row = conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+            spent = row["total"] if row else 0.0
+            if budget > 0 and spent >= budget:
+                budget_exceeded = True
+            else:
+                conn.execute(
+                    "INSERT INTO messages (id, conversation_id, role, content, created_at) "
+                    "VALUES (?, ?, 'user', ?, ?)",
+                    (user_msg_id, conversation_id, user_message, now),
+                )
+                conn.commit()
+
+        if budget_exceeded:
             return ChatResult(
                 text=f"\u26a0\ufe0f This conversation has reached the ${budget:.2f} budget limit. "
                      f"Start a new conversation or increase the limit in Settings.",
@@ -403,15 +421,6 @@ class ChatOrchestrator:
                 cost_usd=0.0,
                 message_id=str(uuid.uuid4()),
             )
-
-        # Save user message to DB
-        user_msg_id = str(uuid.uuid4())
-        _db.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, created_at) "
-            "VALUES (?, ?, 'user', ?, ?)",
-            (user_msg_id, conversation_id, user_message, now),
-        )
-        _db.commit()
 
         # Load agent config — convert sqlite3.Row to dict so .get() works
         agent = None
