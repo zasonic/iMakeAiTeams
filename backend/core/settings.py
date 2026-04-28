@@ -22,7 +22,7 @@ log = logging.getLogger("MyAIEnv.settings")
 # On first load, a plaintext value found in settings.json is migrated to the
 # keyring and cleared from the JSON file so the secret only lives on-disk in
 # the OS-native store.
-SECRET_KEYS: set[str] = {"claude_api_key"}
+SECRET_KEYS: set[str] = {"claude_api_key", "power_mode_api_key"}
 KEYRING_SERVICE = "iMakeAiTeams"
 
 
@@ -133,6 +133,17 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     # Phase 3: Qwen3 hybrid thinking. Per-agent budget overrides live on the
     # agents table; this is the global ceiling enforced for any agent.
     "qwen_thinking_global_budget_cap": (int, 8192),
+
+    # v3 Power Mode: opt-in OpenClaw delegation for execution-class tasks.
+    # All settings default to off / empty; Power Mode is dormant until the
+    # user enables it from Settings → Power Mode.
+    "power_mode_enabled":             (bool, False),
+    "power_mode_workspace":           (str,  ""),
+    "power_mode_model_provider":      (str,  "anthropic"),
+    "power_mode_model_name":          (str,  "claude-sonnet-4-6"),
+    "power_mode_api_key":             (str,  ""),
+    "power_mode_autostart":           (bool, False),
+    "power_mode_gateway_port":        (int,  18789),
 
     # Advanced (complex types)
     "model_prices":                  ((dict, type(None)),  None),

@@ -30,6 +30,13 @@ export function App() {
   const toasts = useAppStore((s) => s.toasts);
   const hasCompletedFirstRun = useAppStore((s) => s.hasCompletedFirstRun);
   const setHasCompletedFirstRun = useAppStore((s) => s.setHasCompletedFirstRun);
+  const setDockerStatus = useAppStore((s) => s.setDockerStatus);
+  const startPowerModeRun = useAppStore((s) => s.startPowerModeRun);
+  const upsertPowerModeStep = useAppStore((s) => s.upsertPowerModeStep);
+  const addPowerModeApproval = useAppStore((s) => s.addPowerModeApproval);
+  const setPowerModeMessage = useAppStore((s) => s.setPowerModeMessage);
+  const setPowerModeError = useAppStore((s) => s.setPowerModeError);
+  const endPowerModeRun = useAppStore((s) => s.endPowerModeRun);
 
   // ── Sidecar status subscription ────────────────────────────────────────
   useEffect(() => {
@@ -112,6 +119,75 @@ export function App() {
           health_check_done: () => {
             pushToast({ kind: "info", text: "Health check complete" });
           },
+          // ── Power Mode (v3) ──────────────────────────────────────────
+          power_mode_status: (data) => {
+            setDockerStatus(data as never);
+          },
+          power_mode_event: (data) => {
+            const evt = data as { phase?: string; message?: string };
+            if (evt.message && (evt.phase === "fatal" || evt.phase === "approval_timeout")) {
+              pushToast({
+                kind: evt.phase === "fatal" ? "error" : "warn",
+                text: evt.message,
+              });
+            }
+          },
+          power_mode_started: (data) => {
+            const evt = data as { task_id?: string; conversation_id?: string };
+            if (evt.task_id && evt.conversation_id) {
+              startPowerModeRun(evt.task_id, evt.conversation_id);
+            }
+          },
+          power_mode_step: (data) => {
+            const evt = data as {
+              task_id?: string;
+              step_id?: string;
+              kind?: string;
+            };
+            if (!evt.task_id || !evt.step_id) return;
+            upsertPowerModeStep(evt.task_id, {
+              step_id: evt.step_id,
+              kind: ((evt.kind as never) ?? "other"),
+              status: ((data as { status?: string }).status as never) ?? "done",
+              ...(data as object),
+            } as never);
+          },
+          power_mode_approval: (data) => {
+            const evt = data as {
+              task_id?: string;
+              approval_id?: string;
+              summary?: string;
+              details?: Record<string, unknown>;
+              danger?: "low" | "medium" | "high";
+              timeout_sec?: number;
+            };
+            if (!evt.task_id || !evt.approval_id) return;
+            addPowerModeApproval(evt.task_id, {
+              approval_id: evt.approval_id,
+              summary: evt.summary ?? "",
+              details: evt.details ?? {},
+              danger: evt.danger ?? "medium",
+              expires_at: Date.now() + (evt.timeout_sec ?? 60) * 1000,
+            });
+          },
+          power_mode_message: (data) => {
+            const evt = data as { task_id?: string; text?: string };
+            if (evt.task_id && evt.text) {
+              setPowerModeMessage(evt.task_id, evt.text);
+            }
+          },
+          power_mode_error: (data) => {
+            const evt = data as { task_id?: string; error?: string };
+            if (evt.task_id && evt.error) {
+              setPowerModeError(evt.task_id, evt.error);
+            } else if (evt.error) {
+              pushToast({ kind: "error", text: evt.error });
+            }
+          },
+          power_mode_done: (data) => {
+            const evt = data as { task_id?: string };
+            if (evt.task_id) endPowerModeRun(evt.task_id);
+          },
         },
         onError: () => {
           // EventSource auto-reconnects; only surface persistent failures.
@@ -129,6 +205,13 @@ export function App() {
     endChatStream,
     setServiceStatus,
     pushToast,
+    setDockerStatus,
+    startPowerModeRun,
+    upsertPowerModeStep,
+    addPowerModeApproval,
+    setPowerModeMessage,
+    setPowerModeError,
+    endPowerModeRun,
   ]);
 
   // ── First-run check ────────────────────────────────────────────────────
