@@ -162,6 +162,12 @@ class ChatAPI(BaseAPI):
     @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_delete_conversation(self, conversation_id: str) -> dict:
         self._chat.delete_conversation(conversation_id)
+        # Drop the per-conversation stop signal too. Without this, the
+        # _stop_signals dict grew forever — every send_chat ever made
+        # left an Event behind, and delete_conversation only swept DB
+        # tables.
+        with self._stop_signals_lock:
+            self._stop_signals.pop(conversation_id, None)
         return {"ok": True}
 
     @_requires("chat_orchestrator", default={"error": "chat unavailable"})

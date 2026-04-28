@@ -216,6 +216,10 @@ class ChatOrchestrator:
                 (conversation_id,),
             )
             conn.commit()
+        # Drop the in-memory per-conversation risk ledger too. Without
+        # this, the dict accumulated entries forever — every send to a
+        # new conversation_id added one and nothing ever removed them.
+        self._risk_ledgers.pop(conversation_id, None)
 
     def branch_conversation(self, conversation_id: str,
                             from_message_id: str) -> dict:
