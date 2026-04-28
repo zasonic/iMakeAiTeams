@@ -31,3 +31,12 @@ tenacity>=8.3.0
 # Linux). Keeps the legacy keyring contract used by core/settings.py and
 # services/mcp_credentials.py.
 keyring>=24.0.0
+
+# ── Power Mode (v3) — OpenClaw delegation ────────────────────────────────────
+# httpx: streaming client for the OpenClaw gateway API.
+# docker: Python SDK used by services/docker_manager.py for container probes
+#         (subprocess fallback covers hosts without the SDK installed).
+# jinja2: renders backend/templates/docker-compose.yml.j2 from user settings.
+httpx>=0.27.0
+docker>=7.1.0
+jinja2>=3.1.0

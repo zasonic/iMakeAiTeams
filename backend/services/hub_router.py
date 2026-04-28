@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Callable, Optional
 
 import db as _db
@@ -351,3 +352,188 @@ class HubRouter:
 
 class RoutingError(RuntimeError):
     """Raised when no agent can be routed and no fallback is available."""
+
+
+# ── Power Mode (v3): execution-vs-chat classifier ────────────────────────────
+#
+# Additive tier on top of the existing hub. The classifier decides whether a
+# message describes a real-world *execution* task (write code, run shell, edit
+# files, browse the web) or a *chat* exchange (questions, follow-ups, settings).
+# When Power Mode is enabled and the verdict is "execution", routes/docker.py
+# hands the message off to the execution bridge instead of the normal chat
+# pipeline. When Power Mode is disabled, this classifier is never consulted —
+# the existing chat flow runs untouched.
+#
+# Strategy:
+#   1. Cheap deterministic prefilter (keyword/intent regexes). If both rails
+#      agree, skip the LLM round-trip entirely (sub-millisecond).
+#   2. Otherwise call the supplied LLM (Claude by default) with a tightly
+#      scoped JSON-only prompt. Parse + validate. On any failure, fall back
+#      to the deterministic verdict so the user never sees a hang.
+
+# Verbs that almost always describe a real-world action.
+_EXECUTION_VERBS = (
+    "write a", "create a", "make a", "build me", "build a",
+    "download", "install", "run ", "execute", "compile", "deploy",
+    "rename", "move ", "delete ", "organize", "scrape",
+    "fill out", "submit ", "send the", "open the", "edit the",
+    "fix the", "patch the", "refactor", "generate a", "save to",
+    "save it to", "write to", "list processes", "check disk",
+    "find files", "go to ", "click ", "browse to", "screenshot",
+    "test this code", "run this", "run my", "run the",
+)
+
+# Phrases that almost always describe conversation, not an action request.
+_CHAT_VERBS = (
+    "what is", "what's", "what are", "how do", "how does", "how would",
+    "why ", "explain", "describe", "tell me about", "summarize",
+    "compare", "remember that", "remember when", "thanks", "thank you",
+    "hello", "hi ", "hey ", "good morning", "good evening",
+    "could you explain", "can you explain", "what do you think",
+)
+
+_SHELL_HINT = re.compile(r"(?i)\b(?:bash|powershell|terminal|shell|cmd|cli)\b")
+_FILE_HINT = re.compile(r"(?i)\b(?:file|folder|directory|disk|drive|repo|repository)\b")
+_CODE_FENCE = re.compile(r"```")
+
+
+def _deterministic_score(message: str) -> tuple[float, str]:
+    """Return (signed_score, reasoning).
+
+    Positive scores lean toward execution; negative toward chat. Magnitude
+    encodes confidence; |score| ≥ 0.6 is enough to skip the LLM.
+    """
+    text = (message or "").strip().lower()
+    if not text:
+        return (-1.0, "empty message")
+
+    score = 0.0
+    hits: list[str] = []
+    for verb in _EXECUTION_VERBS:
+        if verb in text:
+            score += 0.4
+            hits.append(verb.strip())
+            break
+    for verb in _CHAT_VERBS:
+        if text.startswith(verb) or f" {verb}" in text[:60]:
+            score -= 0.5
+            hits.append(verb.strip())
+            break
+    if _SHELL_HINT.search(text):
+        score += 0.25
+        hits.append("shell-hint")
+    if _FILE_HINT.search(text):
+        score += 0.15
+        hits.append("file-hint")
+    if _CODE_FENCE.search(text):
+        score += 0.1
+        hits.append("code-fence")
+    if text.endswith("?"):
+        score -= 0.2
+        hits.append("question-mark")
+
+    score = max(-1.0, min(1.0, score))
+    return (score, ", ".join(hits) if hits else "no signals")
+
+
+_CLASSIFIER_SYSTEM = (
+    "You are a routing classifier. Decide whether the user's message asks "
+    "for a real-world action (write code to disk, run a shell command, edit "
+    "files, browse the web, install software, multi-step research with a "
+    "saved artifact) or a conversational reply (questions, explanations, "
+    "discussion, memory recall, settings tweaks). "
+    "Return STRICT JSON with keys: route (\"chat\" or \"execution\"), "
+    "confidence (0.0-1.0), reasoning (one short sentence). No prose, no "
+    "markdown — JSON only."
+)
+
+
+class ExecutionClassifier:
+    """Classify a user message as ``chat`` vs ``execution`` for Power Mode.
+
+    Owned by the AppContainer; constructed once with a Claude client. The
+    ``classify()`` method is safe to call from any thread.
+    """
+
+    def __init__(self, claude_client) -> None:
+        self._claude = claude_client
+
+    def classify(self, message: str) -> dict:
+        det_score, det_reason = _deterministic_score(message)
+        if det_score >= 0.6:
+            return {
+                "route": "execution",
+                "confidence": min(1.0, det_score),
+                "reasoning": f"deterministic: {det_reason}",
+                "source": "deterministic",
+            }
+        if det_score <= -0.6:
+            return {
+                "route": "chat",
+                "confidence": min(1.0, -det_score),
+                "reasoning": f"deterministic: {det_reason}",
+                "source": "deterministic",
+            }
+
+        if self._claude is None:
+            # No LLM available — bias toward "chat" so the existing pipeline
+            # handles the message rather than failing closed.
+            return {
+                "route": "chat" if det_score < 0 else "execution",
+                "confidence": abs(det_score) or 0.5,
+                "reasoning": f"deterministic only: {det_reason}",
+                "source": "deterministic",
+            }
+
+        try:
+            result = self._claude.chat_multi_turn(
+                _CLASSIFIER_SYSTEM,
+                [{"role": "user", "content": (message or "")[:4000]}],
+                max_tokens=120,
+            )
+            parsed = self._parse_llm(result.get("text") if isinstance(result, dict) else result)
+        except Exception as exc:
+            log.warning("ExecutionClassifier LLM call failed: %s", exc)
+            parsed = None
+
+        if parsed is None:
+            return {
+                "route": "chat" if det_score < 0 else "execution",
+                "confidence": abs(det_score) or 0.5,
+                "reasoning": f"llm-fallback: {det_reason}",
+                "source": "deterministic-fallback",
+            }
+        parsed["source"] = "llm"
+        return parsed
+
+    @staticmethod
+    def _parse_llm(text: str | None) -> dict | None:
+        if not text:
+            return None
+        # Tolerate stray code fences or leading prose.
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if "\n" in cleaned:
+                cleaned = cleaned.split("\n", 1)[1]
+        # Find the first balanced { ... } block.
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(cleaned[start:end + 1])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        route = str(parsed.get("route", "")).lower()
+        if route not in ("chat", "execution"):
+            return None
+        try:
+            conf = float(parsed.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            conf = 0.5
+        conf = max(0.0, min(1.0, conf))
+        reasoning = str(parsed.get("reasoning", ""))[:280]
+        return {"route": route, "confidence": conf, "reasoning": reasoning}

@@ -14,7 +14,12 @@ import { SecurityPanel } from "@/components/SecurityPanel";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBar } from "@/components/StatusBar";
-import { useAppStore } from "@/stores/appStore";
+import {
+  useAppStore,
+  type DockerStatusSnapshot,
+  type ExecutionStep,
+  type ExecutionStepKind,
+} from "@/stores/appStore";
 
 export function App() {
   const view = useAppStore((s) => s.activeView);
@@ -30,6 +35,13 @@ export function App() {
   const toasts = useAppStore((s) => s.toasts);
   const hasCompletedFirstRun = useAppStore((s) => s.hasCompletedFirstRun);
   const setHasCompletedFirstRun = useAppStore((s) => s.setHasCompletedFirstRun);
+  const setDockerStatus = useAppStore((s) => s.setDockerStatus);
+  const startPowerModeRun = useAppStore((s) => s.startPowerModeRun);
+  const upsertPowerModeStep = useAppStore((s) => s.upsertPowerModeStep);
+  const addPowerModeApproval = useAppStore((s) => s.addPowerModeApproval);
+  const setPowerModeMessage = useAppStore((s) => s.setPowerModeMessage);
+  const setPowerModeError = useAppStore((s) => s.setPowerModeError);
+  const endPowerModeRun = useAppStore((s) => s.endPowerModeRun);
 
   // ── Sidecar status subscription ────────────────────────────────────────
   useEffect(() => {
@@ -112,6 +124,78 @@ export function App() {
           health_check_done: () => {
             pushToast({ kind: "info", text: "Health check complete" });
           },
+          // ── Power Mode (v3) ──────────────────────────────────────────
+          power_mode_status: (data) => {
+            setDockerStatus(data as DockerStatusSnapshot);
+          },
+          power_mode_event: (data) => {
+            const evt = data as { phase?: string; message?: string };
+            if (evt.message && (evt.phase === "fatal" || evt.phase === "approval_timeout")) {
+              pushToast({
+                kind: evt.phase === "fatal" ? "error" : "warn",
+                text: evt.message,
+              });
+            }
+          },
+          power_mode_started: (data) => {
+            const evt = data as { task_id?: string; conversation_id?: string };
+            if (evt.task_id && evt.conversation_id) {
+              startPowerModeRun(evt.task_id, evt.conversation_id);
+            }
+          },
+          power_mode_step: (data) => {
+            const raw = data as Record<string, unknown>;
+            const taskId = typeof raw.task_id === "string" ? raw.task_id : "";
+            const stepId = typeof raw.step_id === "string" ? raw.step_id : "";
+            if (!taskId || !stepId) return;
+            // Spread the raw event first so any backend-provided fields are
+            // captured, then write our normalized values last so they win
+            // even when the backend omits a field (e.g. status defaults to
+            // "done" rather than undefined).
+            const step: ExecutionStep = {
+              ...raw,
+              step_id: stepId,
+              kind: (typeof raw.kind === "string" ? raw.kind : "other") as ExecutionStepKind,
+              status: ((raw.status as "running" | "done" | "error") ?? "done"),
+            };
+            upsertPowerModeStep(taskId, step);
+          },
+          power_mode_approval: (data) => {
+            const evt = data as {
+              task_id?: string;
+              approval_id?: string;
+              summary?: string;
+              details?: Record<string, unknown>;
+              danger?: "low" | "medium" | "high";
+              timeout_sec?: number;
+            };
+            if (!evt.task_id || !evt.approval_id) return;
+            addPowerModeApproval(evt.task_id, {
+              approval_id: evt.approval_id,
+              summary: evt.summary ?? "",
+              details: evt.details ?? {},
+              danger: evt.danger ?? "medium",
+              expires_at: Date.now() + (evt.timeout_sec ?? 60) * 1000,
+            });
+          },
+          power_mode_message: (data) => {
+            const evt = data as { task_id?: string; text?: string };
+            if (evt.task_id && evt.text) {
+              setPowerModeMessage(evt.task_id, evt.text);
+            }
+          },
+          power_mode_error: (data) => {
+            const evt = data as { task_id?: string; error?: string };
+            if (evt.task_id && evt.error) {
+              setPowerModeError(evt.task_id, evt.error);
+            } else if (evt.error) {
+              pushToast({ kind: "error", text: evt.error });
+            }
+          },
+          power_mode_done: (data) => {
+            const evt = data as { task_id?: string };
+            if (evt.task_id) endPowerModeRun(evt.task_id);
+          },
         },
         onError: () => {
           // EventSource auto-reconnects; only surface persistent failures.
@@ -129,6 +213,13 @@ export function App() {
     endChatStream,
     setServiceStatus,
     pushToast,
+    setDockerStatus,
+    startPowerModeRun,
+    upsertPowerModeStep,
+    addPowerModeApproval,
+    setPowerModeMessage,
+    setPowerModeError,
+    endPowerModeRun,
   ]);
 
   // ── First-run check ────────────────────────────────────────────────────
