@@ -22,15 +22,15 @@ import logging
 from contextlib import contextmanager
 from typing import Iterator
 
+from .mcp_loader import validate_server_id
+
 log = logging.getLogger("MyAIEnv.mcp_credentials")
 
 KEYRING_SERVICE_PREFIX = "iMakeAiTeams.mcp."
 
 
 def _service_name(server_id: str) -> str:
-    if not server_id or not server_id.strip():
-        raise ValueError("server_id is required")
-    return KEYRING_SERVICE_PREFIX + server_id.strip()
+    return KEYRING_SERVICE_PREFIX + validate_server_id(server_id)
 
 
 def set_secret(server_id: str, key: str, value: str) -> bool:
