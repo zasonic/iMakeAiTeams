@@ -648,10 +648,23 @@ class API:
 
     @staticmethod
     def _version_gt(a: str, b: str) -> bool:
-        """Return True if version string a is strictly greater than b."""
-        def _parts(v: str):
+        """Return True if version string a is strictly greater than b.
+
+        Tolerates pre-release suffixes ("1.3.0-rc1", "2.0.0+build4") by
+        stripping at the first non-digit/non-dot character. The previous
+        implementation collapsed any version with a suffix to ``(0,)``,
+        so users on RC builds never saw the latest changelog entry.
+        """
+        def _parts(v: str) -> tuple[int, ...]:
+            head = v.strip()
+            # Cut at the first character that breaks the digit-or-dot
+            # invariant — typical separators are '-', '+', or whitespace.
+            for i, ch in enumerate(head):
+                if not (ch.isdigit() or ch == "."):
+                    head = head[:i]
+                    break
             try:
-                return tuple(int(x) for x in v.strip().split("."))
+                return tuple(int(x) for x in head.split(".") if x != "")
             except ValueError:
                 return (0,)
         return _parts(a) > _parts(b)
