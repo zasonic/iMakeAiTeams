@@ -50,17 +50,44 @@ class RagAPI(BaseAPI):
 
     @_requires("embedder", default={"error": "RAG unavailable"})
     def rag_add_file(self, file_path: str) -> dict:
-        """Add a single file to the existing RAG index."""
+        """Add a single file to the existing RAG index.
+
+        Restricts ``file_path`` to the user's home directory and fails closed
+        when the security scanner can't run (previously a read error in the
+        try block silently bypassed the scan and ingested anyway).
+        """
         try:
-            _content = Path(file_path).read_text(errors="replace")[:50000]
-            _scan = input_sanitizer.scan_document(_content, filename=file_path)
-            if _scan.get("blocked"):
-                return {"error": f"Document blocked by security scan — possible injection content detected.",
-                        "scan_id": _scan.get("scan_id")}
-        except Exception as _fe:
-            self._log.debug(f"Document scan skipped: {_fe}")
+            p = Path(file_path).expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            return {"error": f"invalid path: {exc}"}
         try:
-            p = Path(file_path)
+            home = Path.home().resolve()
+        except (OSError, RuntimeError):
+            return {"error": "could not resolve home directory"}
+        try:
+            p.relative_to(home)
+        except ValueError:
+            return {"error": "file is outside the user's home directory"}
+
+        # Read + scan; if either fails, refuse to ingest. Silently falling
+        # through to add_file would let a caller bypass the scanner by
+        # triggering a read error.
+        try:
+            content = p.read_text(errors="replace")[:50000]
+        except Exception as exc:
+            return {"error": f"cannot read file: {exc}"}
+        try:
+            scan = input_sanitizer.scan_document(content, filename=str(p))
+        except Exception as exc:
+            self._log.warning(f"document scan failed for {p}: {exc}")
+            return {"error": "security scan failed; refusing to ingest"}
+        if scan.get("blocked"):
+            return {
+                "error": "Document blocked by security scan — possible injection content detected.",
+                "scan_id": scan.get("scan_id"),
+            }
+
+        try:
             n = self._rag.add_file(p)
             if n:
                 cache_path = paths.rag_cache_dir() / "index.npz"

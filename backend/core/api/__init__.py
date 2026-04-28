@@ -65,6 +65,20 @@ from services.lifecycle import LifecycleManager
 
 import db as _db_module
 
+
+def _path_within(candidate: Path, root: Path) -> bool:
+    """True if ``candidate`` is the same as ``root`` or sits inside it.
+
+    Both paths must already be resolved. Defensive against the case where
+    `Path.is_relative_to` raises on Python <3.9 or on cross-device paths.
+    """
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 from .chat import ChatAPI
 from .agents import AgentsAPI
 from .memory import MemoryAPI
@@ -337,10 +351,31 @@ class API:
     # save dialog rather than letting the sidecar prompt for a path.
 
     def write_file(self, path: str, content: str) -> dict:
-        """Write `content` to `path` (used by chat_export_conversation flow)."""
+        """Write `content` to `path` (used by chat_export_conversation flow).
+
+        The path must resolve inside the user's home directory. The renderer's
+        Electron save dialog enforces this from the UI side; this guard
+        catches a buggy or compromised renderer that hands the sidecar a
+        system path like /etc/hosts.
+        """
         try:
-            Path(path).write_text(content, encoding="utf-8")
-            return {"ok": True, "path": str(path)}
+            resolved = Path(path).expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            return {"ok": False, "error": f"invalid path: {exc}"}
+
+        try:
+            home = Path.home().resolve()
+        except (OSError, RuntimeError):
+            home = None
+        if home is None or not _path_within(resolved, home):
+            self._log.warning(
+                "write_file rejected path outside home: %r", str(resolved)
+            )
+            return {"ok": False, "error": "path is outside the user's home directory"}
+
+        try:
+            resolved.write_text(content, encoding="utf-8")
+            return {"ok": True, "path": str(resolved)}
         except Exception as exc:
             self._log.warning(f"write_file failed: {exc}")
             return {"ok": False, "error": str(exc)}
