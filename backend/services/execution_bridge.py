@@ -413,11 +413,16 @@ class ExecutionBridge:
         }
 
     def _auth_headers(self) -> dict:
-        # OpenClaw uses an internal token only when running outside localhost;
-        # for our 127.0.0.1 binding the gateway accepts unauthenticated calls.
-        # The header is included so future versions can tighten this without a
-        # client change.
-        return {"X-Client": "imakeaiteams"}
+        # All traffic to OpenClaw goes through a localhost-only Caddy gateway
+        # that requires `Authorization: Bearer <secret>`. The secret is
+        # generated and persisted by docker_manager at compose-render time
+        # and read back from disk; if it's missing here the gateway isn't
+        # running and the request will fail at the TCP layer regardless.
+        headers = {"X-Client": "imakeaiteams"}
+        token = self._docker.gateway_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

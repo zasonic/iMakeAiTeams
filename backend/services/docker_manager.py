@@ -29,6 +29,8 @@ import json
 import logging
 import os
 import platform
+import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -46,11 +48,17 @@ DEFAULT_OPENCLAW_IMAGE = "coollabsio/openclaw:latest"
 DEFAULT_GATEWAY_PORT = 18789
 CONTAINER_NAME = "imakeaiteams-openclaw"
 COMPOSE_FILENAME = "docker-compose.yml"
+CADDYFILE_FILENAME = "Caddyfile"
+ENV_FILENAME = ".env"
 HEALTH_TIMEOUT_SEC = 60.0
 HEALTH_POLL_INTERVAL_SEC = 1.5
 SHELL_TIMEOUT_SEC = 30.0
 MAX_RESTART_ATTEMPTS = 3
 RESTART_BACKOFF_BASE_SEC = 2.0
+
+# Matches a `KEY=VALUE` line in a docker-compose .env file. Values are not
+# quoted in the file we render, but we still tolerate surrounding whitespace.
+_ENV_LINE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
 
 
 # ── Status payloads ──────────────────────────────────────────────────────────
@@ -158,8 +166,14 @@ class DockerManager:
         # without blocking on a slow `docker compose up`.
         self._last_status = DockerStatus(platform=platform.system().lower())
         self._compose_path = self._user_data_dir / "openclaw" / COMPOSE_FILENAME
+        self._caddyfile_path = self._user_data_dir / "openclaw" / CADDYFILE_FILENAME
+        self._env_path = self._user_data_dir / "openclaw" / ENV_FILENAME
         self._data_dir = self._user_data_dir / "openclaw-data"
         self._restart_attempts = 0
+        # Gateway bearer secret. Lazily loaded from .env on first access; if
+        # the file doesn't exist yet (pre-first-start), gateway_token() returns
+        # "" and health_check() will simply fail until _render_compose runs.
+        self._gateway_token: str = ""
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -173,6 +187,20 @@ class DockerManager:
     def gateway_url(self) -> str:
         port = int(self._settings.get("power_mode_gateway_port", DEFAULT_GATEWAY_PORT) or DEFAULT_GATEWAY_PORT)
         return f"http://127.0.0.1:{port}"
+
+    def gateway_token(self) -> str:
+        """Return the bearer token Caddy expects on every gateway request.
+
+        Cached after first read. Returns "" before the compose file has ever
+        been rendered (the gateway isn't running, so callers will fail at the
+        TCP layer anyway and the empty header is harmless).
+        """
+        if self._gateway_token:
+            return self._gateway_token
+        token = self._load_gateway_secret()
+        if token:
+            self._gateway_token = token
+        return self._gateway_token
 
     def workspace_dir(self) -> Path:
         configured = (self._settings.get("power_mode_workspace") or "").strip()
@@ -197,11 +225,20 @@ class DockerManager:
             return self._start_unlocked()
 
     def health_check(self) -> bool:
-        """Single health probe against the OpenClaw API. Never raises."""
+        """Single health probe against the OpenClaw API. Never raises.
+
+        Goes through the Caddy gateway, so the request must carry the bearer
+        token; without it Caddy returns 401 and we'd report unhealthy even
+        though OpenClaw is fine.
+        """
         try:
             import urllib.request
             url = f"{self.gateway_url()}/health"
-            with urllib.request.urlopen(url, timeout=2) as resp:
+            req = urllib.request.Request(url)
+            token = self.gateway_token()
+            if token:
+                req.add_header("Authorization", f"Bearer {token}")
+            with urllib.request.urlopen(req, timeout=2) as resp:
                 return 200 <= resp.status < 300
         except Exception:
             return False
@@ -476,10 +513,29 @@ class DockerManager:
 
         memory_limit_mb = self._memory_limit_mb()
 
-        # Write the API key to a sibling .env file (chmod 0600) and reference
-        # it from the compose template via ${OPENCLAW_API_KEY:?…} so the key
-        # never lands in the world-readable compose YAML.
-        self._write_env_file(compose_dir / ".env", {"OPENCLAW_API_KEY": api_key})
+        # Reuse an existing gateway secret if one was generated on a prior
+        # render — rotating it on every start would invalidate in-flight
+        # tasks for no security benefit. Generate a fresh one only if no
+        # valid secret is on disk.
+        gateway_secret = self._load_gateway_secret() or secrets.token_hex(32)
+        self._gateway_token = gateway_secret
+
+        # Render the Caddyfile that the gateway service mounts read-only.
+        caddy_tmpl = env.get_template(f"{CADDYFILE_FILENAME}.j2")
+        caddy_rendered = caddy_tmpl.render()
+        self._caddyfile_path.write_text(caddy_rendered, encoding="utf-8")
+        try:
+            os.chmod(self._caddyfile_path, 0o640)
+        except OSError:
+            pass
+
+        # Write both secrets to a sibling .env file (chmod 0600) and reference
+        # them from the compose template via ${VAR:?…} so neither lands in the
+        # world-readable compose YAML.
+        self._write_env_file(self._env_path, {
+            "OPENCLAW_API_KEY": api_key,
+            "GATEWAY_SECRET": gateway_secret,
+        })
 
         rendered = tmpl.render(
             image=DEFAULT_OPENCLAW_IMAGE,
@@ -489,6 +545,7 @@ class DockerManager:
             model=model,
             workspace_dir=str(ws_dir),
             data_dir=str(self._data_dir),
+            caddyfile_path=str(self._caddyfile_path),
             memory_limit_mb=memory_limit_mb,
             extra_env={},
         )
@@ -498,6 +555,28 @@ class DockerManager:
         except OSError:
             pass
         return self._compose_path
+
+    def _load_gateway_secret(self) -> str:
+        """Read GATEWAY_SECRET from the rendered .env file, if any.
+
+        Returns "" when the file is absent, unreadable, or doesn't contain a
+        plausible (>=32-char hex) value. Callers treat that as "no secret yet"
+        and either generate one (during render) or fall back to an empty header
+        (during a pre-render health probe).
+        """
+        try:
+            text = self._env_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ""
+        for line in text.splitlines():
+            m = _ENV_LINE_RE.match(line)
+            if not m:
+                continue
+            if m.group(1) == "GATEWAY_SECRET":
+                value = m.group(2)
+                if len(value) >= 32 and all(c in "0123456789abcdefABCDEF" for c in value):
+                    return value
+        return ""
 
     @staticmethod
     def _write_env_file(env_path: Path, values: dict[str, str]) -> None:

@@ -4,20 +4,54 @@
 # Settings (model provider, API key, workspace folder, memory limits) are
 # rendered from the user's Settings panel via Jinja2.
 #
-# All ports are bound to 127.0.0.1 only — OpenClaw is never exposed off-box.
+# Trust model:
+#   * Only the `gateway` service publishes a host-side port (127.0.0.1 only).
+#   * `openclaw` has no published ports and is reachable solely through the
+#     gateway over the internal `openclaw_net` bridge.
+#   * The gateway requires `Authorization: Bearer ${GATEWAY_SECRET}` on every
+#     request; the secret is generated at render time and stored in the
+#     sibling .env file (chmod 0600).
 
 version: "3.8"
 
 services:
+  gateway:
+    image: caddy:2-alpine
+    container_name: {{ container_name }}-gateway
+    restart: unless-stopped
+    depends_on:
+      - openclaw
+
+    # Only host-published port in the stack. Everything else is internal.
+    ports:
+      - "127.0.0.1:{{ gateway_port }}:8080"
+
+    environment:
+      GATEWAY_SECRET: "${GATEWAY_SECRET:?GATEWAY_SECRET missing — re-render compose}"
+
+    volumes:
+      - "{{ caddyfile_path }}:/etc/caddy/Caddyfile:ro"
+
+    networks:
+      - openclaw_net
+
+    healthcheck:
+      # `/` returns 401 without the bearer header; that 401 still proves
+      # Caddy is up and routing, which is all we need from the container
+      # healthcheck. The host-side health_check sends the real header.
+      test: ["CMD", "wget", "-q", "-O-", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
   openclaw:
     image: {{ image }}
     container_name: {{ container_name }}
     restart: unless-stopped
 
-    # Bind to localhost only. The host port is configurable so multiple
-    # iMakeAiTeams installs can coexist on the same machine.
-    ports:
-      - "127.0.0.1:{{ gateway_port }}:8080"
+    # NO `ports:` block — OpenClaw is unreachable from the host directly.
+    # All inbound traffic must come through the gateway service above.
 
     environment:
       OPENCLAW_BIND: "0.0.0.0:8080"
@@ -36,8 +70,6 @@ services:
       # User-chosen workspace — the only host folder OpenClaw can touch.
       - "{{ workspace_dir }}:/workspace"
 
-    # Bridge mode (default) keeps the container off the host network entirely.
-    # The published port above is the only inbound path.
     networks:
       - openclaw_net
 
