@@ -51,7 +51,13 @@ class ChatThinkingIn(BaseModel):
 
 @router.post("/send")
 async def send(body: ChatSendIn, request: Request) -> dict:
-    get_api(request).chat_send(body.conversation_id, body.user_message, body.agent_id)
+    # `chat_send` is decorated with @rate_limit_chat; when refused it returns
+    # `{"error": ...}` instead of spawning the worker thread. Forward that to
+    # the renderer so the UI can show the message instead of hanging on an
+    # SSE stream that will never start.
+    result = get_api(request).chat_send(body.conversation_id, body.user_message, body.agent_id)
+    if isinstance(result, dict) and result.get("error"):
+        return {"ok": False, "conversation_id": body.conversation_id, **result}
     return {"ok": True, "conversation_id": body.conversation_id}
 
 
