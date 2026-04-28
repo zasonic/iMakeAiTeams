@@ -76,11 +76,21 @@ def _estimate_cost(model: str, tokens_in: int, tokens_out: int,
                 if isinstance(val, (list, tuple)) and len(val) == 2:
                     prices[key] = (float(val[0]), float(val[1]))
 
+    # Deterministic family detection. The previous code did a substring
+    # search over `prices.items()` and took the first match, which depended
+    # on dict iteration order — a model named e.g. `claude-haiku-with-opus-
+    # fallback` could resolve to `opus` (75x output cost) or `haiku`
+    # depending on Python version. Pick the family explicitly.
     m = model.lower()
-    price_in, price_out = next(
-        ((pi, po) for key, (pi, po) in prices.items() if key in m),
-        (3.0, 15.0),
-    )
+    family: str | None = None
+    for candidate in ("opus", "sonnet", "haiku"):
+        if candidate in m:
+            family = candidate
+            break
+    if family and family in prices:
+        price_in, price_out = prices[family]
+    else:
+        price_in, price_out = (3.0, 15.0)
     return (tokens_in * price_in + tokens_out * price_out) / 1_000_000
 
 
@@ -184,12 +194,32 @@ class ChatOrchestrator:
         _db.commit()
 
     def delete_conversation(self, conversation_id: str) -> None:
-        _db.execute("DELETE FROM messages WHERE conversation_id = ?",
-                    (conversation_id,))
-        _db.execute("DELETE FROM session_facts WHERE conversation_id = ?",
-                    (conversation_id,))
-        _db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
-        _db.commit()
+        # Hold the db lock for the whole cascade so a crash, signal, or
+        # interleaving writer can't leave the DB half-deleted. Also clean up
+        # the tables that reference conversation_id but were never declared
+        # with a FK in db.py (token_usage, router_log) — those used to leak
+        # rows after every delete.
+        with _db._lock:
+            conn = _db.get_db()
+            for table in (
+                "messages",
+                "session_facts",
+                "token_usage",
+                "router_log",
+            ):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE conversation_id = ?",
+                    (conversation_id,),
+                )
+            conn.execute(
+                "DELETE FROM conversations WHERE id = ?",
+                (conversation_id,),
+            )
+            conn.commit()
+        # Drop the in-memory per-conversation risk ledger too. Without
+        # this, the dict accumulated entries forever — every send to a
+        # new conversation_id added one and nothing ever removed them.
+        self._risk_ledgers.pop(conversation_id, None)
 
     def branch_conversation(self, conversation_id: str,
                             from_message_id: str) -> dict:
@@ -732,15 +762,26 @@ class ChatOrchestrator:
                     _qstart = quality_raw.find("{")
                     _qend = quality_raw.rfind("}")
                     if _qstart != -1 and _qend != -1:
-                        quality = _json.loads(quality_raw[_qstart:_qend + 1])
-                        if quality.get("score", 10) < 4:
-                            log.info("Local response scored %s — escalating to Claude", quality.get("score"))
+                        try:
+                            quality = _json.loads(quality_raw[_qstart:_qend + 1])
+                        except (ValueError, TypeError):
+                            quality = {}
+                        # Coerce score to a number; a model emitting
+                        # {"score": "low"} would otherwise raise TypeError
+                        # on the comparison and silently disable escalation
+                        # via the outer `except Exception: pass` swallow.
+                        try:
+                            score = float(quality.get("score", 10))
+                        except (TypeError, ValueError):
+                            score = 10.0
+                        if score < 4:
+                            log.info("Local response scored %s — escalating to Claude", score)
                             try:
-                                if on_token:
-                                    # Clear the frontend stream buffer before
-                                    # re-streaming from Claude — prevents the
-                                    # user seeing both responses concatenated.
-                                    on_token("\x00__CLEAR__")
+                                # The previous on_token("\x00__CLEAR__") sentinel
+                                # was never handled on the renderer, so it just
+                                # appeared as gibberish in the stream. Drop it;
+                                # buffer-clear-on-escalation is a separate UX
+                                # issue (renderer would need a typed event).
                                 # Phase 1: escalation also goes through the hub.
                                 escalation = RoutingDecision(
                                     agent_id=decision.agent_id,

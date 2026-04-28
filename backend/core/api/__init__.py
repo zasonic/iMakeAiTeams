@@ -65,6 +65,20 @@ from services.lifecycle import LifecycleManager
 
 import db as _db_module
 
+
+def _path_within(candidate: Path, root: Path) -> bool:
+    """True if ``candidate`` is the same as ``root`` or sits inside it.
+
+    Both paths must already be resolved. Defensive against the case where
+    `Path.is_relative_to` raises on Python <3.9 or on cross-device paths.
+    """
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 from .chat import ChatAPI
 from .agents import AgentsAPI
 from .memory import MemoryAPI
@@ -81,7 +95,11 @@ class API:
         self._bus = bus
         self._app_root = app_root
         self._log = log
-        self._stop_chat = threading.Event()
+        # Per-conversation stop signals. Keyed by conversation_id; an empty
+        # `chat_stop()` (no id) sets every entry, preserving the legacy
+        # "stop everything" semantics for existing renderer calls.
+        self._stop_signals: dict[str, threading.Event] = {}
+        self._stop_signals_lock = threading.Lock()
 
         # Each service records its init status here. Writers only mutate this
         # dict during __init__ on the main thread; downstream readers read it
@@ -333,10 +351,31 @@ class API:
     # save dialog rather than letting the sidecar prompt for a path.
 
     def write_file(self, path: str, content: str) -> dict:
-        """Write `content` to `path` (used by chat_export_conversation flow)."""
+        """Write `content` to `path` (used by chat_export_conversation flow).
+
+        The path must resolve inside the user's home directory. The renderer's
+        Electron save dialog enforces this from the UI side; this guard
+        catches a buggy or compromised renderer that hands the sidecar a
+        system path like /etc/hosts.
+        """
         try:
-            Path(path).write_text(content, encoding="utf-8")
-            return {"ok": True, "path": str(path)}
+            resolved = Path(path).expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            return {"ok": False, "error": f"invalid path: {exc}"}
+
+        try:
+            home = Path.home().resolve()
+        except (OSError, RuntimeError):
+            home = None
+        if home is None or not _path_within(resolved, home):
+            self._log.warning(
+                "write_file rejected path outside home: %r", str(resolved)
+            )
+            return {"ok": False, "error": "path is outside the user's home directory"}
+
+        try:
+            resolved.write_text(content, encoding="utf-8")
+            return {"ok": True, "path": str(resolved)}
         except Exception as exc:
             self._log.warning(f"write_file failed: {exc}")
             return {"ok": False, "error": str(exc)}
@@ -609,10 +648,23 @@ class API:
 
     @staticmethod
     def _version_gt(a: str, b: str) -> bool:
-        """Return True if version string a is strictly greater than b."""
-        def _parts(v: str):
+        """Return True if version string a is strictly greater than b.
+
+        Tolerates pre-release suffixes ("1.3.0-rc1", "2.0.0+build4") by
+        stripping at the first non-digit/non-dot character. The previous
+        implementation collapsed any version with a suffix to ``(0,)``,
+        so users on RC builds never saw the latest changelog entry.
+        """
+        def _parts(v: str) -> tuple[int, ...]:
+            head = v.strip()
+            # Cut at the first character that breaks the digit-or-dot
+            # invariant — typical separators are '-', '+', or whitespace.
+            for i, ch in enumerate(head):
+                if not (ch.isdigit() or ch == "."):
+                    head = head[:i]
+                    break
             try:
-                return tuple(int(x) for x in v.strip().split("."))
+                return tuple(int(x) for x in head.split(".") if x != "")
             except ValueError:
                 return (0,)
         return _parts(a) > _parts(b)
@@ -643,7 +695,9 @@ class API:
 
     def shutdown(self) -> None:
         self._log.info("Shutting down services…")
-        self._stop_chat.set()
+        with self._stop_signals_lock:
+            for ev in self._stop_signals.values():
+                ev.set()
         self._log.info("Shutdown complete.")
 
     # ── Domain sub-API delegators ─────────────────────────────────────────────

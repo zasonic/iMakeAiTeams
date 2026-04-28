@@ -199,6 +199,8 @@ def migrate_legacy_install(app_root: Path, target_user_dir: Path) -> None:
 
         moved: list[str] = []
         skipped: list[str] = []
+        failed: list[str] = []        # neither moved nor skipped
+        duplicated: list[str] = []    # copied to dst but src couldn't be removed
         for name in LEGACY_ARTIFACTS:
             src = app_root / name
             if not src.exists():
@@ -218,19 +220,46 @@ def migrate_legacy_install(app_root: Path, target_user_dir: Path) -> None:
                 try:
                     if src.is_dir():
                         shutil.copytree(src, dst)
-                        shutil.rmtree(src, ignore_errors=True)
+                        try:
+                            shutil.rmtree(src)
+                        except OSError as rm_exc:
+                            duplicated.append(name)
+                            print(
+                                f"paths.migrate: copied {name} but failed to remove legacy copy: {rm_exc}",
+                                file=sys.stderr,
+                            )
                     else:
                         shutil.copy2(src, dst)
                         try:
                             src.unlink()
-                        except OSError:
-                            pass
+                        except OSError as rm_exc:
+                            duplicated.append(name)
+                            print(
+                                f"paths.migrate: copied {name} but failed to remove legacy copy: {rm_exc}",
+                                file=sys.stderr,
+                            )
                     moved.append(name)
                 except OSError as copy_exc:
+                    failed.append(name)
                     print(
                         f"paths.migrate: failed to migrate {name}: {move_exc} / {copy_exc}",
                         file=sys.stderr,
                     )
+
+        # Only write the sentinel when nothing failed outright. A partial
+        # failure (some files unmovable) used to write the sentinel anyway,
+        # which silently locked in the half-migrated state and prevented
+        # any retry on the next start. Skipped (dst already exists) and
+        # duplicated (copy ok, source remove failed) are not blocking — the
+        # data is at the new home; the user just has stale legacy copies
+        # they can clean up by hand. Record those for visibility.
+        if failed:
+            print(
+                f"paths.migrate: {len(failed)} item(s) could not be migrated; "
+                f"will retry on next start: {failed}",
+                file=sys.stderr,
+            )
+            return
 
         sentinel.write_text(
             json.dumps(
@@ -239,6 +268,7 @@ def migrate_legacy_install(app_root: Path, target_user_dir: Path) -> None:
                     "from": str(app_root),
                     "moved": moved,
                     "skipped": skipped,
+                    "duplicated": duplicated,
                 },
                 indent=2,
             ),

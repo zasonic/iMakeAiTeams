@@ -308,12 +308,14 @@ def main(argv: list[str] | None = None) -> int:
     # write would deadlock the handshake.
     print(f"PORT={port}", flush=True)
 
-    # Build and run uvicorn. We hand it the pre-bound fd so the port we
-    # advertised is the port it serves.
+    # Hand uvicorn the already-bound socket via fd= so we never release the
+    # port between getsockname() and serve(). Closing + rebinding (the old
+    # behavior) had a brief TOCTOU window where another local process could
+    # claim the port; advertising a port we no longer hold then made
+    # Electron poll a stranger's /health.
     config = uvicorn.Config(
         app,
-        host="127.0.0.1",
-        port=port,
+        fd=sock.fileno(),
         log_level="info",
         access_log=False,
         loop="asyncio",
@@ -326,12 +328,6 @@ def main(argv: list[str] | None = None) -> int:
         reload=False,
     )
     server = uvicorn.Server(config)
-
-    # Bind via the inherited fd — uvicorn doesn't expose this directly, so we
-    # close our throwaway listener and let uvicorn rebind. The OS keeps the
-    # port hot via SO_REUSEADDR; the brief gap is a non-issue because nothing
-    # is connecting yet (renderer waits for READY).
-    sock.close()
 
     async def _run() -> None:
         # Print READY *after* startup events have fired (CORS + auth middleware
