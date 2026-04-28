@@ -76,11 +76,21 @@ def _estimate_cost(model: str, tokens_in: int, tokens_out: int,
                 if isinstance(val, (list, tuple)) and len(val) == 2:
                     prices[key] = (float(val[0]), float(val[1]))
 
+    # Deterministic family detection. The previous code did a substring
+    # search over `prices.items()` and took the first match, which depended
+    # on dict iteration order — a model named e.g. `claude-haiku-with-opus-
+    # fallback` could resolve to `opus` (75x output cost) or `haiku`
+    # depending on Python version. Pick the family explicitly.
     m = model.lower()
-    price_in, price_out = next(
-        ((pi, po) for key, (pi, po) in prices.items() if key in m),
-        (3.0, 15.0),
-    )
+    family: str | None = None
+    for candidate in ("opus", "sonnet", "haiku"):
+        if candidate in m:
+            family = candidate
+            break
+    if family and family in prices:
+        price_in, price_out = prices[family]
+    else:
+        price_in, price_out = (3.0, 15.0)
     return (tokens_in * price_in + tokens_out * price_out) / 1_000_000
 
 
