@@ -631,8 +631,14 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
 
 
 def execute(sql: str, params: tuple = ()) -> None:
-    """Execute a single statement, thread-safely. Does NOT return a cursor.
-    Use fetchone() / fetchall() for queries that return data."""
+    """Execute a single write statement, thread-safely.
+
+    NOTE: this helper does NOT commit — callers must call ``commit()`` (or
+    use ``transaction()`` for multi-statement atomicity). The asymmetry with
+    ``executemany()`` (which DOES commit) is historical; new code should
+    prefer ``transaction()`` whenever more than one statement participates
+    in the same logical change.
+    """
     with _lock:
         get_db().execute(sql, params)
 
@@ -644,7 +650,7 @@ def execute_returning(sql: str, params: tuple = ()) -> list[sqlite3.Row]:
 
 
 def executemany(sql: str, params_seq) -> None:
-    """Execute many statements, thread-safely."""
+    """Execute many statements, thread-safely. Auto-commits."""
     with _lock:
         get_db().executemany(sql, params_seq)
         get_db().commit()
@@ -663,3 +669,36 @@ def fetchone(sql: str, params: tuple = ()) -> sqlite3.Row | None:
 def commit() -> None:
     with _lock:
         get_db().commit()
+
+
+# ── Transactional helper ──────────────────────────────────────────────────────
+
+import contextlib  # noqa: E402  (imported here to keep the lock declarations clean)
+
+
+@contextlib.contextmanager
+def transaction():
+    """Run several statements atomically under the shared db lock.
+
+    Use this whenever a logical change spans more than one execute. On
+    normal completion the connection is committed; on exception the work
+    is rolled back so the caller never sees a half-applied state::
+
+        with db.transaction() as conn:
+            conn.execute("UPDATE x SET y = ? WHERE id = ?", (y, x_id))
+            conn.execute("INSERT INTO audit (...) VALUES (...)", (...))
+
+    Holding the lock for the whole block also blocks competing writers
+    in this process, so no other thread can read a half-applied state.
+    """
+    with _lock:
+        conn = get_db()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
