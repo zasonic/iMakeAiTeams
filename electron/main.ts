@@ -8,11 +8,11 @@
 // Security: contextIsolation:true, nodeIntegration:false, sandbox:true.
 // All network is 127.0.0.1 — see CSP in index.html.
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { createWriteStream, existsSync, mkdirSync, statSync, renameSync, WriteStream } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { SidecarManager } from "./sidecar";
@@ -51,7 +51,26 @@ function bootMainLog(userDataDir: string): void {
   logToFile(`\n=== main starting at ${new Date().toISOString()} ===\n`);
 }
 
+function wireSidecarAuthHeader(targetSession: Electron.Session): void {
+  // Inject Authorization: Bearer <token> on every renderer request to the
+  // sidecar so EventSource (which can't set headers) and stray fetch() calls
+  // don't have to ship the token in URLs or log lines. The token lives in
+  // the main process; the renderer never needs to see it.
+  targetSession.webRequest.onBeforeSendHeaders(
+    { urls: ["http://127.0.0.1:*/*"] },
+    (details, callback) => {
+      const info = sidecar?.getInfo();
+      if (info && new URL(details.url).port === String(info.port)) {
+        details.requestHeaders["Authorization"] = `Bearer ${info.token}`;
+      }
+      callback({ requestHeaders: details.requestHeaders });
+    },
+  );
+}
+
 async function createWindow(): Promise<void> {
+  wireSidecarAuthHeader(session.defaultSession);
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -127,8 +146,19 @@ function wireIpc(): void {
     "dialog:save-file",
     async (_e, { suggestedName, content }: { suggestedName: string; content: string }) => {
       if (!mainWindow) return { ok: false, error: "no window" };
+      // Strip any path components from the renderer-supplied name so a
+      // compromised renderer can't pre-fill the dialog with /etc/passwd or
+      // C:\Windows\System32\... and trick the user into clicking Save.
+      const safeName = basename(typeof suggestedName === "string" ? suggestedName : "");
+      if (!safeName || safeName === "." || safeName === "..") {
+        return { ok: false, error: "invalid name" };
+      }
+      const SAVE_FILE_MAX_BYTES = 50 * 1024 * 1024; // 50 MiB
+      if (typeof content !== "string" || content.length > SAVE_FILE_MAX_BYTES) {
+        return { ok: false, error: "content too large" };
+      }
       const result = await dialog.showSaveDialog(mainWindow, {
-        defaultPath: suggestedName,
+        defaultPath: safeName,
       });
       if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
       try {

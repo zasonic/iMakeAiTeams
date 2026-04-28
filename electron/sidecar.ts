@@ -28,6 +28,22 @@ const PORT_LINE_TIMEOUT_MS = 15_000;
 const SIDECAR_LOG_MAX_BYTES = 10 * 1024 * 1024; // 10MB
 const SHUTDOWN_GRACE_MS = 3_000;
 
+function redactArgs(args: readonly string[]): string[] {
+  // Mask --token <value> and --token=<value> so sidecar.log never contains
+  // the bearer secret. Defensive against future flag aliases.
+  const SECRET_FLAGS = new Set(["--token", "--auth-token"]);
+  return args.map((arg, i) => {
+    const eq = arg.indexOf("=");
+    if (eq > 0 && SECRET_FLAGS.has(arg.slice(0, eq))) {
+      return `${arg.slice(0, eq)}=***`;
+    }
+    if (i > 0 && SECRET_FLAGS.has(args[i - 1])) {
+      return "***";
+    }
+    return arg;
+  });
+}
+
 export type SidecarStatus =
   | { status: "starting" }
   | { status: "ready"; port: number; token: string }
@@ -49,6 +65,7 @@ export class SidecarManager extends EventEmitter {
   private stderrBuffer = "";
   private explicitShutdown = false;
   private startPromise: Promise<SidecarInfo> | null = null;
+  private stopPromise: Promise<void> | null = null;
   private resolveStart: ((info: SidecarInfo) => void) | null = null;
   private rejectStart: ((err: Error) => void) | null = null;
 
@@ -84,7 +101,7 @@ export class SidecarManager extends EventEmitter {
 
     try {
       const { command, args } = this.resolveSpawnArgs();
-      this.logToFile(`spawn: ${command} ${args.join(" ")}\n`);
+      this.logToFile(`spawn: ${command} ${redactArgs(args).join(" ")}\n`);
 
       this.child = spawn(command, args, {
         cwd: this.sidecarCwd(),
@@ -114,46 +131,55 @@ export class SidecarManager extends EventEmitter {
     return this.startPromise;
   }
 
-  /** Gracefully stop the sidecar; falls back to SIGKILL after SHUTDOWN_GRACE_MS. */
+  /** Gracefully stop the sidecar; falls back to SIGKILL after SHUTDOWN_GRACE_MS.
+   *  Reentrant: concurrent calls share the same in-flight teardown. */
   async stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+
     this.explicitShutdown = true;
     const child = this.child;
     if (!child) return;
 
-    const info = this.getInfo();
-    if (info) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 1000);
-        await fetch(`http://127.0.0.1:${info.port}/shutdown`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${info.token}` },
-          signal: controller.signal,
-        }).catch(() => {});
-        clearTimeout(timeout);
-      } catch {
-        /* sidecar already gone — no-op */
-      }
-    }
-
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        if (!child.killed) {
-          this.logToFile("graceful shutdown timed out; forcing kill\n");
-          if (process.platform === "win32" && child.pid != null) {
-            spawn("taskkill", ["/pid", String(child.pid), "/f", "/t"], {
-              windowsHide: true,
-            });
-          } else {
-            child.kill("SIGKILL");
-          }
+    this.stopPromise = (async () => {
+      const info = this.getInfo();
+      if (info) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 1000);
+          await fetch(`http://127.0.0.1:${info.port}/shutdown`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${info.token}` },
+            signal: controller.signal,
+          }).catch(() => {});
+          clearTimeout(timeout);
+        } catch {
+          /* sidecar already gone — no-op */
         }
-      }, SHUTDOWN_GRACE_MS);
-      child.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
+      }
+
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          if (!child.killed) {
+            this.logToFile("graceful shutdown timed out; forcing kill\n");
+            if (process.platform === "win32" && child.pid != null) {
+              spawn("taskkill", ["/pid", String(child.pid), "/f", "/t"], {
+                windowsHide: true,
+              });
+            } else {
+              child.kill("SIGKILL");
+            }
+          }
+        }, SHUTDOWN_GRACE_MS);
+        child.once("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
       });
+    })().finally(() => {
+      this.stopPromise = null;
     });
+
+    return this.stopPromise;
   }
 
   /** Restart the sidecar (kill, wait, spawn). */
@@ -247,6 +273,10 @@ export class SidecarManager extends EventEmitter {
 
     this.child = null;
     this.port = null;
+    // Drop the cached startPromise so a post-crash start() can build a fresh
+    // one. Without this, a previously-rejected promise would be returned to
+    // every subsequent caller, breaking auto-recovery.
+    this.startPromise = null;
     if (this.logStream) {
       this.logStream.end();
       this.logStream = null;
