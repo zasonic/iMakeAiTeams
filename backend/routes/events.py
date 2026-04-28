@@ -25,6 +25,10 @@ def _format_sse(event: str, data: dict) -> bytes:
     return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
 
 
+_KEEPALIVE_INTERVAL_S = 20.0
+_KEEPALIVE_FRAME = b": keepalive\n\n"
+
+
 @router.get("/events")
 async def events_stream() -> StreamingResponse:
     async def _gen():
@@ -33,14 +37,21 @@ async def events_stream() -> StreamingResponse:
         yield _format_sse("hello", {"queue_size": events_sse.queue_size()})
         try:
             while True:
-                batch = await events_sse.drain()
+                # Wait for a publish OR the keepalive timeout, whichever
+                # comes first. The keepalive is an SSE comment line — valid
+                # by spec, ignored by EventSource — but it forces a write
+                # through the socket so intermediate proxies / Chromium's
+                # idle-stream detector don't decide the connection is dead.
+                try:
+                    batch = await asyncio.wait_for(
+                        events_sse.drain(),
+                        timeout=_KEEPALIVE_INTERVAL_S,
+                    )
+                except asyncio.TimeoutError:
+                    yield _KEEPALIVE_FRAME
+                    continue
                 for item in batch:
                     yield _format_sse(item["event"], item["data"])
-                # Heartbeat: comment lines are valid SSE and keep proxies from
-                # killing the connection. asyncio.wait_for triggers this if
-                # nothing arrives for 25 seconds.
-                # (We rely on drain() blocking until a publish; keepalive is
-                # implicit via short-poll loop below.)
         except asyncio.CancelledError:
             return
 
