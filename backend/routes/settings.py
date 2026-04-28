@@ -62,7 +62,11 @@ async def complete_first_run(body: FirstRunIn, request: Request) -> dict:
 
 @router.post("/verify_api_key")
 async def verify_api_key(body: VerifyKeyIn, request: Request) -> dict:
-    return get_api(request).verify_api_key(body.key)
+    # `verify_api_key` calls Anthropic synchronously; running it on the event
+    # loop would stall every other request (including /health and SSE drain
+    # ticks) for the duration of the round-trip. Off-load to a worker thread.
+    import asyncio
+    return await asyncio.to_thread(get_api(request).verify_api_key, body.key)
 
 
 @router.get("/detect_local")
