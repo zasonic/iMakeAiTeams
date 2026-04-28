@@ -313,17 +313,35 @@ export class SidecarManager extends EventEmitter {
     if (this.port == null) {
       throw new Error("pollHealth called before PORT was known");
     }
-    const url = `http://127.0.0.1:${this.port}/health`;
+    // Capture port/token locally so a mid-poll handleExit() (which nulls
+    // this.port) doesn't break the typed status emit and doesn't let us
+    // emit "ready" for a process that just died and may have been
+    // replaced on its old port by another local process.
+    const port = this.port;
+    const token = this.token;
+    const url = `http://127.0.0.1:${port}/health`;
     let lastErr: unknown = null;
 
     for (let attempt = 0; attempt < HEALTH_POLL_MAX_RETRIES; attempt++) {
+      // Bail out if the child exited or restart() reassigned state out
+      // from under us. Without this, a sidecar crash mid-poll would
+      // either emit ready for a dead/replaced process or throw a
+      // confusing "PORT was known" error on the next loop.
+      if (this.child == null || this.port !== port) {
+        throw new Error("Sidecar exited before /health responded");
+      }
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 800);
         const resp = await fetch(url, { signal: controller.signal });
         clearTimeout(timeout);
         if (resp.ok) {
-          const info: SidecarInfo = { port: this.port, token: this.token };
+          // Re-check after the awaited fetch — handleExit could have
+          // landed between resp.ok and here.
+          if (this.child == null || this.port !== port) {
+            throw new Error("Sidecar exited before /health responded");
+          }
+          const info: SidecarInfo = { port, token };
           this.emit("status", { status: "ready", ...info } satisfies SidecarStatus);
           this.resolveStart?.(info);
           this.resolveStart = null;
