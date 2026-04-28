@@ -27,6 +27,13 @@ const HEALTH_POLL_MAX_RETRIES = 30;          // 30 * 500ms = 15s
 const PORT_LINE_TIMEOUT_MS = 15_000;
 const SIDECAR_LOG_MAX_BYTES = 10 * 1024 * 1024; // 10MB
 const SHUTDOWN_GRACE_MS = 3_000;
+// Caps on the in-memory pipe buffers. The stdout buffer accumulates
+// between newlines; the stderr buffer holds the tail used for the
+// crash-summary status. Without a cap, a misbehaving sidecar that
+// writes a multi-MB blob without a newline would pin all of it in
+// memory.
+const STDOUT_BUFFER_MAX_BYTES = 256 * 1024;  // 256 KiB
+const STDERR_BUFFER_MAX_BYTES = 64 * 1024;   // 64 KiB (tail-only)
 
 function redactArgs(args: readonly string[]): string[] {
   // Mask --token <value> and --token=<value> so sidecar.log never contains
@@ -226,6 +233,14 @@ export class SidecarManager extends EventEmitter {
     this.stdoutBuffer += chunk;
     this.logToFile(chunk);
 
+    // Cap the buffer so a sidecar that emits a giant blob without a
+    // newline can't pin unbounded memory. We trim from the head and
+    // keep the tail since the only line we care about (PORT=...) is
+    // recent.
+    if (this.stdoutBuffer.length > STDOUT_BUFFER_MAX_BYTES) {
+      this.stdoutBuffer = this.stdoutBuffer.slice(-STDOUT_BUFFER_MAX_BYTES);
+    }
+
     while (true) {
       const newlineIdx = this.stdoutBuffer.indexOf("\n");
       if (newlineIdx < 0) break;
@@ -245,6 +260,11 @@ export class SidecarManager extends EventEmitter {
 
   private handleStderr(chunk: string): void {
     this.stderrBuffer += chunk;
+    // Only the last few KB matter (used for the crash-tail status
+    // message). Trim aggressively so a runaway log can't grow forever.
+    if (this.stderrBuffer.length > STDERR_BUFFER_MAX_BYTES) {
+      this.stderrBuffer = this.stderrBuffer.slice(-STDERR_BUFFER_MAX_BYTES);
+    }
     this.logToFile(chunk, "stderr");
   }
 
