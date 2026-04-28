@@ -100,6 +100,21 @@ async function createWindow(): Promise<void> {
     return { action: "deny" };
   });
 
+  // Block in-window navigation away from the app shell. Without this,
+  // a stray <a target="_self"> or `window.location = "https://evil"` —
+  // whether from a renderer bug or XSS — could replace the app UI with
+  // remote content. Allow only the dev-server URL and the packaged
+  // file:// renderer; everything else opens externally instead.
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    const dev = process.env.ELECTRON_RENDERER_URL;
+    if (dev && url.startsWith(dev)) return;
+    if (url.startsWith("file://")) return;
+    event.preventDefault();
+    if (/^https?:\/\//i.test(url)) {
+      shell.openExternal(url).catch(() => {});
+    }
+  });
+
   if (process.env.ELECTRON_RENDERER_URL) {
     await mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
