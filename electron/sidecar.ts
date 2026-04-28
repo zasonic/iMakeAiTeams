@@ -250,6 +250,12 @@ export class SidecarManager extends EventEmitter {
 
   private handleSpawnError(err: Error): void {
     this.logToFile(`spawn error: ${err.message}\n`);
+    // When `child.on("error")` fires (vs spawn() throwing) the process
+    // never started, but `this.child` is still the dead handle. Drop it
+    // here so a later stop() doesn't await `child.once("exit")` forever
+    // — exit never fires because the child never started.
+    this.child = null;
+    this.port = null;
     this.failStart(err);
   }
 
