@@ -22,6 +22,7 @@ const PROJECT_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 let sidecar: SidecarManager | null = null;
 let mainLogStream: WriteStream | null = null;
+let updaterTimer: NodeJS.Timeout | null = null;
 
 const MAIN_LOG_MAX_BYTES = 10 * 1024 * 1024; // 10MB
 
@@ -179,8 +180,23 @@ function wireIpc(): void {
   ipcMain.handle("app:version", () => app.getVersion());
   ipcMain.handle("app:user-data-path", () => app.getPath("userData"));
 
-  ipcMain.handle("updater:install", () => {
+  ipcMain.handle("updater:install", async () => {
+    // Always confirm with the user before restarting + reinstalling.
+    // Without this, a compromised renderer could call window.electronAPI
+    // and force-quit the app on demand.
+    if (!mainWindow) return { ok: false, error: "no window" };
+    const choice = await dialog.showMessageBox(mainWindow, {
+      type: "question",
+      buttons: ["Restart and install", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "Install update",
+      message: "Restart iMakeAiTeams to install the downloaded update?",
+      detail: "Any unsaved work will be lost.",
+    });
+    if (choice.response !== 0) return { ok: false, cancelled: true };
     autoUpdater.quitAndInstall(false, true);
+    return { ok: true };
   });
 }
 
@@ -200,9 +216,11 @@ function wireAutoUpdater(): void {
     logToFile(`autoUpdater error: ${err.message}\n`);
   });
 
-  // Check on launch and every 6 hours.
+  // Check on launch and every 6 hours. Hold the interval handle so we can
+  // clear it on quit (otherwise it keeps a reference to autoUpdater alive
+  // and prevents clean process exit on some Electron versions).
   autoUpdater.checkForUpdatesAndNotify().catch(() => {});
-  setInterval(() => {
+  updaterTimer = setInterval(() => {
     autoUpdater.checkForUpdatesAndNotify().catch(() => {});
   }, 6 * 60 * 60 * 1000);
 }
@@ -263,6 +281,10 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", async (event) => {
+  if (updaterTimer) {
+    clearInterval(updaterTimer);
+    updaterTimer = null;
+  }
   if (sidecar) {
     event.preventDefault();
     try {
