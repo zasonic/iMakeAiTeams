@@ -4,6 +4,8 @@ core/api/chat.py — Chat and extended-thinking bridge methods.
 
 from __future__ import annotations
 
+import threading
+
 from core.service_guard import requires as _requires
 from core.worker import run_in_thread
 
@@ -17,6 +19,15 @@ from ._base import BaseAPI
 
 class ChatAPI(BaseAPI):
 
+    def _stop_signal_for(self, conversation_id: str) -> threading.Event:
+        """Get-or-create the stop event for one conversation."""
+        with self._stop_signals_lock:
+            ev = self._stop_signals.get(conversation_id)
+            if ev is None:
+                ev = threading.Event()
+                self._stop_signals[conversation_id] = ev
+            return ev
+
     @rate_limit_chat
     def chat_send(self, conversation_id: str, user_message: str,
                   agent_id: str = "") -> None:
@@ -27,10 +38,11 @@ class ChatAPI(BaseAPI):
         Stage 5: Also emits structured 'chat_event' events for message_start,
         route_decided, and memory_recalled (Improvement 3).
         """
-        self._stop_chat.clear()
+        stop_event = self._stop_signal_for(conversation_id)
+        stop_event.clear()
 
         def _on_token(token: str):
-            if self._stop_chat.is_set():
+            if stop_event.is_set():
                 raise InterruptedError("chat stopped")
             self._emit("chat_token", {"token": token, "conversation_id": conversation_id})
 
@@ -109,9 +121,21 @@ class ChatAPI(BaseAPI):
 
         run_in_thread(_work)
 
-    def chat_stop(self) -> None:
-        """Stop the current streaming response."""
-        self._stop_chat.set()
+    def chat_stop(self, conversation_id: str = "") -> None:
+        """Stop a streaming response.
+
+        With a conversation_id: stop only that conversation. Without one:
+        stop every active stream (back-compat for older renderers that
+        didn't track which conversation was active).
+        """
+        with self._stop_signals_lock:
+            if conversation_id:
+                ev = self._stop_signals.get(conversation_id)
+                if ev is not None:
+                    ev.set()
+            else:
+                for ev in self._stop_signals.values():
+                    ev.set()
 
     @_requires("chat_orchestrator", default={"error": "chat unavailable"})
     def chat_new_conversation(self, agent_id: str = "",

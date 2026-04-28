@@ -49,6 +49,10 @@ class ChatThinkingIn(BaseModel):
     budget_tokens: int = 10000
 
 
+class ChatStopIn(BaseModel):
+    conversation_id: str = ""
+
+
 @router.post("/send")
 async def send(body: ChatSendIn, request: Request) -> dict:
     # `chat_send` is decorated with @rate_limit_chat; when refused it returns
@@ -62,8 +66,9 @@ async def send(body: ChatSendIn, request: Request) -> dict:
 
 
 @router.post("/stop")
-async def stop(request: Request) -> dict:
-    get_api(request).chat_stop()
+async def stop(request: Request, body: ChatStopIn | None = None) -> dict:
+    conversation_id = body.conversation_id if body else ""
+    get_api(request).chat_stop(conversation_id)
     return {"ok": True}
 
 

@@ -81,7 +81,11 @@ class API:
         self._bus = bus
         self._app_root = app_root
         self._log = log
-        self._stop_chat = threading.Event()
+        # Per-conversation stop signals. Keyed by conversation_id; an empty
+        # `chat_stop()` (no id) sets every entry, preserving the legacy
+        # "stop everything" semantics for existing renderer calls.
+        self._stop_signals: dict[str, threading.Event] = {}
+        self._stop_signals_lock = threading.Lock()
 
         # Each service records its init status here. Writers only mutate this
         # dict during __init__ on the main thread; downstream readers read it
@@ -643,7 +647,9 @@ class API:
 
     def shutdown(self) -> None:
         self._log.info("Shutting down services…")
-        self._stop_chat.set()
+        with self._stop_signals_lock:
+            for ev in self._stop_signals.values():
+                ev.set()
         self._log.info("Shutdown complete.")
 
     # ── Domain sub-API delegators ─────────────────────────────────────────────
