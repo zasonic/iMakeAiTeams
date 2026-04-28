@@ -184,12 +184,28 @@ class ChatOrchestrator:
         _db.commit()
 
     def delete_conversation(self, conversation_id: str) -> None:
-        _db.execute("DELETE FROM messages WHERE conversation_id = ?",
-                    (conversation_id,))
-        _db.execute("DELETE FROM session_facts WHERE conversation_id = ?",
-                    (conversation_id,))
-        _db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
-        _db.commit()
+        # Hold the db lock for the whole cascade so a crash, signal, or
+        # interleaving writer can't leave the DB half-deleted. Also clean up
+        # the tables that reference conversation_id but were never declared
+        # with a FK in db.py (token_usage, router_log) — those used to leak
+        # rows after every delete.
+        with _db._lock:
+            conn = _db.get_db()
+            for table in (
+                "messages",
+                "session_facts",
+                "token_usage",
+                "router_log",
+            ):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE conversation_id = ?",
+                    (conversation_id,),
+                )
+            conn.execute(
+                "DELETE FROM conversations WHERE id = ?",
+                (conversation_id,),
+            )
+            conn.commit()
 
     def branch_conversation(self, conversation_id: str,
                             from_message_id: str) -> dict:
