@@ -23,7 +23,7 @@ services:
       OPENCLAW_BIND: "0.0.0.0:8080"
       OPENCLAW_PROVIDER: "{{ provider }}"
       OPENCLAW_MODEL: "{{ model }}"
-      OPENCLAW_API_KEY: "{{ api_key }}"
+      OPENCLAW_API_KEY: "${OPENCLAW_API_KEY:?OPENCLAW_API_KEY missing — re-render compose}"
       OPENCLAW_WORKSPACE: "/workspace"
       OPENCLAW_DATA_DIR: "/data"
       OPENCLAW_REQUIRE_APPROVAL: "true"
