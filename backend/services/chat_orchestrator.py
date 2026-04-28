@@ -758,15 +758,26 @@ class ChatOrchestrator:
                     _qstart = quality_raw.find("{")
                     _qend = quality_raw.rfind("}")
                     if _qstart != -1 and _qend != -1:
-                        quality = _json.loads(quality_raw[_qstart:_qend + 1])
-                        if quality.get("score", 10) < 4:
-                            log.info("Local response scored %s — escalating to Claude", quality.get("score"))
+                        try:
+                            quality = _json.loads(quality_raw[_qstart:_qend + 1])
+                        except (ValueError, TypeError):
+                            quality = {}
+                        # Coerce score to a number; a model emitting
+                        # {"score": "low"} would otherwise raise TypeError
+                        # on the comparison and silently disable escalation
+                        # via the outer `except Exception: pass` swallow.
+                        try:
+                            score = float(quality.get("score", 10))
+                        except (TypeError, ValueError):
+                            score = 10.0
+                        if score < 4:
+                            log.info("Local response scored %s — escalating to Claude", score)
                             try:
-                                if on_token:
-                                    # Clear the frontend stream buffer before
-                                    # re-streaming from Claude — prevents the
-                                    # user seeing both responses concatenated.
-                                    on_token("\x00__CLEAR__")
+                                # The previous on_token("\x00__CLEAR__") sentinel
+                                # was never handled on the renderer, so it just
+                                # appeared as gibberish in the stream. Drop it;
+                                # buffer-clear-on-escalation is a separate UX
+                                # issue (renderer would need a typed event).
                                 # Phase 1: escalation also goes through the hub.
                                 escalation = RoutingDecision(
                                     agent_id=decision.agent_id,
