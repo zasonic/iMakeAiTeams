@@ -1,4 +1,4 @@
-// electron/main.ts — Electron main process entrypoint.
+// desktop-shell/main.ts — Electron main process entrypoint.
 //
 // Lifecycle:
 //   1. App ready → spawn sidecar (SidecarManager) → open BrowserWindow

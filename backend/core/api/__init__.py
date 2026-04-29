@@ -5,7 +5,7 @@ Originally a PyWebView js_api bridge; now consumed by FastAPI route handlers
 in backend/routes/. Public methods that previously ran on the PyWebView main
 thread are still safe to call from FastAPI threadpool contexts. Methods that
 fan out work to background threads push results to the renderer via
-events_sse.publish() (replaces the old window.__emit JS shim).
+sse_events.publish() (replaces the old window.__emit JS shim).
 
 Architecture:
   - ChatOrchestrator  — unified conversation loop (routing, memory, tokens)
@@ -41,7 +41,7 @@ from typing import Any
 
 import requests
 
-import events_sse
+import sse_events
 from core import paths
 from core.settings import Settings
 from core.events import EventBus
@@ -300,7 +300,7 @@ class API:
     def _emit(self, event: str, payload: Any = None) -> None:
         """Push an event onto the SSE bus for the renderer's EventSource to drain."""
         try:
-            events_sse.publish(event, payload if payload is not None else {})
+            sse_events.publish(event, payload if payload is not None else {})
         except Exception as e:
             self._log.debug(f"_emit failed for '{event}': {e}")
 

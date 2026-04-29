@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-import type { SidecarStatus } from "../electron/sidecar";
+import type { SidecarStatus } from "../desktop-shell/sidecar";
 
 export interface SidecarInfo {
   port: number;

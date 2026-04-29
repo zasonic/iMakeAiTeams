@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "build:sidecar": "node scripts/build-sidecar.cjs",
+    "build:sidecar": "node build-scripts/build-sidecar.cjs",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "dist": "npm run build && electron-builder --win",
     "dist:test": "npm run build && electron-builder --win --dir"

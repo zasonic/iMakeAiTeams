@@ -1,4 +1,4 @@
-// src/api/client.ts — typed fetch wrapper for the FastAPI sidecar.
+// desktop-ui/api/client.ts — typed fetch wrapper for the FastAPI sidecar.
 //
 // Caches the sidecar info (port + token) on first lookup; if the sidecar
 // crashes and respawns with a new port, callers should re-call resetSidecarInfo()

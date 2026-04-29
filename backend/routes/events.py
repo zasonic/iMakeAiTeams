@@ -14,7 +14,7 @@ import json
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-import events_sse
+import sse_events
 
 router = APIRouter()
 
@@ -34,7 +34,7 @@ async def events_stream() -> StreamingResponse:
     async def _gen():
         # Send a hello frame so the renderer knows the stream is live before
         # anything is published.
-        yield _format_sse("hello", {"queue_size": events_sse.queue_size()})
+        yield _format_sse("hello", {"queue_size": sse_events.queue_size()})
         try:
             while True:
                 # Wait for a publish OR the keepalive timeout, whichever
@@ -44,7 +44,7 @@ async def events_stream() -> StreamingResponse:
                 # idle-stream detector don't decide the connection is dead.
                 try:
                     batch = await asyncio.wait_for(
-                        events_sse.drain(),
+                        sse_events.drain(),
                         timeout=_KEEPALIVE_INTERVAL_S,
                     )
                 except asyncio.TimeoutError:

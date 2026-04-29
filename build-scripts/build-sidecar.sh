@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# build_sidecar.sh — POSIX equivalent of build_sidecar.bat for CI.
+# build-sidecar.sh — POSIX equivalent of build-sidecar.bat for CI.
 #
 # Outputs backend/dist/server/.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR/../backend"
 
 if [ ! -d ".venv" ]; then
     python3 -m venv .venv

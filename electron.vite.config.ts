@@ -7,7 +7,7 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, "electron/main.ts") },
+        input: { index: resolve(__dirname, "desktop-shell/main.ts") },
       },
       outDir: "out/main",
     },
@@ -16,7 +16,7 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, "electron/preload.ts") },
+        input: { index: resolve(__dirname, "desktop-shell/preload.ts") },
       },
       outDir: "out/preload",
     },
@@ -26,7 +26,7 @@ export default defineConfig({
     plugins: [react()],
     resolve: {
       alias: {
-        "@": resolve(__dirname, "src"),
+        "@": resolve(__dirname, "desktop-ui"),
       },
     },
     build: {

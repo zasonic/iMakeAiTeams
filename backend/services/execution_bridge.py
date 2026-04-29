@@ -3,7 +3,7 @@ services/execution_bridge.py — Power Mode (v3) bridge to OpenClaw's task API.
 
 Translates a chat message into an OpenClaw task, opens a streaming connection
 to the OpenClaw gateway, and re-emits OpenClaw events through the existing
-``events_sse`` pipeline so ChatView.tsx can render them as execution cards.
+``sse_events`` pipeline so ChatView.tsx can render them as execution cards.
 
 Event mapping (OpenClaw → renderer):
     thinking      → power_mode_step  {kind:"thinking",  ...}
@@ -34,7 +34,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-import events_sse
+import sse_events
 
 log = logging.getLogger("MyAIEnv.execution_bridge")
 
@@ -74,7 +74,7 @@ class ExecutionBridge:
     ) -> None:
         self._docker = docker_manager
         self._settings = settings
-        self._emit = emit or events_sse.publish
+        self._emit = emit or sse_events.publish
         self._lock = threading.Lock()
         self._tasks: dict[str, ExecutionTask] = {}
 

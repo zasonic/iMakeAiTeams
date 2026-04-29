@@ -1,9 +1,9 @@
 @echo off
-REM ship.bat — full installer build pipeline.
+REM 3-build-installer.bat — full installer build pipeline.
 REM
 REM 1. Activate backend venv
 REM 2. PyInstaller --onedir into backend\dist\server\
-REM 3. Mirror that to resources\backend\ for electron-builder extraResources
+REM 3. Mirror that to branding\sidecar-bundle\ for electron-builder extraResources
 REM 4. electron-vite production build
 REM 5. electron-builder --win  -> NSIS installer in dist\
 
@@ -12,12 +12,12 @@ set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
 if not exist "backend\.venv\Scripts\python.exe" (
-    echo [error] backend\.venv is missing. Run setup.bat first.
+    echo [error] backend\.venv is missing. Run 1-install.bat first.
     pause
     exit /b 1
 )
 if not exist "node_modules\electron-builder\package.json" (
-    echo [error] node_modules is missing. Run setup.bat first.
+    echo [error] node_modules is missing. Run 1-install.bat first.
     pause
     exit /b 1
 )
@@ -41,10 +41,10 @@ if not "%PYI_ERR%"=="0" (
     exit /b %PYI_ERR%
 )
 
-echo ==^> [2/5] Mirroring sidecar to resources\backend\
-if exist "resources\backend" rmdir /s /q "resources\backend"
-mkdir "resources\backend"
-xcopy "backend\dist\server" "resources\backend" /e /i /q /y >nul
+echo ==^> [2/5] Mirroring sidecar to branding\sidecar-bundle\
+if exist "branding\sidecar-bundle" rmdir /s /q "branding\sidecar-bundle"
+mkdir "branding\sidecar-bundle"
+xcopy "backend\dist\server" "branding\sidecar-bundle" /e /i /q /y >nul
 if errorlevel 1 (
     echo [error] xcopy failed
     pause

@@ -1,4 +1,4 @@
-// src/api/sse.ts — EventSource wrapper for the sidecar's /api/events stream.
+// desktop-ui/api/sse.ts — EventSource wrapper for the sidecar's /api/events stream.
 //
 // EventSource can't set custom headers, but the Electron main process injects
 // `Authorization: Bearer <token>` for every loopback request via a webRequest

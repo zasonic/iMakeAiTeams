@@ -2,12 +2,13 @@
 #
 # This is the only requirements file shipped with the Electron installer. The
 # heavy ML stack (torch, sentence-transformers, chromadb, MiniLM) that powered
-# RAG / semantic memory in the legacy MyAIAgentHub_v5 'full' variant is left
+# RAG / semantic memory in the legacy v5 'full' variant (archive/legacy-v5/)
+# is left
 # out on purpose: those services degrade gracefully via the @requires guard
 # in core/service_guard.py (the UI surfaces "Semantic search unavailable").
 #
 # All deps must ship as prebuilt wheels — no compile step at install time.
-# pip is invoked with --only-binary=:all: in setup.ps1.
+# pip is invoked with --only-binary=:all: in 1-install.ps1.
 
 # ── HTTP server ──────────────────────────────────────────────────────────────
 fastapi>=0.115.0,<0.120.0
@@ -15,7 +16,7 @@ uvicorn[standard]>=0.30.0,<0.35.0
 pydantic>=2.7.0,<3.0.0
 python-multipart>=0.0.9
 
-# ── Existing service deps (kept from MyAIAgentHub_v5/app/requirements.txt) ───
+# ── Existing service deps (kept from archive/legacy-v5/app/requirements.txt) ─
 requests>=2.31.0
 psutil>=5.9.0
 numpy>=1.26.0
