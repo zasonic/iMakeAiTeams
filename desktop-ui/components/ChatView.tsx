@@ -7,7 +7,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { Chat, Docker, Settings } from "@/api/client";
+import { Chat, Docker } from "@/api/client";
 import { ExecutionCard } from "@/components/ExecutionCard";
 import { useAppStore, type PowerModeRun } from "@/stores/appStore";
 
@@ -34,7 +34,6 @@ export function ChatView() {
   const powerModeRuns = useAppStore((s) => s.powerModeRuns);
   const resolvePowerModeApproval = useAppStore((s) => s.resolvePowerModeApproval);
   const powerModeEnabled = useAppStore((s) => s.powerModeEnabled);
-  const setPowerModeEnabled = useAppStore((s) => s.setPowerModeEnabled);
 
   const [conversations, setConversations] = useState<ConversationRow[]>([]);
   const [activeId, setActiveId] = useState<string>("");
@@ -48,7 +47,14 @@ export function ChatView() {
     "idle" | "classifying" | "chat" | "execution"
   >("idle");
   const [activeTaskId, setActiveTaskId] = useState<string>("");
-  const [loadError, setLoadError] = useState<string>("");
+  // Accumulate load errors instead of overwriting — two failed effects
+  // (e.g. Chat.list and Chat.messages racing on first ready) used to show
+  // only the second error and silently lose the first.
+  const [loadErrors, setLoadErrors] = useState<string[]>([]);
+  const addLoadError = (msg: string) =>
+    setLoadErrors((prev) => (prev.includes(msg) ? prev : [...prev, msg]));
+  const dismissLoadError = (msg: string) =>
+    setLoadErrors((prev) => prev.filter((m) => m !== msg));
 
   const busy = sendPhase !== "idle";
 
@@ -62,21 +68,8 @@ export function ChatView() {
   const composingRef = useRef(false);
   const ready = status?.status === "ready";
 
-  // Sync the Power Mode flag from the sidecar on first ready. After that the
-  // appStore owns the value — SettingsPanel updates it whenever the toggle
-  // changes, so a refetch here would race with that.
-  useEffect(() => {
-    if (!ready) return;
-    let alive = true;
-    Settings.get()
-      .then((s) => {
-        if (alive) setPowerModeEnabled(!!s.power_mode_enabled);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [ready, setPowerModeEnabled]);
+  // power_mode_enabled hydration moved to App.tsx so all three components
+  // (ChatView, StatusBar, App) share one fetch instead of racing three.
 
   // Load conversation list once the sidecar is ready.
   useEffect(() => {
@@ -88,7 +81,7 @@ export function ChatView() {
         if (alive) setConversations(rows);
         if (alive && rows.length && !activeId) setActiveId(rows[0].id);
       } catch (err) {
-        if (alive) setLoadError(err instanceof Error ? err.message : String(err));
+        if (alive) addLoadError(err instanceof Error ? err.message : String(err));
       }
     })();
     return () => {
@@ -105,7 +98,7 @@ export function ChatView() {
         const rows = (await Chat.messages(activeId)) as MessageRow[];
         if (alive) setMessages(rows);
       } catch (err) {
-        if (alive) setLoadError(err instanceof Error ? err.message : String(err));
+        if (alive) addLoadError(err instanceof Error ? err.message : String(err));
       }
     })();
     return () => {
@@ -316,11 +309,22 @@ export function ChatView() {
               <div className="text-[11px] text-ink-faint">{c.updated_at?.slice(0, 16)}</div>
             </button>
           ))}
-          {!conversations.length && !loadError && (
+          {!conversations.length && loadErrors.length === 0 && (
             <div className="p-4 text-sm text-ink-faint">No conversations yet.</div>
           )}
-          {loadError && (
-            <div className="p-4 text-sm text-err">{loadError}</div>
+          {loadErrors.length > 0 && (
+            <div className="p-4 space-y-2">
+              {loadErrors.map((msg) => (
+                <button
+                  key={msg}
+                  onClick={() => dismissLoadError(msg)}
+                  className="w-full text-left text-sm text-err border border-err/30 rounded px-3 py-2 hover:bg-err/5"
+                  title="Click to dismiss"
+                >
+                  {msg}
+                </button>
+              ))}
+            </div>
           )}
         </div>
       </div>

@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from "react";
 
-import { Settings, Docker } from "@/api/client";
+import { Docker } from "@/api/client";
 import { useAppStore } from "@/stores/appStore";
 
 export function StatusBar() {
@@ -14,7 +14,6 @@ export function StatusBar() {
   const dockerStatus = useAppStore((s) => s.dockerStatus);
   const setDockerStatus = useAppStore((s) => s.setDockerStatus);
   const powerModeEnabled = useAppStore((s) => s.powerModeEnabled);
-  const setPowerModeEnabled = useAppStore((s) => s.setPowerModeEnabled);
   const [version, setVersion] = useState<string>("");
 
   useEffect(() => {
@@ -34,18 +33,12 @@ export function StatusBar() {
     };
   }, []);
 
-  // First-load sync: pull Power Mode flag + Docker status from the sidecar.
-  // Subsequent changes propagate via the appStore: the SettingsPanel writes
-  // `powerModeEnabled` on save/reload, and App.tsx writes `dockerStatus`
-  // whenever a `power_mode_status` SSE event fires.
+  // power_mode_enabled is hydrated centrally in App.tsx; we only need to
+  // pull Docker status here. Subsequent dockerStatus changes flow via the
+  // power_mode_status SSE event handled in App.tsx.
   useEffect(() => {
     if (status?.status !== "ready") return;
     let alive = true;
-    Settings.get()
-      .then((s) => {
-        if (alive) setPowerModeEnabled(!!s.power_mode_enabled);
-      })
-      .catch(() => {});
     Docker.status()
       .then((s) => {
         if (alive) setDockerStatus(s);
@@ -54,7 +47,7 @@ export function StatusBar() {
     return () => {
       alive = false;
     };
-  }, [status, setDockerStatus, setPowerModeEnabled]);
+  }, [status, setDockerStatus]);
 
   const dot = (() => {
     if (!status) return "bg-ink-faint";

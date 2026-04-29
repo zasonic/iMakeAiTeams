@@ -22,7 +22,11 @@ export default defineConfig({
     },
   },
   renderer: {
-    root: ".",
+    // Scope the renderer's project root to desktop-ui/ so vite only watches
+    // the renderer source tree. With root="." the dev server was scanning
+    // backend/, branding/, archive/, and node_modules — all irrelevant to
+    // the React bundle and a small but real performance hit on first start.
+    root: resolve(__dirname, "desktop-ui"),
     plugins: [react()],
     resolve: {
       alias: {
@@ -31,9 +35,9 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, "index.html") },
+        input: { index: resolve(__dirname, "desktop-ui/index.html") },
       },
-      outDir: "out/renderer",
+      outDir: resolve(__dirname, "out/renderer"),
     },
     server: {
       port: 5173,

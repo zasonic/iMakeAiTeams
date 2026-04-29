@@ -21,7 +21,11 @@ async function getSidecarInfo(): Promise<SidecarInfo> {
   if (inflight) return inflight;
 
   inflight = (async () => {
-    for (let attempt = 0; attempt < 60; attempt++) {
+    // 240 attempts × 250ms = 60s. The sidecar's internal startup budget is
+    // 30s (15s for PORT= + 15s for /health), so this comfortably exceeds
+    // the worst case without making "actually broken" indistinguishable
+    // from "still loading."
+    for (let attempt = 0; attempt < 240; attempt++) {
       const info = await window.electronAPI.getSidecarInfo();
       if (info) {
         cached = info;
