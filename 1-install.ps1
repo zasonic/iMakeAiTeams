@@ -254,7 +254,12 @@ try {
     }
 
     Write-Step "Upgrading pip + wheel inside the venv"
-    & $venvPython -m pip install --timeout=1000 --retries=20 --no-cache-dir --only-binary=":all:" --upgrade pip wheel setuptools
+    # Don't constrain build tools to wheels-only — if PyPI happens to publish
+    # an sdist-only patch release, --only-binary=:all: aborts the install
+    # before pip even gets the chance to use a cached wheel. The flag is
+    # still applied to USER deps below where compile-at-install really is
+    # what we're trying to prevent.
+    & $venvPython -m pip install --timeout=1000 --retries=20 --no-cache-dir --upgrade pip wheel setuptools
     if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed" }
 
     Write-Step "Installing sidecar dependencies"

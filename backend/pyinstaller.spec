@@ -18,8 +18,6 @@
 
 from PyInstaller.utils.hooks import collect_submodules, collect_all
 
-block_cipher = None
-
 # uvicorn ships shared libs and templates that PyInstaller's static analyzer
 # doesn't auto-detect.
 uvicorn_datas, uvicorn_binaries, uvicorn_hidden = collect_all("uvicorn")
@@ -52,8 +50,9 @@ hiddenimports = (
         "keyring.backends.macOS",
         "keyring.backends.SecretService",
         "keyring.backends.fail",
-        # legacy event-bus + smoke harness (referenced via dynamic import)
-        "smoke_harness",
+        # legacy event-bus, db helpers, ORM models referenced via dynamic
+        # import. NOTE: core.smoke_harness intentionally excluded below — it
+        # is a test-only hook and has no runtime callers in the bundle.
         "sse_events",
         "db",
         "models",
@@ -86,14 +85,18 @@ a = Analysis(
         "tensorflow",
         "tkinter",
         "matplotlib",
+        # Test-only smoke harness — kept out of the shipped bundle so a
+        # mis-flipped MYAI_SMOKE_TEST=1 env var on a user's machine can't
+        # exercise stub paths instead of the real chat orchestrator.
+        # collect_submodules("core") would otherwise pull it in.
+        "core.smoke_harness",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
     pyz,
