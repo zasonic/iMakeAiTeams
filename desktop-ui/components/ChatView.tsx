@@ -1,4 +1,4 @@
-// src/components/ChatView.tsx — chat panel with conversation list + streaming.
+// desktop-ui/components/ChatView.tsx — chat panel with conversation list + streaming.
 //
 // v3 adds Power Mode: when `power_mode_enabled`, the renderer asks the
 // backend to classify each message; "execution"-class messages go to

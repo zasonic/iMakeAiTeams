@@ -1,4 +1,4 @@
-// src/components/StatusBar.tsx — top-of-app status indicator.
+// desktop-ui/components/StatusBar.tsx — top-of-app status indicator.
 //
 // Shows a colored dot for the sidecar lifecycle, the assigned port, the app
 // version, a Power Mode badge when active, and (when crashed) a Restart

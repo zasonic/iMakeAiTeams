@@ -1,4 +1,4 @@
-// src/components/ExecutionCard.tsx — single Power Mode execution step.
+// desktop-ui/components/ExecutionCard.tsx — single Power Mode execution step.
 //
 // Renders one OpenClaw event (planning, tool call, file write, shell command,
 // web action) as a collapsible card. Default-expanded while running, collapses

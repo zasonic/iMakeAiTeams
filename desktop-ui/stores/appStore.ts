@@ -1,4 +1,4 @@
-// src/stores/appStore.ts — Zustand 5.x app store.
+// desktop-ui/stores/appStore.ts — Zustand 5.x app store.
 //
 // Persists user preferences via localStorage (Zustand `persist` middleware).
 // Runtime state (sidecar status, conversation streaming, error toasts) is
@@ -7,7 +7,7 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 
-import type { SidecarStatus } from "../../electron/sidecar";
+import type { SidecarStatus } from "../../desktop-shell/sidecar";
 
 export type ActiveView =
   | "chat"

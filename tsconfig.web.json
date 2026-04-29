@@ -16,9 +16,9 @@
     "useDefineForClassFields": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["desktop-ui/*"]
     },
     "types": ["vite/client"]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.d.ts"]
+  "include": ["desktop-ui/**/*.ts", "desktop-ui/**/*.tsx", "desktop-ui/**/*.d.ts"]
 }

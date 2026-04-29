@@ -1,4 +1,4 @@
-// electron/sidecar.ts — manages the Python FastAPI sidecar process.
+// desktop-shell/sidecar.ts — manages the Python FastAPI sidecar process.
 //
 // Responsibilities:
 //   1. Spawn the Python sidecar (dev: backend/.venv/Scripts/python.exe →

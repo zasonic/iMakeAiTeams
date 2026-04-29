@@ -1,4 +1,4 @@
-// electron/preload.ts — typed bridge between renderer (sandboxed) and main.
+// desktop-shell/preload.ts — typed bridge between renderer (sandboxed) and main.
 //
 // Only the methods enumerated below are exposed; everything else (Node, fs,
 // child_process) stays on the main process side. JSON-only IPC; never raw
