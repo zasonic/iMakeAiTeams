@@ -5,7 +5,7 @@ asar: true
 
 directories:
   output: dist
-  buildResources: resources
+  buildResources: branding
 
 files:
   - out/**/*
@@ -14,17 +14,17 @@ files:
   - "!**/{tsconfig*,*.config.*,.eslintrc*}"
 
 extraResources:
-  - from: resources/backend
+  - from: branding/sidecar-bundle
     to: backend
     filter: ["**/*"]
-  - from: resources/icon.png
+  - from: branding/icon.png
     to: icon.png
 
 win:
   target:
     - target: nsis
       arch: [x64]
-  icon: resources/icon.png
+  icon: branding/icon.png
   artifactName: "${productName}-Setup-${version}.${ext}"
   # publisherName must match the CN of the signing certificate exactly.
   # electron-updater verifies the downloaded installer's publisher

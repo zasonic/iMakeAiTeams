@@ -1,4 +1,4 @@
-// scripts/build-sidecar.cjs — node entry for `npm run build:sidecar`.
+// build-scripts/build-sidecar.cjs — node entry for `npm run build:sidecar`.
 //
 // Delegates to the platform-appropriate build-sidecar script in the same
 // folder. Useful for CI matrices that want a single `npm run build:sidecar`

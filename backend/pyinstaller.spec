@@ -2,7 +2,7 @@
 #
 # Produces backend/dist/server/server.exe + a sibling _internal/ tree.
 # 3-build-installer.bat copies the whole dist/server directory into
-# resources/backend/ so electron-builder can ship it as extraResources.
+# branding/sidecar-bundle/ so electron-builder can ship it as extraResources.
 #
 # Hidden imports cover:
 #   * uvicorn's optional loops (`asyncio` is the default, but pyi misses

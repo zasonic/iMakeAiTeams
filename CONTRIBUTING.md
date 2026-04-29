@@ -48,7 +48,7 @@ restart automatically when their source files change.
 ## Building
 
 ```
-npm run build:sidecar    # PyInstaller bundles backend/ into resources/
+npm run build:sidecar    # PyInstaller bundles backend/ into branding/sidecar-bundle/
 npm run build            # electron-vite production build into out/
 npm run dist             # npm run build + electron-builder NSIS (Windows only)
 ```
