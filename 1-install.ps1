@@ -134,7 +134,7 @@ function Get-PythonExe {
     foreach ($name in @("python", "python3", "py")) {
         if (Test-Command $name) {
             try {
-                $v = & $name -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null
+                $v = & $name -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>$null
                 if ($LASTEXITCODE -eq 0 -and $v) {
                     if ([Version]$v -ge $PYTHON_MIN) { return $name }
                 }
@@ -209,7 +209,7 @@ try {
             throw "Python 3.12+ is still missing. Restart your terminal and rerun 1-install.bat."
         }
     } else {
-        $pyv = & $py -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+        $pyv = & $py -c 'import sys; print(".".join(map(str, sys.version_info[:3])))'
         Write-Ok "Python $pyv detected ($py)"
     }
 
@@ -252,7 +252,7 @@ try {
 
     # ── Smoke test ───────────────────────────────────────────────────────────
     Write-Step "Verifying imports"
-    & $venvPython -c "import fastapi, uvicorn, anthropic, keyring, pydantic; print('imports ok')"
+    & $venvPython -c 'import fastapi, uvicorn, anthropic, keyring, pydantic; print("imports ok")'
     if ($LASTEXITCODE -ne 0) { throw "Sidecar imports failed inside the venv." }
 
     Write-Host ""
