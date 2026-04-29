@@ -179,7 +179,7 @@ function Install-Python {
 
     $exe = Join-Path $env:TEMP "imakeaiteams-python.exe"
     if (-not (Download-File $PYTHON_EXE_FALLBACK $exe)) {
-        throw "Could not download Python installer. Install Python 3.12+ manually from https://www.python.org/downloads/ (check 'Add Python to PATH') and rerun 1-install.bat."
+        throw 'Could not download Python installer. Install Python 3.12+ manually from https://www.python.org/downloads/ — be sure to tick "Add Python to PATH" — and rerun 1-install.bat.'
     }
     Write-Host "    running $exe /quiet InstallAllUsers=0 PrependPath=1 Include_pip=1"
     $proc = Start-Process $exe -Wait -PassThru -ArgumentList "/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1 Include_test=0"
@@ -226,11 +226,11 @@ try {
         }
     } else {
         $pyv = & $py -c 'import sys; print(".".join(map(str, sys.version_info[:3])))'
-        Write-Ok "Python $pyv detected ($py)"
+        Write-Ok "Python $pyv detected at $py"
     }
 
     # ── npm install ──────────────────────────────────────────────────────────
-    Write-Step "Installing npm dependencies (this can take a few minutes)"
+    Write-Step 'Installing npm dependencies — this can take a few minutes'
     Push-Location $ProjectRoot
     try {
         & npm install --no-fund --no-audit --loglevel=error
@@ -262,7 +262,7 @@ try {
     & $venvPython -m pip install --timeout=1000 --retries=20 --no-cache-dir --only-binary=":all:" -r "$reqs"
     if ($LASTEXITCODE -ne 0) { throw "pip install -r backend\requirements.txt failed" }
 
-    Write-Step "Installing PyInstaller (bundled in dev so 3-build-installer.bat can run without re-installing)"
+    Write-Step 'Installing PyInstaller — bundled in dev so 3-build-installer.bat can run without re-installing'
     & $venvPython -m pip install --timeout=1000 --retries=20 --no-cache-dir --only-binary=":all:" "pyinstaller==6.11.1"
     if ($LASTEXITCODE -ne 0) { throw "pip install pyinstaller failed" }
 
