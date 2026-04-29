@@ -1,18 +1,18 @@
 // scripts/build-sidecar.cjs — node entry for `npm run build:sidecar`.
 //
-// Delegates to the platform-appropriate build_sidecar script. Useful for CI
-// matrices that want a single `npm run build:sidecar` regardless of OS.
+// Delegates to the platform-appropriate build-sidecar script in the same
+// folder. Useful for CI matrices that want a single `npm run build:sidecar`
+// regardless of OS.
 
 const { spawnSync } = require("node:child_process");
 const { resolve } = require("node:path");
 const { existsSync } = require("node:fs");
 
-const repoRoot = resolve(__dirname, "..");
 const isWindows = process.platform === "win32";
 
 const script = isWindows
-  ? resolve(repoRoot, "backend", "build_sidecar.bat")
-  : resolve(repoRoot, "backend", "build_sidecar.sh");
+  ? resolve(__dirname, "build-sidecar.bat")
+  : resolve(__dirname, "build-sidecar.sh");
 
 if (!existsSync(script)) {
   console.error(`build-sidecar: ${script} not found`);

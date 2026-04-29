@@ -1,5 +1,5 @@
 @echo off
-REM ship.bat — full installer build pipeline.
+REM 3-build-installer.bat — full installer build pipeline.
 REM
 REM 1. Activate backend venv
 REM 2. PyInstaller --onedir into backend\dist\server\
@@ -12,12 +12,12 @@ set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
 if not exist "backend\.venv\Scripts\python.exe" (
-    echo [error] backend\.venv is missing. Run setup.bat first.
+    echo [error] backend\.venv is missing. Run 1-install.bat first.
     pause
     exit /b 1
 )
 if not exist "node_modules\electron-builder\package.json" (
-    echo [error] node_modules is missing. Run setup.bat first.
+    echo [error] node_modules is missing. Run 1-install.bat first.
     pause
     exit /b 1
 )

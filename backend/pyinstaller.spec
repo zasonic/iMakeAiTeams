@@ -1,8 +1,8 @@
 # pyinstaller.spec — onedir bundle for the iMakeAiTeams Python sidecar.
 #
 # Produces backend/dist/server/server.exe + a sibling _internal/ tree.
-# ship.bat copies the whole dist/server directory into resources/backend/ so
-# electron-builder can ship it as extraResources.
+# 3-build-installer.bat copies the whole dist/server directory into
+# resources/backend/ so electron-builder can ship it as extraResources.
 #
 # Hidden imports cover:
 #   * uvicorn's optional loops (`asyncio` is the default, but pyi misses
