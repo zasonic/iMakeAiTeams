@@ -28,7 +28,12 @@ const HEALTH_POLL_INTERVAL_MS = 500;
 const HEALTH_POLL_MAX_RETRIES = 30;          // 30 * 500ms = 15s
 const PORT_LINE_TIMEOUT_MS = 15_000;
 const SIDECAR_LOG_MAX_BYTES = 10 * 1024 * 1024; // 10MB
-const SHUTDOWN_GRACE_MS = 3_000;
+const SIDECAR_LOG_GENERATIONS = 3;
+// 5s — enough to flush a SQLite WAL checkpoint and finalize an in-flight
+// Anthropic request without leaving the user staring at a dead window if
+// the sidecar is genuinely wedged.
+const SHUTDOWN_GRACE_MS = 5_000;
+const SHUTDOWN_FETCH_TIMEOUT_MS = 5_000;
 // Caps on the in-memory pipe buffers. The stdout buffer accumulates
 // between newlines; the stderr buffer holds the tail used for the
 // crash-summary status. Without a cap, a misbehaving sidecar that
@@ -165,7 +170,7 @@ export class SidecarManager extends EventEmitter {
       if (info) {
         try {
           const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 1000);
+          const timeout = setTimeout(() => controller.abort(), SHUTDOWN_FETCH_TIMEOUT_MS);
           await fetch(`http://127.0.0.1:${info.port}/shutdown`, {
             method: "POST",
             headers: { Authorization: `Bearer ${info.token}` },
@@ -313,6 +318,9 @@ export class SidecarManager extends EventEmitter {
     this.child = null;
     this.port = null;
     this.failStart(err);
+    // Drop the cached promise so a follow-up start() builds a fresh one
+    // instead of returning the rejected promise to every future caller.
+    this.startPromise = null;
   }
 
   private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
@@ -386,6 +394,9 @@ export class SidecarManager extends EventEmitter {
       this.rejectStart = null;
       this.resolveStart = null;
     }
+    // Defense in depth: every rejection path should clear the cached
+    // promise so the next start() doesn't replay a stale error.
+    this.startPromise = null;
     this.emit("status", {
       status: "crashed",
       code: null,
@@ -394,10 +405,15 @@ export class SidecarManager extends EventEmitter {
     } satisfies SidecarStatus);
   }
 
-  private logToFile(text: string, _stream: "stdout" | "stderr" = "stdout"): void {
+  private logToFile(text: string, stream: "stdout" | "stderr" = "stdout"): void {
     if (!this.logStream) return;
     try {
-      this.logStream.write(text);
+      // Prefix every line of stderr with [ERR] so the merged log can be
+      // grepped for failure context. The chunk may not begin on a line
+      // boundary (stderr arrives in arbitrary slices), so apply the
+      // prefix at every line start within the chunk.
+      const out = stream === "stderr" ? text.replace(/^/gm, "[ERR] ") : text;
+      this.logStream.write(out);
     } catch {
       // Logging failure must never crash the manager.
     }
@@ -408,9 +424,22 @@ export class SidecarManager extends EventEmitter {
       if (!existsSync(this.logPath)) return;
       const size = statSync(this.logPath).size;
       if (size <= SIDECAR_LOG_MAX_BYTES) return;
-      const archived = `${this.logPath}.1`;
+      // Cascade generations so we keep up to SIDECAR_LOG_GENERATIONS
+      // archived files (e.g. .2 → .3, .1 → .2, then current → .1).
+      // Caps total disk usage at (1 + N) × SIDECAR_LOG_MAX_BYTES.
+      for (let i = SIDECAR_LOG_GENERATIONS - 1; i >= 1; i--) {
+        const src = `${this.logPath}.${i}`;
+        const dst = `${this.logPath}.${i + 1}`;
+        if (existsSync(src)) {
+          try {
+            renameSync(src, dst);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
       try {
-        renameSync(this.logPath, archived);
+        renameSync(this.logPath, `${this.logPath}.1`);
       } catch {
         /* ignore — next write will create a fresh file */
       }
