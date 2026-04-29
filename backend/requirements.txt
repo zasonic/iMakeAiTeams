@@ -43,3 +43,8 @@ keyring>=24.0.0
 httpx>=0.27.0
 docker>=7.1.0
 jinja2>=3.1.0
+
+# ── Dev / test ────────────────────────────────────────────────────────────────
+# Not bundled into the PyInstaller spec; installed separately for `pytest`.
+pytest>=8.0.0
+pytest-anyio>=0.0.0

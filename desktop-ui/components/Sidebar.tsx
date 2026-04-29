@@ -51,6 +51,8 @@ export function Sidebar() {
               key={item.id}
               type="button"
               onClick={() => setActive(item.id)}
+              aria-label={item.label}
+              aria-current={isActive ? "page" : undefined}
               className={`w-full text-left px-4 py-2 text-sm flex flex-col rounded-md mx-2 my-0.5 transition ${
                 isActive
                   ? "bg-accent/10 text-ink"
@@ -73,6 +75,7 @@ export function Sidebar() {
             studio ? "bg-accent" : "bg-bg-3"
           }`}
           aria-pressed={studio}
+          aria-label="Toggle studio mode"
         >
           <span
             className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${

@@ -126,12 +126,12 @@ export function StatusBar() {
 
   return (
     <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-line bg-bg-1/80 backdrop-blur">
-      <div className="flex items-center gap-2 min-w-0">
+      <span role="status" aria-live="polite" className="flex items-center gap-2 min-w-0">
         <span className={`h-2 w-2 rounded-full flex-shrink-0 ${dot}`} aria-hidden />
         <span className="text-xs text-ink-dim truncate" title={label}>
           {label}
         </span>
-      </div>
+      </span>
       <div className="flex items-center gap-3">
         {powerModeBadge}
         {status?.status === "crashed" && (

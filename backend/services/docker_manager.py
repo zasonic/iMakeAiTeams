@@ -44,7 +44,10 @@ log = logging.getLogger("MyAIEnv.docker_manager")
 
 # ── Defaults & constants ─────────────────────────────────────────────────────
 
-DEFAULT_OPENCLAW_IMAGE = "coollabsio/openclaw:latest"
+# Pin to a specific release; update intentionally. Shipping `:latest` means
+# the container a user pulls today may differ from one pulled in six months
+# and break Power Mode silently.
+DEFAULT_OPENCLAW_IMAGE = "coollabsio/openclaw:v1.0.0"
 DEFAULT_GATEWAY_PORT = 18789
 CONTAINER_NAME = "imakeaiteams-openclaw"
 COMPOSE_FILENAME = "docker-compose.yml"
@@ -538,8 +541,9 @@ class DockerManager:
             "GATEWAY_SECRET": gateway_secret,
         })
 
+        image = (self._settings.get("openclaw_image") or "").strip() or DEFAULT_OPENCLAW_IMAGE
         rendered = tmpl.render(
-            image=DEFAULT_OPENCLAW_IMAGE,
+            image=image,
             container_name=CONTAINER_NAME,
             gateway_port=gateway_port,
             provider=provider,
