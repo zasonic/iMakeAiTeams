@@ -137,8 +137,9 @@ class SettingsAPI(BaseAPI):
 
     def detect_local_setup(self) -> dict:
         """
-        Probe for local model backends and suggest a model based on RAM.
-        Called synchronously by the setup wizard.
+        Probe for local model backends and suggest a model based on what's
+        actually installed (falling back to a RAM-tier hint when neither
+        backend has any models). Called synchronously by the setup wizard.
         """
         try:
             import psutil
@@ -146,20 +147,17 @@ class SettingsAPI(BaseAPI):
         except Exception:
             ram_gb = 0.0
 
-        if ram_gb >= 32:
-            recommended, rec_reason = "llama3:8b", f"{ram_gb} GB RAM — 8B model runs comfortably"
-        elif ram_gb >= 16:
-            recommended, rec_reason = "llama3:8b", f"{ram_gb} GB RAM — 8B model should work well"
-        elif ram_gb >= 8:
-            recommended, rec_reason = "phi3:mini", f"{ram_gb} GB RAM — smaller model recommended"
-        else:
-            recommended, rec_reason = "phi3:mini", f"{ram_gb} GB RAM — lightweight model recommended"
-
         if self._local is not None:
-            ollama_running = self._local.is_available(backend="ollama")
-            lmstudio_running = self._local.is_available(backend="lmstudio")
-            ollama_models = self._local.list_models(backend="ollama") if ollama_running else []
-            lmstudio_models = self._local.list_models(backend="lmstudio") if lmstudio_running else []
+            # list_models() handles its own connection errors and returns []
+            # when the backend is offline. Treat a non-empty model list as
+            # "backend running" so we don't double-probe with a separate
+            # is_available() TCP check that costs another round trip and
+            # can disagree with list_models() under flaky DNS / firewall
+            # conditions.
+            ollama_models = self._local.list_models(backend="ollama") or []
+            lmstudio_models = self._local.list_models(backend="lmstudio") or []
+            ollama_running = bool(ollama_models)
+            lmstudio_running = bool(lmstudio_models)
             # Phase 3: probe both backends for the recommended Qwen3-30B-A3B
             # GGUF. LM Studio is the canonical target per the spec; Ollama is
             # checked as a courtesy. The first detected hit wins.
@@ -174,6 +172,27 @@ class SettingsAPI(BaseAPI):
                 "model_id":        "",
                 "fallback_reason": "Local model client not initialized.",
             }
+
+        # Recommend from what's actually on the user's machine first; only
+        # fall back to a RAM-tier hardcoded name when neither backend has
+        # any models installed yet.
+        all_local = list(ollama_models) + list(lmstudio_models)
+        if all_local:
+            preferred = next(
+                (m for m in all_local
+                 if any(s in m.lower() for s in ("7b", "8b", "13b", "14b"))),
+                all_local[0],
+            )
+            recommended = preferred
+            rec_reason = f"Detected on your machine — {ram_gb} GB RAM"
+        elif ram_gb >= 32:
+            recommended, rec_reason = "llama3:8b", f"{ram_gb} GB RAM — install llama3:8b via Ollama"
+        elif ram_gb >= 16:
+            recommended, rec_reason = "llama3:8b", f"{ram_gb} GB RAM — install llama3:8b via Ollama"
+        elif ram_gb >= 8:
+            recommended, rec_reason = "phi3:mini", f"{ram_gb} GB RAM — install phi3:mini via Ollama"
+        else:
+            recommended, rec_reason = "phi3:mini", f"{ram_gb} GB RAM — install phi3:mini via Ollama"
 
         return {
             "ram_gb": ram_gb,

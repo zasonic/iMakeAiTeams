@@ -23,7 +23,13 @@ Set-Location $ProjectRoot
 $NODE_MIN_MAJOR = 20
 $PYTHON_MIN = [Version]"3.12"
 
-$NODE_MSI_FALLBACK = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi"
+# Fallback installer URLs used when winget / Chocolatey / scoop aren't
+# available on the user's machine. Bump these on every release: stale pins
+# accumulate slowly because each released installer keeps shipping the
+# version that was current at build time. Verify the URL still 200s before
+# committing — nodejs.org and python.org occasionally garbage-collect old
+# minor releases.
+$NODE_MSI_FALLBACK   = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi"
 $PYTHON_EXE_FALLBACK = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe"
 
 # ── Pretty printing ──────────────────────────────────────────────────────────
