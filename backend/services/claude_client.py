@@ -31,6 +31,16 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — Token usage from extended thinking:
+  - extended_thinking_chat() now includes input_tokens / output_tokens in
+    its return dict so callers (chat_orchestrator.send) can track costs
+    when the thinking path produces the final response.
+  - stream_extended_thinking_chat() captures usage via get_final_usage()
+    after the stream closes and includes it in the return dict.  The
+    fallback path (blocking extended_thinking_chat) already returns usage
+    now, so callers always get a consistent {thinking, answer,
+    input_tokens, output_tokens} shape regardless of which code path ran.
 """
 
 from pathlib import Path
@@ -49,7 +59,7 @@ class ClaudeClient:
       - Multi-turn conversation (full history)
       - Streaming multi-turn with usage tracking
       - Chat with a previously uploaded file (document source)
-      - Extended thinking chat
+      - Extended thinking chat (blocking and streaming)
     """
 
     def __init__(self, api_key: str, model: str, use_caching: bool = True):
@@ -58,7 +68,7 @@ class ClaudeClient:
         self._use_caching = use_caching
         self._file_cache: dict[str, str] = {}  # file_path -> file_id
 
-    # ── Configuration ────────────────────────────────────────────────────────────
+    # ── Configuration ─────────────────────────────────────────────────────────────────────────
 
     def update_config(
         self,
@@ -73,7 +83,7 @@ class ClaudeClient:
         if use_caching is not None:
             self._use_caching = use_caching
 
-    # ── Content helpers ──────────────────────────────────────────────────────────
+    # ── Content helpers ────────────────────────────────────────────────────────────────────
 
     def _build_content(self, project_summary: str, user_message: str) -> list:
         """
@@ -117,7 +127,7 @@ class ClaudeClient:
             return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         return system
 
-    # ── Single-turn chat ─────────────────────────────────────────────────────────
+    # ── Single-turn chat ──────────────────────────────────────────────────────────────────
 
     def chat(self, system: str, project_summary: str, user_message: str,
              max_tokens: int = 4096) -> str:
@@ -132,7 +142,7 @@ class ClaudeClient:
         response = self._client.messages.create(**kwargs)
         return response.content[0].text
 
-    # ── Single-turn streaming ────────────────────────────────────────────────────
+    # ── Single-turn streaming ─────────────────────────────────────────────────────────────────
 
     def stream_chat(
         self,
@@ -160,7 +170,7 @@ class ClaudeClient:
                 full_text += token
         return full_text
 
-    # ── Multi-turn chat ──────────────────────────────────────────────────────────
+    # ── Multi-turn chat ───────────────────────────────────────────────────────────────────
 
     def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096) -> dict:
         """
@@ -222,7 +232,7 @@ class ClaudeClient:
                 pass  # usage unavailable — caller handles gracefully
         return full_text, usage
 
-    # ── Tool use (agentic loop) ──────────────────────────────────────────────────
+    # ── Tool use (agentic loop) ────────────────────────────────────────────────────────────
 
     def call_with_tools(
         self,
@@ -266,7 +276,7 @@ class ClaudeClient:
             },
         }
 
-    # ── File upload ──────────────────────────────────────────────────────────────
+    # ── File upload ────────────────────────────────────────────────────────────────────────
 
     def upload_file(self, file_path: Path, mime_type: str) -> str:
         """
@@ -284,7 +294,7 @@ class ClaudeClient:
         self._file_cache[key] = file_id
         return file_id
 
-    # ── Chat with uploaded file ──────────────────────────────────────────────────
+    # ── Chat with uploaded file ───────────────────────────────────────────────────────────────
 
     def chat_with_file(self, system: str, file_id: str, user_message: str) -> str:
         """
@@ -305,7 +315,7 @@ class ClaudeClient:
         )
         return response.content[0].text
 
-    # ── Extended thinking ────────────────────────────────────────────────────────
+    # ── Extended thinking ──────────────────────────────────────────────────────────────────
 
     def extended_thinking_chat(
         self,
@@ -316,7 +326,16 @@ class ClaudeClient:
     ) -> dict:
         """
         Run a chat with extended thinking enabled.
-        Returns a dict with keys "thinking" and "answer".
+
+        Returns a dict with keys:
+          "thinking"      — the raw reasoning text Claude produced
+          "answer"        — the final text response
+          "input_tokens"  — total input tokens billed (includes thinking budget)
+          "output_tokens" — total output tokens billed
+
+        Callers should use input_tokens / output_tokens for cost tracking;
+        extended thinking is more expensive than standard calls because the
+        thinking tokens count toward output billing.
         """
         thinking_model = model or self._model
         response = self._client.messages.create(
@@ -336,9 +355,14 @@ class ClaudeClient:
                 thinking_text = block.thinking
             elif block.type == "text":
                 answer_text = block.text
-        return {"thinking": thinking_text, "answer": answer_text}
+        return {
+            "thinking": thinking_text,
+            "answer": answer_text,
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+        }
 
-    # ── Streaming extended thinking ──────────────────────────────────────────────
+    # ── Streaming extended thinking ────────────────────────────────────────────────────────
 
     def stream_extended_thinking_chat(
         self,
@@ -370,9 +394,9 @@ class ClaudeClient:
 
         Returns
         -------
-        dict with keys "thinking" and "answer", matching the shape returned
-        by extended_thinking_chat() so callers can switch implementations
-        without changing downstream code.
+        dict with keys "thinking", "answer", "input_tokens", "output_tokens",
+        matching the shape returned by extended_thinking_chat() so callers
+        can switch implementations without changing downstream code.
 
         Falls back to the blocking extended_thinking_chat() if the SDK
         raises while opening the stream — older Anthropic SDK versions or
@@ -384,6 +408,8 @@ class ClaudeClient:
         try:
             thinking_text = ""
             answer_text = ""
+            input_tokens = 0
+            output_tokens = 0
             with self._client.messages.stream(
                 model=thinking_model,
                 max_tokens=16000,
@@ -413,11 +439,30 @@ class ClaudeClient:
                             answer_text += chunk
                             if on_text_token is not None:
                                 on_text_token(chunk)
-            return {"thinking": thinking_text, "answer": answer_text}
+                # Capture billing usage once the stream has fully closed.
+                # get_final_usage() is safe to call here because the `with`
+                # block guarantees the stream is complete before we reach
+                # this line. We store 0 on any error so callers always get
+                # an integer, never None.
+                try:
+                    usage = stream.get_final_usage()
+                    if usage is not None:
+                        input_tokens = getattr(usage, "input_tokens", 0) or 0
+                        output_tokens = getattr(usage, "output_tokens", 0) or 0
+                except Exception:
+                    pass
+            return {
+                "thinking": thinking_text,
+                "answer": answer_text,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
         except Exception:
             # Streaming-thinking not supported on this model/SDK version —
             # fall back to the blocking variant so the caller still gets a
             # well-formed result (without per-chunk callbacks).
+            # The blocking variant now also returns input_tokens/output_tokens
+            # so the returned shape is identical.
             return self.extended_thinking_chat(
                 system=system,
                 user_message=user_message,
