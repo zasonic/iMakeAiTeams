@@ -29,18 +29,12 @@ export interface EventStreamOptions {
   onError?: (err: Event, info: { closed: boolean }) => void;
 }
 
-let currentSource: EventSource | null = null;
-
 export function subscribeEvents(
   info: SidecarInfo,
   opts: EventStreamOptions,
 ): EventSubscription {
-  // Tear down any previous stream — only one is supported at a time.
-  closeEventStream();
-
   const url = `http://127.0.0.1:${info.port}/api/events`;
   const source = new EventSource(url);
-  currentSource = source;
 
   source.onopen = () => opts.onOpen?.();
   source.onerror = (err) => {
@@ -64,16 +58,6 @@ export function subscribeEvents(
   }
 
   return {
-    close: () => {
-      if (currentSource === source) currentSource = null;
-      source.close();
-    },
+    close: () => source.close(),
   };
-}
-
-export function closeEventStream(): void {
-  if (currentSource) {
-    currentSource.close();
-    currentSource = null;
-  }
 }

@@ -27,16 +27,18 @@ win:
   icon: branding/icon.png
   artifactName: "${productName}-Setup-${version}.${ext}"
   # publisherName must match the CN of the signing certificate exactly.
-  # electron-updater verifies the downloaded installer's publisher
-  # against this value; without it, an MITM with a valid-but-unrelated
-  # cert can serve a swap. Update if the signing cert changes.
-  publisherName:
-    - iMakeAiTeams
+  # electron-updater verifies the downloaded installer's publisher against
+  # this value, so it MUST be set only when a real code-signing certificate
+  # is wired in (win.certificateFile / certificateSubjectName / CSC_LINK).
+  # Otherwise auto-update will reject every release as publisher-mismatched.
+  # Re-add once a cert is in place.
+  # publisherName:
+  #   - iMakeAiTeams
 
 nsis:
   oneClick: false
   perMachine: false
-  allowElevation: true
+  allowElevation: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true

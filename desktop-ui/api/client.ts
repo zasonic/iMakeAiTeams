@@ -277,7 +277,8 @@ export const System = {
 };
 
 export const Lifecycle = {
-  audit: (limit = 100) => api.get<unknown[]>("/api/lifecycle/audit", { limit }),
+  audit: (limit = 100) =>
+    api.get<{ events: unknown[]; path: string }>("/api/lifecycle/audit", { limit }),
   confirm: (token: string) => api.post<unknown>("/api/lifecycle/confirm", { token }),
   deny: (token: string) => api.post<unknown>("/api/lifecycle/deny", { token }),
 };

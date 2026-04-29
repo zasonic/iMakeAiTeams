@@ -31,7 +31,7 @@ async def deny(body: TokenIn, request: Request) -> dict:
 
 
 @router.get("/audit")
-async def audit(request: Request, limit: int = 100) -> list:
+async def audit(request: Request, limit: int = 100) -> dict:
     return get_api(request).list_lifecycle_audit(limit)
 
 

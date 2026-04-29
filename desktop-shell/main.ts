@@ -61,8 +61,15 @@ function wireSidecarAuthHeader(targetSession: Electron.Session): void {
     { urls: ["http://127.0.0.1:*/*"] },
     (details, callback) => {
       const info = sidecar?.getInfo();
-      if (info && new URL(details.url).port === String(info.port)) {
-        details.requestHeaders["Authorization"] = `Bearer ${info.token}`;
+      if (info) {
+        try {
+          if (new URL(details.url).port === String(info.port)) {
+            details.requestHeaders["Authorization"] = `Bearer ${info.token}`;
+          }
+        } catch {
+          // Malformed URL — pass through without injecting auth rather than
+          // crashing the request listener.
+        }
       }
       callback({ requestHeaders: details.requestHeaders });
     },

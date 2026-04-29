@@ -11,8 +11,8 @@
     "build": "electron-vite build",
     "build:sidecar": "node build-scripts/build-sidecar.cjs",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "dist": "npm run build && electron-builder --win",
-    "dist:test": "npm run build && electron-builder --win --dir"
+    "dist": "npm run build:sidecar && npm run build && electron-builder --win",
+    "dist:test": "npm run build:sidecar && npm run build && electron-builder --win --dir"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",

@@ -29,6 +29,7 @@ class ChatAPI(BaseAPI):
             return ev
 
     @rate_limit_chat
+    @_requires("chat_orchestrator")
     def chat_send(self, conversation_id: str, user_message: str,
                   agent_id: str = "") -> None:
         """

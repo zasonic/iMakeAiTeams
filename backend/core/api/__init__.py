@@ -710,8 +710,8 @@ class API:
     def chat_send(self, conversation_id, user_message, agent_id=""):
         return self._chat_api.chat_send(conversation_id, user_message, agent_id)
 
-    def chat_stop(self):
-        return self._chat_api.chat_stop()
+    def chat_stop(self, conversation_id: str = ""):
+        return self._chat_api.chat_stop(conversation_id)
 
     def chat_new_conversation(self, agent_id="", title="New conversation"):
         return self._chat_api.chat_new_conversation(agent_id, title)
