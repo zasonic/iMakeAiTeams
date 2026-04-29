@@ -2,7 +2,9 @@
 //
 // Responsibilities:
 //   1. Spawn the Python sidecar (dev: backend/.venv/Scripts/python.exe →
-//      system python; prod: resources/backend/server.exe)
+//      system python; prod: <process.resourcesPath>/backend/server.exe —
+//      the "resources" segment is Electron's own packaged-app convention,
+//      unrelated to this repo's source layout)
 //   2. Pass `--token <uuid>` and `--user-data <path>` so the sidecar binds
 //      a free port, prints PORT=<n>, then prints READY when serving.
 //   3. Read stdout line-by-line until PORT= appears (15s timeout), then
@@ -205,7 +207,9 @@ export class SidecarManager extends EventEmitter {
   private resolveSpawnArgs(): { command: string; args: string[] } {
     const args = ["--token", this.token, "--user-data", this.userDataDir];
     if (app.isPackaged) {
-      // resources/backend/server.exe (PyInstaller onedir)
+      // <process.resourcesPath>/backend/server.exe (PyInstaller onedir).
+      // process.resourcesPath is Electron's runtime path inside the packaged
+      // app — distinct from the repo's source `branding/` folder.
       const exe =
         process.platform === "win32"
           ? "server.exe"
