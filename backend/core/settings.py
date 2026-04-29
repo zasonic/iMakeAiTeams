@@ -26,6 +26,13 @@ SECRET_KEYS: set[str] = {"claude_api_key", "power_mode_api_key"}
 KEYRING_SERVICE = "iMakeAiTeams"
 
 
+def _keyring_sentinel(key: str) -> str:
+    """Return the marker key recorded in settings.json once `key` has been
+    successfully written to the OS keyring. Lets `get()` distinguish
+    "never set" from "set but keyring is broken right now"."""
+    return f"{key}_in_keyring"
+
+
 def _keyring_get(key: str) -> str | None:
     # Broad BaseException catch is intentional: some backends (e.g. pyo3-based
     # SecretService on a host missing its native deps) raise PanicException,
@@ -152,7 +159,6 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
 
     # Misc
     "default_agent_id":            ((str, type(None)),  None),
-    "app_version":                 (str,   "5.0.2"),
 }
 
 
@@ -207,6 +213,10 @@ class Settings:
         self._path = path
         self._lock = threading.Lock()
         self._data: dict = {}
+        # Keys we've already warned about (per-process) when the OS keyring
+        # is broken but a sentinel says the secret should be readable. Bounds
+        # the noise to one notification per key per session.
+        self._keyring_broken_notified: set[str] = set()
         self._load()
         self._migrate()
         self._migrate_secrets_to_keyring()
@@ -235,23 +245,24 @@ class Settings:
         values to the expected type. Saves the file if any changes were made.
         Runs once at startup so all callers can rely on the full key set.
         """
-        changed = False
-        for key, (expected_type, default_value) in SETTINGS_DEFAULTS.items():
-            if key not in self._data:
-                self._data[key] = default_value
-                changed = True
-                log.debug("settings: migrated missing key '%s' = %r", key, default_value)
-            else:
-                coerced = _coerce(key, self._data[key], expected_type)
-                if coerced != self._data[key]:
-                    self._data[key] = coerced
+        with self._lock:
+            changed = False
+            for key, (expected_type, default_value) in SETTINGS_DEFAULTS.items():
+                if key not in self._data:
+                    self._data[key] = default_value
                     changed = True
+                    log.debug("settings: migrated missing key '%s' = %r", key, default_value)
+                else:
+                    coerced = _coerce(key, self._data[key], expected_type)
+                    if coerced != self._data[key]:
+                        self._data[key] = coerced
+                        changed = True
 
-        if changed:
-            try:
-                self._save()
-            except OSError as exc:
-                log.warning("settings: could not save migrated settings: %s", exc)
+            if changed:
+                try:
+                    self._save()
+                except OSError as exc:
+                    log.warning("settings: could not save migrated settings: %s", exc)
 
     def _migrate_secrets_to_keyring(self) -> None:
         """
@@ -259,20 +270,48 @@ class Settings:
         OS keyring and clear the JSON copy. Runs on every load; no-op once the
         JSON value is blank.
         """
-        changed = False
-        for key in SECRET_KEYS:
-            plain = self._data.get(key)
-            if not plain:
-                continue
-            if _keyring_set(key, plain):
-                self._data[key] = ""
-                changed = True
-                log.info("settings: migrated secret '%s' into OS keyring", key)
-        if changed:
-            try:
-                self._save()
-            except OSError as exc:
-                log.warning("settings: could not save after secret migration: %s", exc)
+        with self._lock:
+            changed = False
+            for key in SECRET_KEYS:
+                plain = self._data.get(key)
+                if not plain:
+                    continue
+                if _keyring_set(key, plain):
+                    self._data[key] = ""
+                    self._data[_keyring_sentinel(key)] = True
+                    changed = True
+                    log.info("settings: migrated secret '%s' into OS keyring", key)
+            if changed:
+                try:
+                    self._save()
+                except OSError as exc:
+                    log.warning("settings: could not save after secret migration: %s", exc)
+
+    def _notify_keyring_broken(self, key: str) -> None:
+        """
+        Fire a one-shot SSE event when a SECRET_KEY is recorded as keyring-stored
+        but the keyring read failed. Lets the UI surface a "re-enter your API key"
+        prompt instead of silently treating the secret as missing.
+
+        Throttled: only one publish per (key, process lifetime). Subsequent
+        successful set() calls clear the gate.
+        """
+        if key in self._keyring_broken_notified:
+            return
+        self._keyring_broken_notified.add(key)
+        try:
+            from sse_events import publish
+            publish("service_unavailable", {
+                "service": "keyring",
+                "key": key,
+                "message": (
+                    "Your saved credential for "
+                    f"'{key}' couldn't be read from the OS keyring. "
+                    "Re-enter it in Settings to continue."
+                ),
+            })
+        except Exception as exc:  # pragma: no cover — log-only fallback
+            log.debug("could not publish keyring-broken event for %s: %s", key, exc)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -283,6 +322,13 @@ class Settings:
                 return stored
             # Fall through to plaintext lookup — either keyring is unavailable
             # (headless Linux without dbus, tests) or the secret was never set.
+            # If a sentinel says the key WAS successfully written to the keyring
+            # earlier, surface a notification so the user can re-enter it
+            # rather than seeing a confusing "API key missing" elsewhere.
+            with self._lock:
+                sentinel_set = bool(self._data.get(_keyring_sentinel(key)))
+            if sentinel_set:
+                self._notify_keyring_broken(key)
         with self._lock:
             if key in self._data:
                 return self._data[key]
@@ -312,13 +358,21 @@ class Settings:
                     with self._lock:
                         # Don't persist secrets to disk when keyring succeeds.
                         self._data[key] = ""
+                        self._data[_keyring_sentinel(key)] = True
                         self._save()
+                    # User just re-entered the secret, so reopen the gate
+                    # for keyring-broken notifications next time it fails.
+                    self._keyring_broken_notified.discard(key)
                     return
                 # keyring unavailable — fall through to plaintext write so the
                 # app still works (with the same security properties as before
                 # this change).
             else:
                 _keyring_delete(key)
+                with self._lock:
+                    # Clear sentinel so a future empty-keyring read isn't
+                    # mistaken for a "broken keyring" state.
+                    self._data.pop(_keyring_sentinel(key), None)
 
         with self._lock:
             self._data[key] = value

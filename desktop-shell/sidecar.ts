@@ -119,7 +119,14 @@ export class SidecarManager extends EventEmitter {
 
       this.child = spawn(command, args, {
         cwd: this.sidecarCwd(),
-        env: { ...process.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" },
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: "1",
+          PYTHONIOENCODING: "utf-8",
+          // Surface the app version to the sidecar (used by diagnostics
+          // exports) instead of hardcoding it on the Python side.
+          APP_VERSION: app.getVersion(),
+        },
         windowsHide: true,
       });
 

@@ -571,7 +571,10 @@ class API:
                     env_info = {
                         "python_version": sys.version,
                         "platform": platform.platform(),
-                        "app_version": "iMakeAiTeams v5.0.2",
+                        # Electron passes APP_VERSION when spawning the sidecar
+                        # in a packaged build. Fall back to "unknown" in dev /
+                        # standalone runs where it isn't set.
+                        "app_version": os.environ.get("APP_VERSION", "unknown"),
                     }
                     try:
                         pip_out = subprocess.run(
