@@ -19,9 +19,16 @@ export function StatusBar() {
 
   useEffect(() => {
     let alive = true;
-    window.electronAPI.getAppVersion().then((v) => {
-      if (alive) setVersion(v);
-    });
+    window.electronAPI
+      .getAppVersion()
+      .then((v) => {
+        if (alive) setVersion(v);
+      })
+      .catch(() => {
+        // Preload bridge may not be ready yet (or, in tests, missing
+        // entirely). Leave the version blank rather than logging an
+        // unhandled rejection.
+      });
     return () => {
       alive = false;
     };

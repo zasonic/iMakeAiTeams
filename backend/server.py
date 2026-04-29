@@ -44,7 +44,6 @@ if str(_HERE) not in sys.path:
 import sse_events  # noqa: E402
 from core import paths  # noqa: E402
 from core.events import EventBus  # noqa: E402
-from core.first_run import needs_first_run  # noqa: E402
 from core.settings import Settings  # noqa: E402
 from core.api import API  # noqa: E402
 import db as _db_module  # noqa: E402
@@ -78,6 +77,15 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         auth = request.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             supplied = auth[7:].strip()
+
+        # Fallback for EventSource (which can't set custom headers): allow
+        # ``?token=…`` on /api/events so opening the stream from a context
+        # without the Electron webRequest hook (e.g. devtools, a curl probe)
+        # still authenticates. The token is the same per-process secret —
+        # only loopback callers can read it from the parent process — so
+        # this neither widens the trust surface nor leaks across origins.
+        if not supplied and path == "/api/events":
+            supplied = request.query_params.get("token", "").strip()
 
         if not supplied or not secrets.compare_digest(supplied, self._expected):
             return JSONResponse(

@@ -224,8 +224,29 @@ export const Rag = {
     api.post<unknown[]>("/api/rag/search_hybrid", { query, top_k, method, doc_type }),
 };
 
+export interface McpServerSummary {
+  server_id: string;
+  name: string;
+  version?: string;
+  tool_count: number;
+  enabled: boolean;
+  env_keys: string[];
+  env_set?: Record<string, boolean>;
+  tools?: Array<{
+    name: string;
+    description?: string;
+    skill_tags?: string[];
+    scopes?: string[];
+  }>;
+}
+
+export interface McpListResponse {
+  servers: McpServerSummary[];
+  root: string;
+}
+
 export const Mcp = {
-  list: () => api.get<unknown>("/api/mcp/servers"),
+  list: () => api.get<McpListResponse>("/api/mcp/servers"),
   install: (folder_path: string, overwrite = false) =>
     api.post<unknown>("/api/mcp/install", { folder_path, overwrite }),
   remove: (server_id: string) =>

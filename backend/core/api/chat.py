@@ -48,7 +48,6 @@ class ChatAPI(BaseAPI):
             self._emit("chat_token", {"token": token, "conversation_id": conversation_id})
 
         def _work():
-            completed = False
             try:
                 try:
                     self._emit("chat_event", StreamEvent(
@@ -92,10 +91,8 @@ class ChatAPI(BaseAPI):
                     on_event=_on_event,
                 )
                 self._emit("chat_done", {**result.to_dict(), "conversation_id": conversation_id})
-                completed = True
             except InterruptedError:
                 self._emit("chat_stopped", {"conversation_id": conversation_id})
-                completed = True
             except Exception as e:
                 self._log.error(f"chat_send error: {e}", exc_info=True)
                 err_msg = str(e).lower()
@@ -112,13 +109,6 @@ class ChatAPI(BaseAPI):
                 else:
                     friendly = f"Something went wrong: {type(e).__name__}. Check the error log in Settings for details."
                 self._emit("chat_error", {"error": friendly, "conversation_id": conversation_id})
-                completed = True
-            finally:
-                if not completed:
-                    self._emit("chat_error", {
-                        "error": "Unexpected error — please try again.",
-                        "conversation_id": conversation_id,
-                    })
 
         run_in_thread(_work)
 

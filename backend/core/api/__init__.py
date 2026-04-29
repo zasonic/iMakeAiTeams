@@ -657,6 +657,10 @@ class API:
         """
         def _parts(v: str) -> tuple[int, ...]:
             head = v.strip()
+            # Tolerate a leading "v" / "V" — common in CHANGELOG headings
+            # ("## v1.3.0") and in tags imported from other tools.
+            if head[:1] in ("v", "V"):
+                head = head[1:]
             # Cut at the first character that breaks the digit-or-dot
             # invariant — typical separators are '-', '+', or whitespace.
             for i, ch in enumerate(head):

@@ -96,11 +96,15 @@ export function SettingsPanel() {
   const togglePowerMode = async (enabled: boolean) => {
     await save("power_mode_enabled", enabled);
     if (!enabled) {
-      // Stopping the container is safe even if it isn't running.
-      try {
-        await Docker.stop();
-      } catch {
-        /* surfaced via SSE */
+      // Only ask the daemon to stop the container if it's actually running;
+      // otherwise the round-trip (and any error toast it surfaces via SSE)
+      // is just noise on machines without Docker installed.
+      if (dockerStatus?.openclaw_running) {
+        try {
+          await Docker.stop();
+        } catch {
+          /* surfaced via SSE */
+        }
       }
       await refreshDocker();
       return;

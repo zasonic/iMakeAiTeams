@@ -1,22 +1,7 @@
 import { useEffect, useState } from "react";
 
-import { Mcp } from "@/api/client";
+import { Mcp, type McpListResponse } from "@/api/client";
 import { useAppStore } from "@/stores/appStore";
-
-interface McpServer {
-  server_id: string;
-  name: string;
-  version?: string;
-  tool_count: number;
-  enabled: boolean;
-  env_keys: string[];
-  env_set?: Record<string, boolean>;
-}
-
-interface McpListResponse {
-  servers: McpServer[];
-  root: string;
-}
 
 export function McpPanel() {
   const ready = useAppStore((s) => s.sidecarStatus?.status === "ready");
@@ -25,7 +10,7 @@ export function McpPanel() {
 
   const refresh = async () => {
     try {
-      const rsp = (await Mcp.list()) as McpListResponse;
+      const rsp = await Mcp.list();
       setData(rsp);
     } catch (err) {
       pushToast({
