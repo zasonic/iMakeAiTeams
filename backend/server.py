@@ -41,7 +41,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-import events_sse  # noqa: E402
+import sse_events  # noqa: E402
 from core import paths  # noqa: E402
 from core.events import EventBus  # noqa: E402
 from core.first_run import needs_first_run  # noqa: E402
@@ -142,12 +142,12 @@ class _AppContainer:
                 settings=self.settings,
                 user_data_dir=paths.user_dir(),
                 templates_dir=templates_dir,
-                emit=events_sse.publish,
+                emit=sse_events.publish,
             )
             self.execution_bridge = ExecutionBridge(
                 docker_manager=self.docker,
                 settings=self.settings,
-                emit=events_sse.publish,
+                emit=sse_events.publish,
             )
             self.execution_classifier = ExecutionClassifier(
                 claude_client=getattr(self.api, "_claude", None),
@@ -230,7 +230,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
 
     @app.on_event("startup")
     async def _startup() -> None:
-        events_sse.attach_loop(asyncio.get_running_loop())
+        sse_events.attach_loop(asyncio.get_running_loop())
 
     # Register routers
     from routes import (

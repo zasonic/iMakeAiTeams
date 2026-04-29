@@ -10,7 +10,7 @@ token (see `../desktop-shell/sidecar.ts`).
 |---|---|
 | `server.py` | FastAPI app + lifespan + auth middleware |
 | `db.py`, `models.py` | SQLite schema and ORM-ish helpers |
-| `events_sse.py` | Server-Sent Events fan-out |
+| `sse_events.py` | Server-Sent Events fan-out |
 | `core/` | Paths, settings, first-run, event bus, worker thread |
 | `core/paths.py` | Single source of truth for user-data locations |
 | `routes/` | HTTP endpoints (one file per concern: chat, agents, rag, ...) |

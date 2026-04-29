@@ -54,7 +54,7 @@ hiddenimports = (
         "keyring.backends.fail",
         # legacy event-bus + smoke harness (referenced via dynamic import)
         "smoke_harness",
-        "events_sse",
+        "sse_events",
         "db",
         "models",
     ]

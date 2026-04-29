@@ -1,7 +1,7 @@
 """Chat routes — wrap core/api/chat.ChatAPI.
 
 Streaming behavior: chat_send fires a thread that emits chat_token /
-chat_event / chat_done events through events_sse. The renderer's EventSource
+chat_event / chat_done events through sse_events. The renderer's EventSource
 on /api/events drains those — there's no per-request SSE here, just a JSON
 ack that the work was kicked off.
 """

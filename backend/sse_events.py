@@ -1,5 +1,5 @@
 """
-events_sse.py — Process-wide event pump that bridges legacy `_emit(event, payload)`
+sse_events.py — Process-wide event pump that bridges legacy `_emit(event, payload)`
 calls (originally PyWebView's `window.__emit`) to a Server-Sent Events stream.
 
 The sidecar runs FastAPI/uvicorn; routes that fan out work to threads (chat
@@ -29,7 +29,7 @@ from collections import deque
 from threading import Lock
 from typing import Any, Deque
 
-log = logging.getLogger("events_sse")
+log = logging.getLogger("sse_events")
 
 # Cap on backlog when no consumer is attached. ~30 minutes of chat tokens at a
 # reasonable token/sec rate fits well below this; anything older is junk.
