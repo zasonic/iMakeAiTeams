@@ -159,7 +159,9 @@ export function SettingsPanel() {
   };
 
   const pickWorkspace = async () => {
-    const folder = await window.electronAPI.selectWorkspaceFolder();
+    const folder = await window.electronAPI.selectWorkspaceFolder(
+      config?.power_mode_workspace || undefined,
+    );
     if (folder) {
       await save("power_mode_workspace", folder);
       await refreshDocker();
@@ -207,6 +209,10 @@ export function SettingsPanel() {
             {verifying ? "Verifying…" : "Verify & save"}
           </button>
         </div>
+        <p className="text-xs text-ink-faint mt-2">
+          Verifying sends a 5-token Haiku probe to Anthropic (about $0.0001)
+          to confirm the key actually works before saving it.
+        </p>
       </section>
 
       <section className="card">

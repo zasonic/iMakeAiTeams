@@ -42,6 +42,7 @@ export function App() {
   const setPowerModeMessage = useAppStore((s) => s.setPowerModeMessage);
   const setPowerModeError = useAppStore((s) => s.setPowerModeError);
   const endPowerModeRun = useAppStore((s) => s.endPowerModeRun);
+  const setPowerModeEnabled = useAppStore((s) => s.setPowerModeEnabled);
 
   // ── Sidecar status subscription ────────────────────────────────────────
   useEffect(() => {
@@ -253,15 +254,25 @@ export function App() {
     setSidecarStatus,
   ]);
 
-  // ── First-run check ────────────────────────────────────────────────────
+  // ── Initial settings hydration ─────────────────────────────────────────
+  // Single fetch, single source of truth. ChatView and StatusBar used to
+  // each call Settings.get() on mount which triple-fetched the same payload
+  // and produced races; they now subscribe to the store fields populated
+  // here.
   useEffect(() => {
     if (sidecarStatus?.status !== "ready") return;
+    let alive = true;
     Settings.get()
       .then((s) => {
+        if (!alive) return;
         setHasCompletedFirstRun(!!s.first_run_complete);
+        setPowerModeEnabled(!!s.power_mode_enabled);
       })
       .catch(() => {});
-  }, [sidecarStatus, setHasCompletedFirstRun]);
+    return () => {
+      alive = false;
+    };
+  }, [sidecarStatus, setHasCompletedFirstRun, setPowerModeEnabled]);
 
   return (
     <div className="flex flex-col h-screen">

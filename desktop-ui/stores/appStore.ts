@@ -182,11 +182,16 @@ export const useAppStore = create<AppState>()(
           // Cap the streaming buffer so a long response doesn't pin the
           // whole transcript in memory and quadratic-copy it on every
           // token. The renderer only displays a window of recent text;
-          // once we cross MAX, drop the head and keep the tail.
+          // once we cross MAX, drop the head and keep the tail. The
+          // marker tells the user that earlier content was elided so
+          // they don't think the response was truncated by the model.
           const MAX = 1_000_000; // ~1 MiB of streamed text
           const KEEP = 500_000;
+          const TRUNCATION_MARKER = "[…earlier content omitted…]\n";
           const next = state.activeChat.buffer + token;
-          const trimmed = next.length > MAX ? next.slice(next.length - KEEP) : next;
+          const trimmed = next.length > MAX
+            ? TRUNCATION_MARKER + next.slice(next.length - KEEP)
+            : next;
           return {
             activeChat: { ...state.activeChat, buffer: trimmed },
           };
@@ -207,21 +212,39 @@ export const useAppStore = create<AppState>()(
       setPowerModeEnabled: (on) => set({ powerModeEnabled: on }),
       setDockerStatus: (s) => set({ dockerStatus: s }),
       startPowerModeRun: (taskId, conversationId) =>
-        set((state) => ({
-          powerModeRuns: {
-            ...state.powerModeRuns,
-            [taskId]: {
-              taskId,
-              conversationId,
-              startedAt: Date.now(),
-              steps: [],
-              approvals: [],
-              resultText: "",
-              error: "",
-              done: false,
+        set((state) => {
+          // Cap the in-memory run history so a long-lived session can't
+          // accumulate runs forever. Evict the OLDEST `done` runs first;
+          // never drop an in-progress run since the UI is still subscribed
+          // to its events.
+          const MAX_RUNS = 10;
+          let entries = Object.entries(state.powerModeRuns);
+          if (entries.length >= MAX_RUNS) {
+            const sortedDone = entries
+              .filter(([, r]) => r.done)
+              .sort((a, b) => a[1].startedAt - b[1].startedAt);
+            const toEvict = entries.length - MAX_RUNS + 1;
+            const evict = new Set(
+              sortedDone.slice(0, toEvict).map(([id]) => id),
+            );
+            entries = entries.filter(([id]) => !evict.has(id));
+          }
+          return {
+            powerModeRuns: {
+              ...Object.fromEntries(entries),
+              [taskId]: {
+                taskId,
+                conversationId,
+                startedAt: Date.now(),
+                steps: [],
+                approvals: [],
+                resultText: "",
+                error: "",
+                done: false,
+              },
             },
-          },
-        })),
+          };
+        }),
       upsertPowerModeStep: (taskId, step) =>
         set((state) => {
           const run = state.powerModeRuns[taskId];

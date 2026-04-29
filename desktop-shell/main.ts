@@ -31,6 +31,7 @@ let mainLogStream: WriteStream | null = null;
 let updaterTimer: NodeJS.Timeout | null = null;
 
 const MAIN_LOG_MAX_BYTES = 10 * 1024 * 1024; // 10MB
+const MAIN_LOG_GENERATIONS = 3;
 
 function logToFile(text: string): void {
   try {
@@ -45,6 +46,18 @@ function bootMainLog(userDataDir: string): void {
   const path = join(userDataDir, "main.log");
   try {
     if (existsSync(path) && statSync(path).size > MAIN_LOG_MAX_BYTES) {
+      // Cascade generations: .2 → .3, .1 → .2, current → .1.
+      for (let i = MAIN_LOG_GENERATIONS - 1; i >= 1; i--) {
+        const src = `${path}.${i}`;
+        const dst = `${path}.${i + 1}`;
+        if (existsSync(src)) {
+          try {
+            renameSync(src, dst);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
       try {
         renameSync(path, `${path}.1`);
       } catch {
@@ -154,6 +167,24 @@ function wireIpc(): void {
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
   });
+
+  ipcMain.handle(
+    "dialog:select-workspace-folder",
+    async (_e, current?: string) => {
+      // Distinct from select-folder: opens at the current Power Mode workspace
+      // if one is set (so users navigating from a deep child path don't have
+      // to retype it) and adds the createDirectory hint so Cmd+Shift+N works
+      // on macOS for first-time setup.
+      if (!mainWindow) return null;
+      const result = await dialog.showOpenDialog(mainWindow, {
+        title: "Select Power Mode workspace folder",
+        properties: ["openDirectory", "createDirectory"],
+        defaultPath: typeof current === "string" && current ? current : undefined,
+      });
+      if (result.canceled || result.filePaths.length === 0) return null;
+      return result.filePaths[0];
+    },
+  );
 
   ipcMain.handle("dialog:select-files", async (_e, filters?: { name: string; extensions: string[] }[]) => {
     if (!mainWindow) return [];
@@ -291,13 +322,13 @@ async function bootSidecar(userDataDir: string): Promise<void> {
   }
 }
 
-app.whenReady().then(async () => {
-  // Single-instance lock so multiple launches reuse the existing window.
-  const got = app.requestSingleInstanceLock();
-  if (!got) {
-    app.quit();
-    return;
-  }
+// Single-instance lock must run synchronously at module load. If a second
+// launch happens while the first is still inside `whenReady()` (slow boot,
+// installer-restart races), checking the lock from inside whenReady can leak
+// a duplicate process before the lock is taken.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
   app.on("second-instance", () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -305,21 +336,29 @@ app.whenReady().then(async () => {
     }
   });
 
-  // Strip the default menu in production; keep DevTools accessible in dev.
-  if (app.isPackaged) Menu.setApplicationMenu(null);
+  app.whenReady().then(async () => {
+    // Strip the default menu in production; keep DevTools accessible in dev.
+    if (app.isPackaged) Menu.setApplicationMenu(null);
 
-  const userDataDir = app.getPath("userData");
-  bootMainLog(userDataDir);
+    const userDataDir = app.getPath("userData");
+    bootMainLog(userDataDir);
 
-  wireIpc();
-  await createWindow();
-  await bootSidecar(userDataDir);
-  wireAutoUpdater();
+    wireIpc();
+    // Start the sidecar in parallel with window creation so the renderer
+    // doesn't have to wait for the Python boot before it gets pixels on
+    // screen. The renderer polls getSidecarInfo() / listens for status
+    // events to know when the backend is ready.
+    const sidecarPromise = bootSidecar(userDataDir);
+    await createWindow();
+    wireAutoUpdater();
+    // Surface any sidecar.start() error via the existing status events.
+    await sidecarPromise;
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
-});
+}
 
 app.on("window-all-closed", () => {
   // On macOS the app conventionally stays alive with no windows; the dock

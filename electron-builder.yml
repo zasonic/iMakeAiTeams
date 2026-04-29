@@ -44,8 +44,26 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: iMakeAiTeams
   uninstallDisplayName: iMakeAiTeams
+  # Intentionally false: a "Repair" reinstall or a version-bump upgrade
+  # MUST preserve conversations, settings, and the keyring sentinel.
+  # branding/installer.nsh surfaces the data locations to the user so
+  # they can clean up manually if they want a from-scratch removal.
   deleteAppDataOnUninstall: false
+  include: branding/installer.nsh
 
+# Auto-update dependency:
+#
+# electron-updater on every installed client polls
+# https://github.com/zasonic/imakeaiteams/releases (per the values below).
+# If this repo is renamed, transferred, or made private, deployed clients
+# silently lose auto-update — there is no runtime fallback for users on
+# pre-migration versions, so they would have to download manually.
+#
+# Rotation procedure:
+#   1. Cut a final release on the OLD repo with a banner notifying users.
+#   2. Update owner/repo here and ship the migration release on the OLD
+#      repo so clients see it BEFORE they switch.
+#   3. Subsequent releases go to the NEW repo.
 publish:
   - provider: github
     owner: zasonic

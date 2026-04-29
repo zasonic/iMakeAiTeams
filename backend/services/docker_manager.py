@@ -44,7 +44,11 @@ log = logging.getLogger("MyAIEnv.docker_manager")
 
 # ── Defaults & constants ─────────────────────────────────────────────────────
 
-DEFAULT_OPENCLAW_IMAGE = "coollabsio/openclaw:latest"
+# Pinned to a calendar-versioned tag instead of :latest so an upstream
+# rebuild can't quietly change Power Mode behavior across two installs of
+# the same iMakeAiTeams release. Bump intentionally — see Power Mode
+# release notes in CHANGELOG.md before changing.
+DEFAULT_OPENCLAW_IMAGE = "coollabsio/openclaw:2026.4.26"
 DEFAULT_GATEWAY_PORT = 18789
 CONTAINER_NAME = "imakeaiteams-openclaw"
 COMPOSE_FILENAME = "docker-compose.yml"

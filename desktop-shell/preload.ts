@@ -21,12 +21,13 @@ export interface ElectronAPI {
   /** Show a native folder picker; returns the chosen absolute path or null. */
   selectFolder: () => Promise<string | null>;
   /**
-   * Show a native folder picker for the Power Mode workspace folder. Returns
-   * the chosen absolute path or null if the user cancelled. Reuses the same
-   * Electron dialog handler as selectFolder() — the separate name lets the
-   * renderer make the intent obvious in Settings → Power Mode.
+   * Show a native folder picker for the Power Mode workspace folder.
+   * Distinct from selectFolder(): opens at `current` (if provided) so the
+   * dialog shows the existing workspace, adds the createDirectory hint
+   * for first-time setup, and labels the title for Power Mode context.
+   * Returns the chosen absolute path or null if the user cancelled.
    */
-  selectWorkspaceFolder: () => Promise<string | null>;
+  selectWorkspaceFolder: (current?: string) => Promise<string | null>;
   /** Show a native multi-file picker; returns absolute paths. */
   selectFiles: (filters?: { name: string; extensions: string[] }[]) => Promise<string[]>;
   /** Write `content` to a path chosen via a native save dialog. */
@@ -59,7 +60,8 @@ const api: ElectronAPI = {
   restartSidecar: () => ipcRenderer.invoke("sidecar:restart"),
 
   selectFolder: () => ipcRenderer.invoke("dialog:select-folder"),
-  selectWorkspaceFolder: () => ipcRenderer.invoke("dialog:select-folder"),
+  selectWorkspaceFolder: (current) =>
+    ipcRenderer.invoke("dialog:select-workspace-folder", current),
   selectFiles: (filters) => ipcRenderer.invoke("dialog:select-files", filters),
   saveFileDialog: (suggestedName, content) =>
     ipcRenderer.invoke("dialog:save-file", { suggestedName, content }),

@@ -27,6 +27,7 @@ import signal
 import socket
 import sys
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
@@ -112,20 +113,11 @@ class _AppContainer:
             # matches Electron's convention on Windows. The env var is exposed
             # so future changes can pick it up.
 
-        # Run the v5 → v6 migration before logging is configured (matches the
-        # invariant in the legacy main.py).
+        # Migrations may emit log records — main() configures the root logger
+        # before constructing this container so those records aren't dropped.
         paths.migrate_v5_user_dir()
         user_dir = paths.user_dir()
         paths.migrate_legacy_install(_HERE, user_dir)
-
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            handlers=[
-                logging.StreamHandler(sys.stdout),
-                logging.FileHandler(paths.log_path(), encoding="utf-8"),
-            ],
-        )
 
         self.settings = Settings(paths.settings_path())
         self.bus = EventBus()
@@ -211,10 +203,22 @@ class _AppContainer:
 def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContainer]:
     container = _AppContainer(user_data)
 
-    app = FastAPI(title="iMakeAiTeams Sidecar", version="1.0.0")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Bind the SSE event pump to the live loop. Replaces the deprecated
+        # @app.on_event("startup") hook (FastAPI ≥ 0.110 schedules it for
+        # removal). Shutdown side is empty — container.shutdown() runs from
+        # POST /shutdown via app.state.shutdown_event.
+        sse_events.attach_loop(asyncio.get_running_loop())
+        yield
 
-    # CORS: Electron's renderer runs on file:// or http://localhost in dev.
-    # Allow only localhost origins; the Bearer middleware is the real gate.
+    app = FastAPI(title="iMakeAiTeams Sidecar", version="1.0.0", lifespan=lifespan)
+
+    # Middleware ordering: Starlette runs LAST-registered FIRST. Register
+    # auth first so it ends up INNER (after CORS), letting CORS handle the
+    # OPTIONS preflight (which has no Authorization header) before auth would
+    # otherwise reject it with 401 + missing CORS headers.
+    app.add_middleware(BearerAuthMiddleware, expected_token=token)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -223,22 +227,19 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
             "http://localhost:5174",
             "http://127.0.0.1:5174",
             "app://-",            # electron-vite production
-            "file://",
+            # Note: browsers send `null` (literal string) for file:// origins,
+            # not "file://" — `app://-` already covers the packaged Electron
+            # case so we don't need either.
         ],
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
-    app.add_middleware(BearerAuthMiddleware, expected_token=token)
 
     # Stash the container on the app so route handlers can reach it via
     # request.app.state.container.
     app.state.container = container
     app.state.shutdown_event = asyncio.Event()
-
-    @app.on_event("startup")
-    async def _startup() -> None:
-        sse_events.attach_loop(asyncio.get_running_loop())
 
     # Register routers
     from routes import (
@@ -305,6 +306,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--user-data", default="", help="Override userData dir")
     args = parser.parse_args(argv)
 
+    # Configure the root logger BEFORE building the app container so log
+    # records emitted during migrations / settings load aren't silently
+    # dropped. Stdout-only — Electron pipes our stdout to {userData}/sidecar.log
+    # so a separate FileHandler would just duplicate every record.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
     user_data = Path(args.user_data) if args.user_data else None
 
     app, container = build_app(args.token, user_data)
@@ -366,12 +377,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # Graceful SIGTERM: uvicorn already handles SIGINT on POSIX, but on
     # Windows the parent uses taskkill /T which sends a CTRL_BREAK — install
-    # a no-op handler so the default abort path is replaced with our cleanup.
+    # a handler so the default abort path is replaced with our cleanup.
+    # Use sys.exit (raises SystemExit) instead of os._exit so atexit, finally
+    # blocks, and SQLite WAL checkpoint cleanup all get a chance to run.
     def _sig(_signum, _frame):
         try:
             container.shutdown()
         finally:
-            os._exit(0)
+            sys.exit(0)
 
     if hasattr(signal, "SIGTERM"):
         try:

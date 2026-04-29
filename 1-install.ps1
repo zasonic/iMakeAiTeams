@@ -23,7 +23,13 @@ Set-Location $ProjectRoot
 $NODE_MIN_MAJOR = 20
 $PYTHON_MIN = [Version]"3.12"
 
-$NODE_MSI_FALLBACK = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi"
+# Fallback installer URLs used when winget / Chocolatey / scoop aren't
+# available on the user's machine. Bump these on every release: stale pins
+# accumulate slowly because each released installer keeps shipping the
+# version that was current at build time. Verify the URL still 200s before
+# committing — nodejs.org and python.org occasionally garbage-collect old
+# minor releases.
+$NODE_MSI_FALLBACK   = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi"
 $PYTHON_EXE_FALLBACK = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe"
 
 # ── Pretty printing ──────────────────────────────────────────────────────────
@@ -254,7 +260,12 @@ try {
     }
 
     Write-Step "Upgrading pip + wheel inside the venv"
-    & $venvPython -m pip install --timeout=1000 --retries=20 --no-cache-dir --only-binary=":all:" --upgrade pip wheel setuptools
+    # Don't constrain build tools to wheels-only — if PyPI happens to publish
+    # an sdist-only patch release, --only-binary=:all: aborts the install
+    # before pip even gets the chance to use a cached wheel. The flag is
+    # still applied to USER deps below where compile-at-install really is
+    # what we're trying to prevent.
+    & $venvPython -m pip install --timeout=1000 --retries=20 --no-cache-dir --upgrade pip wheel setuptools
     if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed" }
 
     Write-Step "Installing sidecar dependencies"

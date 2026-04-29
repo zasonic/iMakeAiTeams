@@ -61,6 +61,20 @@ if not exist "branding\sidecar-bundle\server.exe" (
     pause
     exit /b 1
 )
+if not exist "branding\sidecar-bundle\_internal" (
+    echo [error] mirror finished but the _internal\ tree is missing
+    pause
+    exit /b 1
+)
+REM PyInstaller drops the Python runtime (python3*.dll) into _internal\.
+REM A partial xcopy is the most common failure mode of an antivirus mid-copy
+REM lock; without these binaries the bundled exe will fail to launch.
+dir /b "branding\sidecar-bundle\_internal\python*.dll" >nul 2>&1
+if errorlevel 1 (
+    echo [error] mirror finished but no python*.dll in _internal\
+    pause
+    exit /b 1
+)
 
 echo ==^> [3/5] electron-vite production build
 call npm run build
