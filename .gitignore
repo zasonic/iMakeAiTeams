@@ -5,10 +5,11 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-# The MyAIAgentHub_v5/build directory holds checked-in build sources
-# (PyInstaller spec, Inno Setup scripts, helper scripts). Don't ignore it.
-!MyAIAgentHub_v5/build/
-!MyAIAgentHub_v5/build/**
+# archive/legacy-v5/build/ holds checked-in build sources from the v5
+# snapshot (PyInstaller spec, Inno Setup scripts, helper scripts).
+# Don't ignore it.
+!archive/legacy-v5/build/
+!archive/legacy-v5/build/**
 
 # ── Electron + Vite scaffold ─────────────────────────────────────────────────
 node_modules/
