@@ -35,10 +35,22 @@ function Write-Err2($text)  { Write-Host "[error] $text" -ForegroundColor Red }
 
 function Refresh-Path {
     # Combine machine + user PATH so installs done in this session become
-    # visible without restarting the shell.
+    # visible without restarting the shell. Preserve any process-only
+    # additions made earlier in this session (some MSIs only touch the
+    # process env) by appending the current $env:Path last and de-duping.
     $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $user    = [Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path = ($machine, $user | Where-Object { $_ }) -join ";"
+    $current = $env:Path
+    $entries = @()
+    foreach ($src in @($machine, $user, $current)) {
+        if (-not $src) { continue }
+        foreach ($p in $src.Split(';')) {
+            if ($p -and -not ($entries -contains $p)) {
+                $entries += $p
+            }
+        }
+    }
+    $env:Path = ($entries -join ';')
 }
 
 function Test-Command($name) {
@@ -119,7 +131,11 @@ function Install-Node {
         throw "Could not download Node.js installer. Check your internet connection or install Node 20 LTS manually from https://nodejs.org and rerun 1-install.bat."
     }
     Write-Host "    running msiexec /i $msi /quiet /norestart"
-    $proc = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/i `"$msi`" /quiet /norestart"
+    # Pass the args as an array so msiexec sees /i, the MSI path, and the
+    # remaining flags as four distinct tokens. The single-string form leaves
+    # quoting up to PowerShell + cmd, which has historically broken when the
+    # MSI path contains spaces or parentheses.
+    $proc = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @("/i", "`"$msi`"", "/quiet", "/norestart")
     if ($proc.ExitCode -ne 0) {
         throw "Node MSI install failed with exit code $($proc.ExitCode). Run the MSI manually: $msi"
     }
@@ -134,7 +150,7 @@ function Get-PythonExe {
     foreach ($name in @("python", "python3", "py")) {
         if (Test-Command $name) {
             try {
-                $v = & $name -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null
+                $v = & $name -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>$null
                 if ($LASTEXITCODE -eq 0 -and $v) {
                     if ([Version]$v -ge $PYTHON_MIN) { return $name }
                 }
@@ -209,7 +225,7 @@ try {
             throw "Python 3.12+ is still missing. Restart your terminal and rerun 1-install.bat."
         }
     } else {
-        $pyv = & $py -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+        $pyv = & $py -c 'import sys; print(".".join(map(str, sys.version_info[:3])))'
         Write-Ok "Python $pyv detected ($py)"
     }
 
@@ -252,7 +268,7 @@ try {
 
     # ── Smoke test ───────────────────────────────────────────────────────────
     Write-Step "Verifying imports"
-    & $venvPython -c "import fastapi, uvicorn, anthropic, keyring, pydantic; print('imports ok')"
+    & $venvPython -c 'import fastapi, uvicorn, anthropic, keyring, pydantic; print("imports ok")'
     if ($LASTEXITCODE -ne 0) { throw "Sidecar imports failed inside the venv." }
 
     Write-Host ""

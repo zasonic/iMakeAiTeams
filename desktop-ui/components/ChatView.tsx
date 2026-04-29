@@ -53,6 +53,13 @@ export function ChatView() {
   const busy = sendPhase !== "idle";
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Synchronous lock so two near-simultaneous Enter presses can't both pass
+  // the `busy` guard before React re-renders with sendPhase="classifying".
+  const sendLockRef = useRef(false);
+  // Tracks whether the user is mid-IME composition. CJK input methods fire
+  // Enter to commit a composition, which would otherwise submit the form
+  // and lose the half-typed glyph.
+  const composingRef = useRef(false);
   const ready = status?.status === "ready";
 
   // Sync the Power Mode flag from the sidecar on first ready. After that the
@@ -106,11 +113,16 @@ export function ChatView() {
     };
   }, [ready, activeId]);
 
-  // Auto-scroll on new tokens / steps.
+  // Auto-scroll on new tokens / steps. Use "auto" (instant) while a stream
+  // is active so per-token scrolls don't queue smooth animations that stutter
+  // on long responses; use "smooth" for the rare list-level changes.
   useEffect(() => {
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior: "smooth",
+    const el = scrollRef.current;
+    if (!el) return;
+    const streaming = !!activeChat?.buffer;
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: streaming ? "auto" : "smooth",
     });
   }, [messages, activeChat?.buffer, powerModeRuns]);
 
@@ -130,6 +142,8 @@ export function ChatView() {
 
   const send = async () => {
     if (!activeId || !input.trim() || busy) return;
+    if (sendLockRef.current) return;
+    sendLockRef.current = true;
     const text = input;
     setInput("");
     setSendPhase("classifying");
@@ -181,7 +195,10 @@ export function ChatView() {
       }
     }
 
-    if (routedToExecution) return;
+    if (routedToExecution) {
+      sendLockRef.current = false;
+      return;
+    }
 
     setSendPhase("chat");
     startChatStream(activeId);
@@ -194,6 +211,8 @@ export function ChatView() {
       });
       setSendPhase("idle");
       endChatStream();
+    } finally {
+      sendLockRef.current = false;
     }
   };
 
@@ -210,7 +229,17 @@ export function ChatView() {
       .catch(() => {});
   }, [activeChat, sendPhase, activeId]);
 
-  // When the active Power Mode run finishes, drop busy.
+  // Watchdog: if the sidecar dies (or a chat_done event is lost) while we're
+  // in the chat phase, reset the Send button instead of leaving it stuck.
+  useEffect(() => {
+    if (sendPhase !== "chat") return;
+    if (ready) return;
+    setSendPhase("idle");
+    endChatStream();
+  }, [ready, sendPhase, endChatStream]);
+
+  // When the active Power Mode run finishes, drop busy and clear the task id
+  // so a new send doesn't think the old (already-done) task is still active.
   const activeRun = activeTaskId ? powerModeRuns[activeTaskId] : null;
   useEffect(() => {
     if (sendPhase !== "execution") return;
@@ -218,6 +247,7 @@ export function ChatView() {
     if (!activeRun) return;
     if (activeRun.done) {
       setSendPhase("idle");
+      setActiveTaskId("");
     }
   }, [activeRun, activeTaskId, sendPhase]);
 
@@ -346,11 +376,21 @@ export function ChatView() {
               }
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onCompositionStart={() => {
+                composingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                composingRef.current = false;
+              }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
+                if (e.key !== "Enter" || e.shiftKey) return;
+                // Don't submit while an IME composition is in flight (e.g.
+                // Japanese / Chinese / Korean input). isComposing covers both
+                // the keydown that commits a composition (which fires after
+                // compositionend on some browsers) and key 229 events.
+                if (composingRef.current || e.nativeEvent.isComposing) return;
+                e.preventDefault();
+                send();
               }}
               disabled={!ready || !activeId || busy}
             />
@@ -459,13 +499,16 @@ function ApprovalCard({
   const [, force] = useState(0);
   const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
   useEffect(() => {
-    // Stop ticking once the deadline has passed. With multiple stacked
-    // approvals the previous code kept N timers running forever, each
-    // forcing a re-render every second.
-    if (remaining === 0) return;
-    const id = window.setInterval(() => force((n) => n + 1), 1000);
+    // Run a single 1s timer per approval and stop ticking once the deadline
+    // has passed. The effect re-runs only when expiresAt changes, so we
+    // don't accumulate timers across re-renders.
+    if (Date.now() >= expiresAt) return;
+    const id = window.setInterval(() => {
+      force((n) => n + 1);
+      if (Date.now() >= expiresAt) window.clearInterval(id);
+    }, 1000);
     return () => window.clearInterval(id);
-  }, [remaining === 0]);
+  }, [expiresAt]);
   const tone = danger === "high"
     ? "border-err/50 bg-err/5"
     : danger === "low"

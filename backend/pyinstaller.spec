@@ -77,6 +77,8 @@ a = Analysis(
         # Heavy deps belonging to the legacy 'full' variant. The lite installer
         # explicitly excludes them; service_guard.@requires reports them as
         # unavailable at runtime.
+        # Note: PIL is intentionally NOT excluded — anthropic's SDK lazy-imports
+        # it when the user attaches an image to a message.
         "torch",
         "sentence_transformers",
         "chromadb",
@@ -84,7 +86,6 @@ a = Analysis(
         "tensorflow",
         "tkinter",
         "matplotlib",
-        "PIL",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

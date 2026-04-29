@@ -147,7 +147,18 @@ export class SidecarManager extends EventEmitter {
 
     this.explicitShutdown = true;
     const child = this.child;
-    if (!child) return;
+    if (!child) {
+      // Nothing spawned (or already exited). Reject any pending start
+      // promise so callers awaiting start() don't hang forever, then
+      // clear the cached promise so the next start() builds a fresh one.
+      if (this.rejectStart) {
+        this.rejectStart(new Error("Sidecar stop() called before start completed"));
+        this.rejectStart = null;
+        this.resolveStart = null;
+      }
+      this.startPromise = null;
+      return;
+    }
 
     this.stopPromise = (async () => {
       const info = this.getInfo();
@@ -163,6 +174,18 @@ export class SidecarManager extends EventEmitter {
           clearTimeout(timeout);
         } catch {
           /* sidecar already gone — no-op */
+        }
+      } else {
+        // start() spawned the child but PORT= never arrived (still in the
+        // PORT_LINE_TIMEOUT_MS window). /shutdown isn't reachable yet, so
+        // skip the polite path and SIGTERM directly. The grace timer below
+        // still escalates to SIGKILL if needed.
+        if (process.platform === "win32" && child.pid != null) {
+          spawn("taskkill", ["/pid", String(child.pid), "/f", "/t"], {
+            windowsHide: true,
+          });
+        } else {
+          child.kill("SIGTERM");
         }
       }
 
@@ -184,6 +207,15 @@ export class SidecarManager extends EventEmitter {
           resolve();
         });
       });
+
+      // Reject any in-flight start() so callers awaiting it don't hang now
+      // that the child is gone.
+      if (this.rejectStart) {
+        this.rejectStart(new Error("Sidecar stopped before becoming ready"));
+        this.rejectStart = null;
+        this.resolveStart = null;
+      }
+      this.startPromise = null;
     })().finally(() => {
       this.stopPromise = null;
     });

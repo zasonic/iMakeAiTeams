@@ -17,7 +17,13 @@ import { fileURLToPath } from "node:url";
 
 import { SidecarManager } from "./sidecar";
 
-const PROJECT_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+// Only meaningful in development — `resolveSpawnArgs` consults this to find
+// the source-tree venv. In a packaged build the path resolves to a location
+// inside the asar archive that doesn't exist on disk, so the SidecarManager
+// only reads it from its `else (app.isPackaged)` branch.
+const PROJECT_ROOT = app.isPackaged
+  ? app.getAppPath()
+  : fileURLToPath(new URL("../..", import.meta.url));
 
 let mainWindow: BrowserWindow | null = null;
 let sidecar: SidecarManager | null = null;
@@ -61,8 +67,15 @@ function wireSidecarAuthHeader(targetSession: Electron.Session): void {
     { urls: ["http://127.0.0.1:*/*"] },
     (details, callback) => {
       const info = sidecar?.getInfo();
-      if (info && new URL(details.url).port === String(info.port)) {
-        details.requestHeaders["Authorization"] = `Bearer ${info.token}`;
+      if (info) {
+        try {
+          if (new URL(details.url).port === String(info.port)) {
+            details.requestHeaders["Authorization"] = `Bearer ${info.token}`;
+          }
+        } catch {
+          // Malformed URL — pass through without injecting auth rather than
+          // crashing the request listener.
+        }
       }
       callback({ requestHeaders: details.requestHeaders });
     },
@@ -86,6 +99,10 @@ async function createWindow(): Promise<void> {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      // Block the F12 / Ctrl+Shift+I shortcut in packaged builds so a
+      // mis-click can't surface internals to end users. Devs running
+      // `npm run dev` keep DevTools.
+      devTools: !app.isPackaged,
     },
   });
 
@@ -170,7 +187,12 @@ function wireIpc(): void {
         return { ok: false, error: "invalid name" };
       }
       const SAVE_FILE_MAX_BYTES = 50 * 1024 * 1024; // 50 MiB
-      if (typeof content !== "string" || content.length > SAVE_FILE_MAX_BYTES) {
+      if (typeof content !== "string") {
+        return { ok: false, error: "content too large" };
+      }
+      // Cap on the encoded byte length, not String.length, so non-ASCII
+      // content can't sneak past the limit at ~2× its UTF-16 size.
+      if (Buffer.byteLength(content, "utf-8") > SAVE_FILE_MAX_BYTES) {
         return { ok: false, error: "content too large" };
       }
       const result = await dialog.showSaveDialog(mainWindow, {
@@ -210,6 +232,18 @@ function wireIpc(): void {
       detail: "Any unsaved work will be lost.",
     });
     if (choice.response !== 0) return { ok: false, cancelled: true };
+    // Stop the sidecar BEFORE quitAndInstall. NSIS on Windows can't replace
+    // files that are still open (e.g. server.exe), so an active sidecar
+    // turns the install into a "file in use" failure. before-quit will see
+    // sidecar=null and skip its own teardown.
+    if (sidecar) {
+      try {
+        await sidecar.stop();
+      } catch {
+        /* best-effort */
+      }
+      sidecar = null;
+    }
     autoUpdater.quitAndInstall(false, true);
     return { ok: true };
   });
@@ -309,6 +343,12 @@ app.on("before-quit", async (event) => {
     }
     sidecar = null;
     mainLogStream?.end();
+    mainLogStream = null;
     app.exit(0);
+    return;
   }
+  // Sidecar already torn down (e.g. via updater:install). Still flush
+  // the main log so the final lines from this session aren't truncated.
+  mainLogStream?.end();
+  mainLogStream = null;
 });

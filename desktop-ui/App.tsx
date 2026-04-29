@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 
 import { Settings, System, resetSidecarInfo } from "@/api/client";
-import { subscribeEvents, closeEventStream } from "@/api/sse";
+import { subscribeEvents } from "@/api/sse";
 import { AgentPanel } from "@/components/AgentPanel";
 import { ChatView } from "@/components/ChatView";
 import { DiagnosticsPanel } from "@/components/DiagnosticsPanel";
@@ -65,7 +65,6 @@ export function App() {
         }
         if (status.status === "crashed" || status.status === "stopped") {
           resetSidecarInfo(null);
-          closeEventStream();
         }
       });
     })();
@@ -73,7 +72,6 @@ export function App() {
     return () => {
       alive = false;
       unsub?.();
-      closeEventStream();
     };
   }, [setSidecarStatus]);
 
