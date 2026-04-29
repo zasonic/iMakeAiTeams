@@ -40,6 +40,34 @@ function logToFile(text: string): void {
   }
 }
 
+// Per-handler call timestamps (epoch ms) for the IPC sliding-window rate limiter.
+const _rateLimitWindows = new Map<string, number[]>();
+
+function rateLimit(
+  name: string,
+  maxPerSecond: number,
+  handler: (...args: unknown[]) => unknown,
+): (...args: unknown[]) => unknown {
+  return (...args: unknown[]) => {
+    const now = Date.now();
+    const windowStart = now - 1000;
+    let calls = _rateLimitWindows.get(name);
+    if (!calls) {
+      calls = [];
+      _rateLimitWindows.set(name, calls);
+    }
+    // Drop timestamps that have aged out of the 1s window.
+    while (calls.length > 0 && calls[0] < windowStart) calls.shift();
+    if (calls.length >= maxPerSecond) {
+      const message = `rate limit exceeded: ${name}`;
+      logToFile(`ipc rate limit: ${name} (${calls.length}/${maxPerSecond} in 1s)\n`);
+      throw new Error(message);
+    }
+    calls.push(now);
+    return handler(...args);
+  };
+}
+
 function bootMainLog(userDataDir: string): void {
   if (!existsSync(userDataDir)) mkdirSync(userDataDir, { recursive: true });
   const path = join(userDataDir, "main.log");
@@ -141,43 +169,52 @@ async function createWindow(): Promise<void> {
 
 function wireIpc(): void {
   ipcMain.handle("sidecar:get-info", () => sidecar?.getInfo() ?? null);
-  ipcMain.handle("sidecar:restart", async () => {
-    if (!sidecar) throw new Error("Sidecar manager not initialized");
-    return sidecar.restart();
-  });
+  ipcMain.handle(
+    "sidecar:restart",
+    rateLimit("sidecar:restart", 2, async () => {
+      if (!sidecar) throw new Error("Sidecar manager not initialized");
+      return sidecar.restart();
+    }),
+  );
 
-  ipcMain.handle("dialog:select-folder", async () => {
-    if (!mainWindow) return null;
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ["openDirectory"],
-    });
-    if (result.canceled || result.filePaths.length === 0) return null;
-    return result.filePaths[0];
-  });
+  ipcMain.handle(
+    "dialog:select-folder",
+    rateLimit("dialog:select-folder", 4, async () => {
+      if (!mainWindow) return null;
+      const result = await dialog.showOpenDialog(mainWindow, {
+        properties: ["openDirectory"],
+      });
+      if (result.canceled || result.filePaths.length === 0) return null;
+      return result.filePaths[0];
+    }),
+  );
 
-  ipcMain.handle("dialog:select-files", async (_e, filters?: { name: string; extensions: string[] }[]) => {
-    if (!mainWindow) return [];
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ["openFile", "multiSelections"],
-      filters: filters ?? [
-        {
-          name: "Documents",
-          extensions: [
-            "txt", "md", "pdf", "py", "js", "json", "csv", "html", "css",
-            "ts", "jsx", "tsx", "yaml", "yml", "toml", "xml", "sql", "sh",
-            "bat", "ps1", "rs", "go", "java", "c", "cpp", "h", "rb",
-          ],
-        },
-        { name: "All Files", extensions: ["*"] },
-      ],
-    });
-    if (result.canceled) return [];
-    return result.filePaths;
-  });
+  ipcMain.handle(
+    "dialog:select-files",
+    rateLimit("dialog:select-files", 4, (async (_e, filters?: { name: string; extensions: string[] }[]) => {
+      if (!mainWindow) return [];
+      const result = await dialog.showOpenDialog(mainWindow, {
+        properties: ["openFile", "multiSelections"],
+        filters: filters ?? [
+          {
+            name: "Documents",
+            extensions: [
+              "txt", "md", "pdf", "py", "js", "json", "csv", "html", "css",
+              "ts", "jsx", "tsx", "yaml", "yml", "toml", "xml", "sql", "sh",
+              "bat", "ps1", "rs", "go", "java", "c", "cpp", "h", "rb",
+            ],
+          },
+          { name: "All Files", extensions: ["*"] },
+        ],
+      });
+      if (result.canceled) return [];
+      return result.filePaths;
+    }) as (...args: unknown[]) => unknown),
+  );
 
   ipcMain.handle(
     "dialog:save-file",
-    async (_e, { suggestedName, content }: { suggestedName: string; content: string }) => {
+    rateLimit("dialog:save-file", 4, (async (_e, { suggestedName, content }: { suggestedName: string; content: string }) => {
       if (!mainWindow) return { ok: false, error: "no window" };
       // Strip any path components from the renderer-supplied name so a
       // compromised renderer can't pre-fill the dialog with /etc/passwd or
@@ -205,7 +242,7 @@ function wireIpc(): void {
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
-    },
+    }) as (...args: unknown[]) => unknown),
   );
 
   ipcMain.handle("shell:open-external", async (_e, url: string) => {
@@ -217,36 +254,39 @@ function wireIpc(): void {
   ipcMain.handle("app:version", () => app.getVersion());
   ipcMain.handle("app:user-data-path", () => app.getPath("userData"));
 
-  ipcMain.handle("updater:install", async () => {
-    // Always confirm with the user before restarting + reinstalling.
-    // Without this, a compromised renderer could call window.electronAPI
-    // and force-quit the app on demand.
-    if (!mainWindow) return { ok: false, error: "no window" };
-    const choice = await dialog.showMessageBox(mainWindow, {
-      type: "question",
-      buttons: ["Restart and install", "Later"],
-      defaultId: 0,
-      cancelId: 1,
-      title: "Install update",
-      message: "Restart iMakeAiTeams to install the downloaded update?",
-      detail: "Any unsaved work will be lost.",
-    });
-    if (choice.response !== 0) return { ok: false, cancelled: true };
-    // Stop the sidecar BEFORE quitAndInstall. NSIS on Windows can't replace
-    // files that are still open (e.g. server.exe), so an active sidecar
-    // turns the install into a "file in use" failure. before-quit will see
-    // sidecar=null and skip its own teardown.
-    if (sidecar) {
-      try {
-        await sidecar.stop();
-      } catch {
-        /* best-effort */
+  ipcMain.handle(
+    "updater:install",
+    rateLimit("updater:install", 1, async () => {
+      // Always confirm with the user before restarting + reinstalling.
+      // Without this, a compromised renderer could call window.electronAPI
+      // and force-quit the app on demand.
+      if (!mainWindow) return { ok: false, error: "no window" };
+      const choice = await dialog.showMessageBox(mainWindow, {
+        type: "question",
+        buttons: ["Restart and install", "Later"],
+        defaultId: 0,
+        cancelId: 1,
+        title: "Install update",
+        message: "Restart iMakeAiTeams to install the downloaded update?",
+        detail: "Any unsaved work will be lost.",
+      });
+      if (choice.response !== 0) return { ok: false, cancelled: true };
+      // Stop the sidecar BEFORE quitAndInstall. NSIS on Windows can't replace
+      // files that are still open (e.g. server.exe), so an active sidecar
+      // turns the install into a "file in use" failure. before-quit will see
+      // sidecar=null and skip its own teardown.
+      if (sidecar) {
+        try {
+          await sidecar.stop();
+        } catch {
+          /* best-effort */
+        }
+        sidecar = null;
       }
-      sidecar = null;
-    }
-    autoUpdater.quitAndInstall(false, true);
-    return { ok: true };
-  });
+      autoUpdater.quitAndInstall(false, true);
+      return { ok: true };
+    }),
+  );
 }
 
 function wireAutoUpdater(): void {

@@ -1,23 +1,30 @@
 """
 services/chat_orchestrator.py
 
-Unified chat orchestrator.
+Unified chat orchestrator. Drives the per-turn chat loop: persists user
+messages, recalls memory, decides routing, runs the security engine,
+dispatches to a worker via the HubRouter, persists the assistant reply,
+and returns a ChatResult.
 
-Fixes applied (Stage 1):
-  - stream_multi_turn returns (text, usage) — unpacked for token tracking
-  - History fetch capped at MAX_HISTORY_MESSAGES
-  - _estimate_cost uses model-aware price table
+Public surface:
+  - ChatOrchestrator(claude_client, local_client, router, memory,
+                     settings, hub_router=None)
+  - create_conversation / list_conversations / get_conversation_messages /
+    update_conversation_title / delete_conversation / branch_conversation /
+    export_conversation
+  - send(conversation_id, user_message, agent_id=None, on_token=None,
+         on_event=None) -> ChatResult
+  - get_token_stats(), get_router_stats()
 
-Stage 3 additions:
-  - Router feedback loop: each exchange appends a row to router_log with
-    the route taken and quality signals (had_error, response_empty).
-  - get_router_stats(): aggregates accuracy trends per complexity bucket.
-
-Stage 5 additions:
-  - Returns ChatResult dataclass instead of raw dict (Improvement 1)
-  - Token budget enforcement (Improvement 2)
-  - ToolPermissionContext plumbing for agents (Improvement 4)
-  - ExecutionTarget dispatch via _resolve_target() (Improvement 6)
+ChatResult carries the assistant text, the model and reasoning that
+produced it, token counts, USD cost, the persisted message_id, and any
+budget warning. Routing is delegated to HubRouter.route_for_agent /
+route_direct + HubRouter.invoke; this module never calls model clients
+directly. Per-turn input goes through the security_engine hooks
+(quarantine_chunks, render_quarantined_context, enforce_context_rules,
+RiskLedger) before any worker invocation, and a hard abort is raised
+through SecurityAssessment when the cumulative risk score exceeds the
+configured threshold.
 """
 
 import json

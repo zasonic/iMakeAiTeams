@@ -287,17 +287,39 @@ export const useAppStore = create<AppState>()(
             },
           };
         }),
-      endPowerModeRun: (taskId) =>
+      endPowerModeRun: (taskId) => {
         set((state) => {
           const run = state.powerModeRuns[taskId];
           if (!run) return state;
+          // Drop approvals that already expired so a finished run can't
+          // leave stale prompts in state for the renderer to show.
+          const now = Date.now();
+          const liveApprovals = run.approvals.filter(
+            (a) => a.expires_at >= now,
+          );
           return {
             powerModeRuns: {
               ...state.powerModeRuns,
-              [taskId]: { ...run, done: true },
+              [taskId]: { ...run, approvals: liveApprovals, done: true },
             },
           };
-        }),
+        });
+        // Sweep completed runs older than 2h. Without this, powerModeRuns
+        // grows unbounded across heavy sessions. Active runs are never
+        // touched — the filter only removes done:true rows past the cutoff.
+        const TTL_MS = 7_200_000;
+        setTimeout(() => {
+          set((state) => {
+            const cutoff = Date.now() - TTL_MS;
+            const next: Record<string, PowerModeRun> = {};
+            for (const [id, run] of Object.entries(state.powerModeRuns)) {
+              if (run.done && run.startedAt < cutoff) continue;
+              next[id] = run;
+            }
+            return { powerModeRuns: next };
+          });
+        }, TTL_MS);
+      },
     }),
     {
       name: "imakeaiteams-prefs",

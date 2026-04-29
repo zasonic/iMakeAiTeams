@@ -5,7 +5,11 @@
 // /api/docker/execute and stream OpenClaw step events via SSE. "Chat"-class
 // messages keep the v2 path intact.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  VariableSizeList,
+  type ListChildComponentProps,
+} from "react-window";
 
 import { Chat, Docker, Settings } from "@/api/client";
 import { ExecutionCard } from "@/components/ExecutionCard";
@@ -23,6 +27,18 @@ interface MessageRow {
   content: string;
   model_used?: string;
   cost_usd?: number;
+}
+
+type ChatItem =
+  | { kind: "message"; key: string; msg: MessageRow }
+  | { kind: "run"; key: string; run: PowerModeRun }
+  | { kind: "stream"; key: "stream"; buffer: string };
+
+interface ChatRowData {
+  items: ChatItem[];
+  setRowHeight: (index: number, height: number) => void;
+  approve: (taskId: string, approvalId: string, allow: boolean) => void;
+  cancelRun: (taskId: string) => void;
 }
 
 export function ChatView() {
@@ -52,7 +68,7 @@ export function ChatView() {
 
   const busy = sendPhase !== "idle";
 
-  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const responseRef = useRef<HTMLDivElement | null>(null);
   // Synchronous lock so two near-simultaneous Enter presses can't both pass
   // the `busy` guard before React re-renders with sendPhase="classifying".
   const sendLockRef = useRef(false);
@@ -113,18 +129,6 @@ export function ChatView() {
     };
   }, [ready, activeId]);
 
-  // Auto-scroll on new tokens / steps. Use "auto" (instant) while a stream
-  // is active so per-token scrolls don't queue smooth animations that stutter
-  // on long responses; use "smooth" for the rare list-level changes.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const streaming = !!activeChat?.buffer;
-    el.scrollTo({
-      top: el.scrollHeight,
-      behavior: streaming ? "auto" : "smooth",
-    });
-  }, [messages, activeChat?.buffer, powerModeRuns]);
 
   const newConversation = async () => {
     try {
@@ -223,6 +227,9 @@ export function ChatView() {
     if (sendPhase !== "chat") return;
     if (activeChat) return; // chat still streaming
     setSendPhase("idle");
+    // Move focus to the just-finished response so screen readers announce it
+    // and keyboard users can immediately scroll/copy it.
+    responseRef.current?.focus();
     if (!activeId) return;
     Chat.messages(activeId)
       .then((rows) => setMessages(rows as MessageRow[]))
@@ -292,6 +299,79 @@ export function ChatView() {
       .sort((a, b) => a.startedAt - b.startedAt);
   }, [powerModeRuns, activeId]);
 
+  // Unified item stream so the virtualized list can render messages, Power
+  // Mode runs, and the streaming preview as a single scrollable surface.
+  const items = useMemo<ChatItem[]>(() => {
+    const xs: ChatItem[] = messages.map((m) => ({
+      kind: "message",
+      key: m.id,
+      msg: m,
+    }));
+    for (const run of conversationRuns) {
+      xs.push({ kind: "run", key: `run-${run.taskId}`, run });
+    }
+    if (streamingBuffer) {
+      xs.push({ kind: "stream", key: "stream", buffer: streamingBuffer });
+    }
+    return xs;
+  }, [messages, conversationRuns, streamingBuffer]);
+
+  // Per-row measured heights so VariableSizeList can render only the rows
+  // that fit the viewport. Heights start as estimates and snap to the real
+  // value after each row mounts via ResizeObserver.
+  const sizeMapRef = useRef<Map<number, number>>(new Map());
+  const listRef = useRef<VariableSizeList<ChatRowData> | null>(null);
+  const ESTIMATED_ROW_HEIGHT = 96;
+  const getItemSize = useCallback(
+    (index: number) => sizeMapRef.current.get(index) ?? ESTIMATED_ROW_HEIGHT,
+    [],
+  );
+  const setRowHeight = useCallback((index: number, height: number) => {
+    if (sizeMapRef.current.get(index) === height) return;
+    sizeMapRef.current.set(index, height);
+    listRef.current?.resetAfterIndex(index);
+  }, []);
+
+  // Drop stale measurements when the active conversation changes — the same
+  // index slot now points at a different message that almost certainly has a
+  // different height.
+  useEffect(() => {
+    sizeMapRef.current.clear();
+    listRef.current?.resetAfterIndex(0);
+  }, [activeId]);
+
+  // Auto-scroll to the bottom whenever the item list grows or the streaming
+  // tail extends. Replaces the old scrollTo(scrollHeight) on the parent div.
+  useEffect(() => {
+    if (items.length === 0) return;
+    listRef.current?.scrollToItem(items.length - 1, "end");
+  }, [items.length, streamingBuffer]);
+
+  const cancelRun = useCallback((taskId: string) => {
+    Docker.cancel(taskId).catch(() => {});
+  }, []);
+
+  const rowData = useMemo<ChatRowData>(
+    () => ({ items, setRowHeight, approve, cancelRun }),
+    [items, setRowHeight, approve, cancelRun],
+  );
+
+  // Track the message-list area's pixel size so VariableSizeList can size
+  // itself. react-window doesn't ship an AutoSizer; this matches what
+  // react-virtualized-auto-sizer would provide without adding a dependency.
+  const messageAreaRef = useRef<HTMLDivElement | null>(null);
+  const [areaSize, setAreaSize] = useState({ width: 0, height: 0 });
+  useEffect(() => {
+    const el = messageAreaRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0]?.contentRect;
+      if (r) setAreaSize({ width: r.width, height: r.height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   return (
     <div className="flex h-full">
       <div className="w-64 border-r border-line bg-bg-1 flex flex-col">
@@ -326,40 +406,28 @@ export function ChatView() {
       </div>
 
       <div className="flex-1 flex flex-col min-w-0">
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
-          {messages.map((m) => (
-            <div
-              key={m.id}
-              className={`max-w-[80%] rounded-xl px-4 py-2 text-sm whitespace-pre-wrap ${
-                m.role === "user"
-                  ? "ml-auto bg-accent/15 text-ink border border-accent/20"
-                  : "bg-bg-2 text-ink border border-line"
-              }`}
+        <div
+          ref={(el) => {
+            messageAreaRef.current = el;
+            responseRef.current = el;
+          }}
+          tabIndex={-1}
+          className="flex-1 min-h-0 outline-none"
+        >
+          {areaSize.width > 0 && areaSize.height > 0 && (
+            <VariableSizeList<ChatRowData>
+              ref={listRef}
+              width={areaSize.width}
+              height={areaSize.height}
+              itemCount={items.length}
+              itemSize={getItemSize}
+              itemData={rowData}
+              itemKey={(index, data) => data.items[index]?.key ?? index}
+              estimatedItemSize={ESTIMATED_ROW_HEIGHT}
+              overscanCount={4}
             >
-              {m.content}
-              {m.model_used && (
-                <div className="text-[11px] text-ink-faint mt-2">
-                  {m.model_used}
-                  {typeof m.cost_usd === "number" && ` · $${m.cost_usd.toFixed(4)}`}
-                </div>
-              )}
-            </div>
-          ))}
-
-          {conversationRuns.map((run) => (
-            <PowerModeMessage
-              key={run.taskId}
-              run={run}
-              onApprove={(approvalId, allow) => approve(run.taskId, approvalId, allow)}
-              onCancel={() => Docker.cancel(run.taskId).catch(() => {})}
-            />
-          ))}
-
-          {streamingBuffer && (
-            <div className="max-w-[80%] rounded-xl px-4 py-2 text-sm whitespace-pre-wrap bg-bg-2 text-ink border border-line">
-              {streamingBuffer}
-              <span className="inline-block ml-1 h-3 w-1 bg-accent animate-pulse align-middle" />
-            </div>
+              {ChatListRow}
+            </VariableSizeList>
           )}
         </div>
 
@@ -409,6 +477,77 @@ export function ChatView() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Virtualized row renderer ────────────────────────────────────────────────
+
+function ChatListRow({ index, style, data }: ListChildComponentProps<ChatRowData>) {
+  const item = data.items[index];
+  const innerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const el = innerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0]?.contentRect;
+      if (r && r.height > 0) data.setRowHeight(index, r.height);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [index, data]);
+
+  if (!item) return null;
+
+  return (
+    <div style={style}>
+      <div ref={innerRef} className="px-6 py-1.5">
+        {item.kind === "message" && <MessageBubble msg={item.msg} />}
+        {item.kind === "run" && (
+          <PowerModeMessage
+            run={item.run}
+            onApprove={(approvalId, allow) =>
+              data.approve(item.run.taskId, approvalId, allow)
+            }
+            onCancel={() => data.cancelRun(item.run.taskId)}
+          />
+        )}
+        {item.kind === "stream" && (
+          <div
+            aria-live="polite"
+            aria-atomic="false"
+            className="max-w-[80%] rounded-xl px-4 py-2 text-sm whitespace-pre-wrap bg-bg-2 text-ink border border-line"
+          >
+            {item.buffer}
+            <span
+              role="status"
+              aria-label="Assistant is thinking"
+              className="inline-block ml-1 h-3 w-1 bg-accent animate-pulse align-middle"
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MessageBubble({ msg }: { msg: MessageRow }) {
+  return (
+    <div
+      className={`max-w-[80%] rounded-xl px-4 py-2 text-sm whitespace-pre-wrap ${
+        msg.role === "user"
+          ? "ml-auto bg-accent/15 text-ink border border-accent/20"
+          : "bg-bg-2 text-ink border border-line"
+      }`}
+    >
+      {msg.content}
+      {msg.model_used && (
+        <div className="text-[11px] text-ink-faint mt-2">
+          {msg.model_used}
+          {typeof msg.cost_usd === "number" && ` · $${msg.cost_usd.toFixed(4)}`}
+        </div>
+      )}
     </div>
   );
 }

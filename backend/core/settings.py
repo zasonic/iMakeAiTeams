@@ -144,6 +144,10 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     "power_mode_api_key":             (str,  ""),
     "power_mode_autostart":           (bool, False),
     "power_mode_gateway_port":        (int,  18789),
+    # Override the OpenClaw container image. Empty string falls back to the
+    # pinned default in services/docker_manager.py — change this only when
+    # intentionally moving to a new release.
+    "openclaw_image":                 (str,  ""),
 
     # Advanced (complex types)
     "model_prices":                  ((dict, type(None)),  None),
