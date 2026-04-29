@@ -474,9 +474,10 @@ class DockerManager:
 
     def _render_compose(self) -> Path:
         """Render the Jinja2 compose template into the user-data dir."""
-        template_path = self._templates_dir / f"{COMPOSE_FILENAME}.j2"
-        if not template_path.exists():
-            raise FileNotFoundError(f"missing template: {template_path}")
+        for fname in (f"{COMPOSE_FILENAME}.j2", f"{CADDYFILE_FILENAME}.j2"):
+            tp = self._templates_dir / fname
+            if not tp.exists():
+                raise FileNotFoundError(f"missing template: {tp}")
 
         try:
             from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -585,7 +586,19 @@ class DockerManager:
         Atomic replace avoids a window where a partial / world-readable file
         exists. On Windows, chmod only honors the read-only bit, but the user
         profile dir already ACL-restricts access.
+
+        Values may not contain newlines or NULs. A newline-bearing value would
+        split the file into two .env lines — both breaking docker-compose's
+        own parser AND letting an attacker-influenced value inject a forged
+        line (e.g. a GATEWAY_SECRET= override that _load_gateway_secret would
+        then trust on the next render).
         """
+        for k, v in values.items():
+            if any(ch in v for ch in ("\n", "\r", "\x00")):
+                raise ValueError(
+                    f"refusing to write {k}: value contains a newline or NUL "
+                    "(would corrupt the .env file and may be a paste error)"
+                )
         tmp_path = env_path.with_suffix(env_path.suffix + ".tmp")
         body = "".join(f"{k}={v}\n" for k, v in values.items())
         tmp_path.write_text(body, encoding="utf-8")
