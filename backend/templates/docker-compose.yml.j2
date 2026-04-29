@@ -36,10 +36,11 @@ services:
       - openclaw_net
 
     healthcheck:
-      # `/` returns 401 without the bearer header; that 401 still proves
-      # Caddy is up and routing, which is all we need from the container
-      # healthcheck. The host-side health_check sends the real header.
-      test: ["CMD", "wget", "-q", "-O-", "--spider", "http://127.0.0.1:8080/"]
+      # /healthz is an unauthenticated 200-OK endpoint Caddy serves itself,
+      # used solely for the container-level liveness probe. The host-side
+      # health_check hits /health *with* the bearer header for the real
+      # readiness signal (proves Caddy AND OpenClaw are up).
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
       interval: 10s
       timeout: 3s
       retries: 6
