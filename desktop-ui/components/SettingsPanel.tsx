@@ -159,7 +159,9 @@ export function SettingsPanel() {
   };
 
   const pickWorkspace = async () => {
-    const folder = await window.electronAPI.selectWorkspaceFolder();
+    const folder = await window.electronAPI.selectWorkspaceFolder(
+      config?.power_mode_workspace || undefined,
+    );
     if (folder) {
       await save("power_mode_workspace", folder);
       await refreshDocker();

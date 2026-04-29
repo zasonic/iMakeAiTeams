@@ -10,8 +10,16 @@ queue, and the GET /api/events SSE endpoint drains it to whichever EventSource
 the renderer has open.
 
 Design notes:
-- Single global queue (FIFO). Only one renderer EventSource is expected at a
-  time; if we ever support multiple, switch to a fanout broadcaster.
+- SINGLE-CONSUMER ONLY. The pump is one global FIFO queue with one signal,
+  and `drain()` clears the deque on each wake. If two consumers connect
+  simultaneously (e.g. a renderer EventSource + DevTools probe + a curl), the
+  first `drain()` empties the queue and the others see nothing — events are
+  effectively dropped on the floor for whichever caller didn't win the race.
+  This is intentional for v1 (Electron has exactly one renderer window) but
+  is a hard constraint, not a performance hint. To support multiple
+  concurrent consumers (multi-window, headless test harnesses), replace the
+  single _queue with a per-subscriber broadcaster: each connection allocates
+  its own `asyncio.Queue` and `publish()` fans out into all of them.
 - `publish()` is callable from any thread (worker pool, asyncio loop,
   pywebview-shaped legacy callbacks) and never blocks.
 - Backpressure: the queue has a soft cap; if the renderer is gone and events

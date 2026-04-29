@@ -11,7 +11,7 @@ export interface ElectronAPI {
   getSidecarInfo: () => Promise<SidecarInfo | null>;
   restartSidecar: () => Promise<SidecarInfo>;
   selectFolder: () => Promise<string | null>;
-  selectWorkspaceFolder: () => Promise<string | null>;
+  selectWorkspaceFolder: (current?: string) => Promise<string | null>;
   selectFiles: (filters?: { name: string; extensions: string[] }[]) => Promise<string[]>;
   saveFileDialog: (
     suggestedName: string,

@@ -168,6 +168,24 @@ function wireIpc(): void {
     return result.filePaths[0];
   });
 
+  ipcMain.handle(
+    "dialog:select-workspace-folder",
+    async (_e, current?: string) => {
+      // Distinct from select-folder: opens at the current Power Mode workspace
+      // if one is set (so users navigating from a deep child path don't have
+      // to retype it) and adds the createDirectory hint so Cmd+Shift+N works
+      // on macOS for first-time setup.
+      if (!mainWindow) return null;
+      const result = await dialog.showOpenDialog(mainWindow, {
+        title: "Select Power Mode workspace folder",
+        properties: ["openDirectory", "createDirectory"],
+        defaultPath: typeof current === "string" && current ? current : undefined,
+      });
+      if (result.canceled || result.filePaths.length === 0) return null;
+      return result.filePaths[0];
+    },
+  );
+
   ipcMain.handle("dialog:select-files", async (_e, filters?: { name: string; extensions: string[] }[]) => {
     if (!mainWindow) return [];
     const result = await dialog.showOpenDialog(mainWindow, {
