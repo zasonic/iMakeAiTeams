@@ -47,7 +47,6 @@ nsis:
   deleteAppDataOnUninstall: false
 
 publish:
-  - provider: github
-    owner: zasonic
-    repo: imakeaiteams
-    releaseType: release
+  provider: github
+  owner: REPLACE_WITH_GITHUB_USERNAME
+  repo: iMakeAiTeams
