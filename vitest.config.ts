@@ -9,7 +9,7 @@ export default defineConfig({
   },
   test: {
     include: ["desktop-ui/**/*.test.{ts,tsx}"],
-    environment: "node",
+    environment: "jsdom",
     globals: false,
   },
 });
