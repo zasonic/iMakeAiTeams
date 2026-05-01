@@ -114,28 +114,28 @@ def _log_router_event(
 ) -> None:
     """Append one row to the router_log table. Non-fatal — never raises."""
     try:
-        _db.execute(
-            """
-            INSERT INTO router_log
-                (id, conversation_id, message_preview, route_taken, complexity,
-                 reasoning, tokens_out, had_error, response_empty, model_used, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(uuid.uuid4()),
-                conversation_id,
-                message_preview[:120],
-                route_taken,
-                complexity,
-                reasoning,
-                tokens_out,
-                1 if had_error else 0,
-                1 if response_empty else 0,
-                model_used,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        _db.commit()
+        with _db.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO router_log
+                    (id, conversation_id, message_preview, route_taken, complexity,
+                     reasoning, tokens_out, had_error, response_empty, model_used, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    conversation_id,
+                    message_preview[:120],
+                    route_taken,
+                    complexity,
+                    reasoning,
+                    tokens_out,
+                    1 if had_error else 0,
+                    1 if response_empty else 0,
+                    model_used,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
     except Exception as exc:
         log.debug("router_log write failed: %s", exc)
 

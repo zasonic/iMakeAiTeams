@@ -46,7 +46,8 @@ nsis:
   uninstallDisplayName: iMakeAiTeams
   deleteAppDataOnUninstall: false
 
-publish:
-  provider: github
-  owner: REPLACE_WITH_GITHUB_USERNAME
-  repo: iMakeAiTeams
+# Uncomment and set your real GitHub username before enabling auto-updates.
+# publish:
+#   provider: github
+#   owner: REPLACE_WITH_GITHUB_USERNAME
+#   repo: iMakeAiTeams
