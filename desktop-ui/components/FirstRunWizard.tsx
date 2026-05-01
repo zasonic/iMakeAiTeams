@@ -117,8 +117,28 @@ export function FirstRunWizard({ onComplete }: Props) {
         {step === 3 && (
           <div className="space-y-3">
             <p className="text-sm text-ink-dim">
-              Optional: install Ollama or LM Studio to route simple messages
-              through a local model. You can configure URLs later in Settings.
+              For best results, install a local AI model runner. This lets
+              simple messages route locally (free) instead of going to Claude.
+            </p>
+            <p className="text-sm text-ink-dim">
+              <strong>Ollama</strong> is recommended — it is free, lightweight,
+              and works out of the box.
+            </p>
+            <button
+              className="btn-ghost w-full"
+              onClick={() =>
+                window.electronAPI
+                  .openExternal("https://ollama.com/download")
+                  .catch(() =>
+                    pushToast({ kind: "error", text: "Could not open browser" }),
+                  )
+              }
+            >
+              Download Ollama (free)
+            </button>
+            <p className="text-xs text-ink-faint">
+              Already have Ollama or LM Studio? The app detects them
+              automatically. You can configure URLs in Settings later.
             </p>
             <button
               className="btn-primary w-full"

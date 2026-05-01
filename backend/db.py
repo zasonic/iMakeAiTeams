@@ -30,6 +30,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+import sqlite_vec
 
 _lock = threading.Lock()
 _db_path: Path | None = None
@@ -65,6 +66,15 @@ def _get_conn() -> sqlite3.Connection:
     _conn.row_factory = sqlite3.Row
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        _conn.enable_load_extension(True)
+        sqlite_vec.load(_conn)
+        _conn.enable_load_extension(False)
+    except Exception as _vec_err:
+        import logging as _log_mod
+        _log_mod.getLogger("iMakeAiTeams.db").warning(
+            "sqlite-vec extension failed to load: %s — vector search disabled", _vec_err
+        )
     return _conn
 
 
@@ -487,6 +497,33 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_pr_created ON pending_review(created_at)"
         )
 
+        # ── Vector search (sqlite-vec) ───────────────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS vec_documents_map (
+                vec_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id TEXT UNIQUE NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS vec_memories_map (
+                vec_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id TEXT UNIQUE NOT NULL
+            )
+        """)
+        try:
+            cur.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_documents USING vec0(
+                    embedding float[384]
+                )
+            """)
+            cur.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
+                    embedding float[384]
+                )
+            """)
+        except Exception:
+            pass  # sqlite-vec not loaded — vector search unavailable
+
         conn.commit()
 
 
@@ -591,6 +628,11 @@ _MIGRATIONS = [
     # ── Phase 3: Per-agent thinking budget (Qwen3 hybrid /think mode) ──────
     ("phase3.thinking_budget", [
         "ALTER TABLE agents ADD COLUMN thinking_budget INTEGER DEFAULT 2048",
+    ]),
+
+    # ── sqlite-vec: vector tables + mapping tables ────────────────────────
+    ("vec.1.0", [
+        # Tables created by CREATE TABLE/VIRTUAL TABLE IF NOT EXISTS above.
     ]),
 ]
 

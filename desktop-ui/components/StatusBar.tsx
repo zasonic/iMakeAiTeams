@@ -16,6 +16,7 @@ export function StatusBar() {
   const powerModeEnabled = useAppStore((s) => s.powerModeEnabled);
   const setPowerModeEnabled = useAppStore((s) => s.setPowerModeEnabled);
   const [version, setVersion] = useState<string>("");
+  const [localModelOnline, setLocalModelOnline] = useState<boolean | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -55,6 +56,22 @@ export function StatusBar() {
       alive = false;
     };
   }, [status, setDockerStatus, setPowerModeEnabled]);
+
+  useEffect(() => {
+    if (status?.status !== "ready") return;
+    let alive = true;
+    const check = async () => {
+      try {
+        const s = await System.serviceStatus();
+        if (alive) setLocalModelOnline(s?.local_client?.ok ?? false);
+      } catch {
+        if (alive) setLocalModelOnline(false);
+      }
+    };
+    check();
+    const interval = setInterval(check, 30_000);
+    return () => { alive = false; clearInterval(interval); };
+  }, [status]);
 
   const dot = (() => {
     if (!status) return "bg-ink-faint";
@@ -146,6 +163,14 @@ export function StatusBar() {
         </span>
       </span>
       <div className="flex items-center gap-3">
+        {localModelOnline === false && status?.status === "ready" && (
+          <span
+            className="text-[11px] px-1.5 py-0.5 rounded border border-warn/40 bg-warn/10 text-warn"
+            title="All messages routed to Claude (higher cost)"
+          >
+            Local model offline
+          </span>
+        )}
         {powerModeBadge}
         {status?.status === "crashed" && (
           <>
