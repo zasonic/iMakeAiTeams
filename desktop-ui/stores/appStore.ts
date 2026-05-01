@@ -58,6 +58,8 @@ export interface ExecutionStep {
   args?: unknown;
   result?: unknown;
   bytes?: number;
+  image_data?: string;   // base64 or data URL for inline rendering
+  image_url?: string;    // URL to image file in container
   status: "running" | "done" | "error";
 }
 

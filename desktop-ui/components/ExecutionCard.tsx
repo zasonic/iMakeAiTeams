@@ -102,7 +102,31 @@ export function ExecutionCard({ step }: ExecutionCardProps) {
           {step.kind === "file_write" && (
             <>
               {step.path && <DetailBlock label="path" value={step.path} />}
-              {step.preview && <DetailBlock label="preview" value={step.preview} />}
+              {step.image_data ? (
+                <div className="mt-1">
+                  <img
+                    src={
+                      step.image_data.startsWith("data:")
+                        ? step.image_data
+                        : `data:image/png;base64,${step.image_data}`
+                    }
+                    alt={step.path || "Generated chart"}
+                    className="max-w-full rounded-md border border-line"
+                    loading="lazy"
+                  />
+                </div>
+              ) : step.image_url ? (
+                <div className="mt-1">
+                  <img
+                    src={step.image_url}
+                    alt={step.path || "Generated chart"}
+                    className="max-w-full rounded-md border border-line"
+                    loading="lazy"
+                  />
+                </div>
+              ) : step.preview ? (
+                <DetailBlock label="preview" value={step.preview} />
+              ) : null}
               {typeof step.bytes === "number" && (
                 <div className="text-ink-faint">{step.bytes} bytes</div>
               )}

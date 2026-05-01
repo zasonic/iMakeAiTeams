@@ -305,11 +305,31 @@ class ExecutionBridge:
                                            "status": evt.get("status", "running")})
             return
         if kind in ("file_write", "file_op", "file"):
-            self._emit("power_mode_step", {**base, "kind": "file_write",
-                                           "path": evt.get("path", ""),
-                                           "preview": evt.get("preview", ""),
-                                           "bytes": evt.get("bytes"),
-                                           "status": evt.get("status", "done")})
+            payload = {
+                **base,
+                "kind": "file_write",
+                "path": evt.get("path", ""),
+                "preview": evt.get("preview", ""),
+                "bytes": evt.get("bytes"),
+                "status": evt.get("status", "done"),
+            }
+            # Pass through image data/URL when present so the frontend
+            # can render charts inline instead of showing a file path.
+            path_lower = (evt.get("path") or "").lower()
+            _IMG_EXTS = (".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp")
+            if any(path_lower.endswith(ext) for ext in _IMG_EXTS):
+                if evt.get("content"):
+                    payload["image_data"] = evt["content"]
+                elif evt.get("data"):
+                    payload["image_data"] = evt["data"]
+                if evt.get("url"):
+                    payload["image_url"] = evt["url"]
+                # If OpenClaw provides base64 in the preview for images,
+                # promote it to image_data so the renderer picks it up.
+                preview = evt.get("preview", "")
+                if not payload.get("image_data") and preview.startswith("data:image"):
+                    payload["image_data"] = preview
+            self._emit("power_mode_step", payload)
             return
         if kind in ("shell", "shell_command", "command"):
             self._emit("power_mode_step", {**base, "kind": "shell",

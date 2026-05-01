@@ -43,7 +43,11 @@ _COMPLEX_SIGNALS = _re.compile(
     r"(analyz|compar|explain in detail|write.*essay|write.*report|"
     r"refactor|architect|design.*system|debate|critique|"
     r"multiple.*step|step.by.step|think.*through|research|"
-    r"```|code review|security|vulnerability|optimize)",
+    r"```|code review|security|vulnerability|optimize|"
+    r"chart|plot|graph|trend|correlat|distribut|visuali[zs]|histogram|"
+    r"csv|spreadsheet|data.*analy|pivot|aggregat|statistic|regression|"
+    r"outlier|cluster|forecast|time.series|breakdown.*by|group.*by|"
+    r"show.*data|average.*by|total.*by|count.*by)",
     _re.IGNORECASE,
 )
 
