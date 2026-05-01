@@ -28,6 +28,64 @@ from models import RouteDecision
 
 log = logging.getLogger("iMakeAiTeams.router")
 
+# ── Deterministic keyword fallback ────────────────────────────────────────
+# Used when no local model is available for routing classification.
+
+import re as _re
+
+_SIMPLE_PATTERNS = _re.compile(
+    r"^(hi|hello|hey|thanks|thank you|ok|okay|sure|yes|no|bye|good morning|"
+    r"good night|how are you|what'?s up)\b",
+    _re.IGNORECASE,
+)
+
+_COMPLEX_SIGNALS = _re.compile(
+    r"(analyz|compar|explain in detail|write.*essay|write.*report|"
+    r"refactor|architect|design.*system|debate|critique|"
+    r"multiple.*step|step.by.step|think.*through|research|"
+    r"```|code review|security|vulnerability|optimize)",
+    _re.IGNORECASE,
+)
+
+
+def _keyword_classify(message: str) -> RouteDecision:
+    """Deterministic fallback when no local model is available for routing."""
+    text = message.strip()
+    if not text:
+        return RouteDecision(
+            model="claude", complexity="simple", reasoning="empty message",
+            confidence=0.9,
+        )
+
+    if _SIMPLE_PATTERNS.match(text) or len(text) < 20:
+        return RouteDecision(
+            model="claude", complexity="simple",
+            reasoning="keyword match: greeting/short (no local model)",
+            confidence=0.8,
+        )
+
+    if _COMPLEX_SIGNALS.search(text):
+        return RouteDecision(
+            model="claude", complexity="complex",
+            reasoning="keyword match: complexity signals (no local model)",
+            confidence=0.7,
+        )
+
+    word_count = len(text.split())
+    if word_count > 100:
+        return RouteDecision(
+            model="claude", complexity="complex",
+            reasoning="keyword match: long message (no local model)",
+            confidence=0.6,
+        )
+
+    return RouteDecision(
+        model="claude", complexity="medium",
+        reasoning="keyword fallback (no local model)",
+        confidence=0.5,
+    )
+
+
 # ── Confidence thresholds ─────────────────────────────────────────────────────
 # Below this confidence, local routes escalate to Claude.
 ESCALATION_THRESHOLD = 0.6
@@ -82,6 +140,10 @@ class TaskRouter:
     def classify(self, message: str, history: list | None = None,
                  memory_context=None) -> RouteDecision:
         """Classify a message and return a RouteDecision with confidence."""
+        # Deterministic fallback when local model is offline
+        if not self.local.is_available():
+            log.info("Local model unavailable — using keyword classifier")
+            return _keyword_classify(message)
         # If routing is disabled or local unavailable, always use Claude
         if not self._enabled or not self.local.is_available():
             return RouteDecision(model="claude", complexity="complex",

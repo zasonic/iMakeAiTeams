@@ -15,8 +15,8 @@ Stage 2 consolidation:
   Callers that only need the text can do:  [t for t, _ in results]
 
 Dependencies:
-  sentence-transformers >= 2.7.0
-  chromadb >= 0.4.0
+  fastembed >= 0.4.0
+  sqlite-vec >= 0.1.6
 """
 
 import json
@@ -182,23 +182,17 @@ class RAGIndex:
         return count
 
     def clear(self) -> None:
-        """Delete all documents from the ChromaDB collection."""
+        """Delete all documents from the vector index."""
         ss = self._get_semantic()
         if ss is None:
             log.debug("RAGIndex.clear(): semantic_search not available; nothing to clear.")
             return
         try:
-            if ss._documents_col is not None:
-                # ChromaDB doesn't have a bulk-delete-all, so we retrieve all IDs
-                # and delete them in one call.
-                all_ids = ss._documents_col.get()["ids"]
-                if all_ids:
-                    ss._documents_col.delete(ids=all_ids)
-                    log.info("RAGIndex.clear(): deleted %d document chunks from ChromaDB.", len(all_ids))
-            # Also clear the corresponding rows from the SQLite documents table
+            ss.clear_documents()
             import db as _db_mod
             _db_mod.execute("DELETE FROM documents")
             _db_mod.commit()
+            log.info("RAGIndex.clear(): deleted all document chunks.")
         except Exception as exc:
             log.error("RAGIndex.clear() failed: %s", exc)
 

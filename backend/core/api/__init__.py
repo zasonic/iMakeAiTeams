@@ -226,8 +226,8 @@ class API:
         model = self._safe_init("embedder", self._load_shared_embedder)
         self._emit_service_update("embedder")
 
-        if self._rag is not None and model is not None:
-            self._rag._model = model
+        # fastembed model is passed to semantic_search.init_vector_store();
+        # RAGIndex no longer needs a direct model reference.
 
         _rag_path = paths.rag_cache_dir() / "index.npz"
         if self._rag is not None and model is not None and _rag_path.exists():
@@ -244,9 +244,7 @@ class API:
 
         self._safe_init(
             "semantic_search",
-            lambda: semantic_search.init_vector_store(
-                paths.vector_store_dir(), shared_model=model,
-            ),
+            lambda: semantic_search.init_vector_store(embedder=model),
         )
         self._emit_service_update("semantic_search")
 
@@ -286,9 +284,9 @@ class API:
             return fallback
 
     def _load_shared_embedder(self):
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer(str(paths.bundled_model_dir()))
-        self._log.info("Shared SentenceTransformer model loaded.")
+        from fastembed import TextEmbedding
+        model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        self._log.info("Shared fastembed model loaded (BAAI/bge-small-en-v1.5).")
         return model
 
     def service_status(self) -> dict:

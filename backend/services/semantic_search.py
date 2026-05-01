@@ -2,7 +2,7 @@
 services/semantic_search.py — Local Embedding and Semantic Search.
 
 Original functionality (UNCHANGED):
-  - Background embedding indexer (ChromaDB + sentence-transformers)
+  - Background embedding indexer (sqlite-vec + fastembed)
   - search_documents() and search_memories() API
   - Dirty-tracking integration with SQLite
 
@@ -11,7 +11,7 @@ Priority 2 additions (BM25 Hybrid Search):
   - _bm25_add_document()     — add/update one document in bm25_corpus
   - _bm25_search()           — BM25 keyword search returning ranked (doc_id, score) list
   - reciprocal_rank_fusion() — RRF(d) = Σ 1/(k + rank_r(d)), k=60
-  - search_documents_hybrid() — BM25 + ChromaDB + RRF, or vector-only fallback
+  - search_documents_hybrid() — BM25 + sqlite-vec + RRF, or vector-only fallback
   - tokenize()               — shared tokeniser (identical at index and query time)
   - ingest_document() updated to also call _bm25_add_document()
 
@@ -38,12 +38,10 @@ import db
 
 log = logging.getLogger("semantic_search")
 
-_chroma_client = None
-_documents_col = None
-_memory_col    = None
-_embed_fn      = None
-_init_lock     = threading.Lock()
-_initialized   = False
+_embed_fn = None       # callable: list[str] -> list[list[float]]
+_embed_dim: int = 384
+_init_lock = threading.Lock()
+_initialized = False
 
 # ── Priority 2: BM25 module-level state ──────────────────────────────────────
 
@@ -74,76 +72,71 @@ _STOPWORDS: frozenset[str] = frozenset({
     "who", "when", "where", "how", "i", "you", "he", "she", "we", "they",
 })
 
+
+def _embed(texts: list[str]) -> list[list[float]]:
+    """Embed texts using the initialized embedding function."""
+    if _embed_fn is None:
+        raise RuntimeError("Embedding function not initialized")
+    return _embed_fn(texts)
+
+
+def _serialize(vec: list[float]) -> bytes:
+    """Convert a float vector to the compact binary format sqlite-vec expects."""
+    from sqlite_vec import serialize_float32
+    return serialize_float32(vec)
+
+
 RRF_K = 60  # standard dampening constant (Cormack et al. 2009)
 
 
 # ── Initialisation (unchanged) ────────────────────────────────────────────────
 
-def init_vector_store(vector_dir: Path, shared_model=None) -> bool:
+def init_vector_store(embedder=None, vector_dir=None, shared_model=None) -> bool:
     """
-    Initialise ChromaDB persistent client and embedding function.
-    Also loads BM25 corpus from SQLite into memory.
+    Initialize the embedding function for vector search.
 
-    ``vector_dir`` is the absolute directory where ChromaDB should persist.
-    Callers should pass ``core.paths.vector_store_dir()``.
+    ``embedder``: a fastembed TextEmbedding instance. If None, one is
+    created with the default model (BAAI/bge-small-en-v1.5, 384 dims).
+
+    ``vector_dir`` and ``shared_model`` are accepted for backward
+    compatibility but ignored. Vector storage lives in the main SQLite
+    database via sqlite-vec.
     """
-    global _chroma_client, _documents_col, _memory_col, _embed_fn, _initialized
+    global _embed_fn, _embed_dim, _initialized
 
     with _init_lock:
         if _initialized:
             return True
-        try:
-            import chromadb
-            from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-        except ImportError:
-            log.warning(
-                "chromadb or sentence-transformers not installed. "
-                "Semantic search unavailable."
-            )
-            return False
-
-        vector_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            if shared_model is not None:
-                class _SharedEmbedFn:
-                    name = "all-MiniLM-L6-v2"
-                    def __call__(self, input: list[str]) -> list[list[float]]:
-                        import numpy as np
-                        vecs = shared_model.encode(
-                            input,
-                            show_progress_bar=False,
-                            convert_to_numpy=True,
-                            normalize_embeddings=True,
-                        )
-                        return vecs.tolist()
-                _embed_fn = _SharedEmbedFn()
+            if embedder is not None:
+                _fe_model = embedder
             else:
-                from core import paths
-                _embed_fn = SentenceTransformerEmbeddingFunction(
-                    model_name=str(paths.bundled_model_dir())
-                )
+                from fastembed import TextEmbedding
+                _fe_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
-            _chroma_client = chromadb.PersistentClient(path=str(vector_dir))
-            _documents_col = _chroma_client.get_or_create_collection(
-                name="documents_index",
-                embedding_function=_embed_fn,
-                metadata={"hnsw:space": "cosine"},
-            )
-            _memory_col = _chroma_client.get_or_create_collection(
-                name="memory_index",
-                embedding_function=_embed_fn,
-                metadata={"hnsw:space": "cosine"},
-            )
+            def _fastembed_fn(texts: list[str]) -> list[list[float]]:
+                return [vec.tolist() for vec in _fe_model.embed(texts)]
+
+            _embed_fn = _fastembed_fn
+            _embed_dim = 384
+
+            # Verify sqlite-vec is loaded
+            try:
+                db.fetchone("SELECT vec_version()")
+            except Exception as vec_err:
+                log.warning("sqlite-vec not available: %s", vec_err)
+                return False
+
             _initialized = True
-            log.info("Semantic search vector store initialised.")
+            log.info("Semantic search initialized (fastembed + sqlite-vec).")
 
-            # ── Priority 2: Load BM25 corpus from SQLite ──────────────────────
+            # Load BM25 corpus (unchanged)
             _bm25_load_from_db()
 
             return True
         except Exception as exc:
-            log.error(f"Vector store init failed: {exc}")
+            log.error("Vector store init failed: %s", exc)
             return False
 
 
@@ -152,10 +145,11 @@ def is_available() -> bool:
 
 
 def document_count() -> int:
-    if not _initialized or _documents_col is None:
+    if not _initialized:
         return 0
     try:
-        return _documents_col.count()
+        row = db.fetchone("SELECT COUNT(*) as cnt FROM vec_documents_map")
+        return row["cnt"] if row else 0
     except Exception:
         return 0
 
@@ -404,7 +398,7 @@ def search_documents_hybrid(
 # ── Background embedding indexer (unchanged) ──────────────────────────────────
 
 def _index_dirty_documents(batch_size: int = 50) -> int:
-    if not _initialized or _documents_col is None:
+    if not _initialized:
         return 0
     rows = db.fetchall(
         "SELECT id, content, source, doc_type, updated_at "
@@ -414,37 +408,61 @@ def _index_dirty_documents(batch_size: int = 50) -> int:
     if not rows:
         return 0
 
-    ids, texts, metas = [], [], []
+    ids_to_mark = []
     for r in rows:
         if not r["content"] or not r["content"].strip():
             continue
-        ids.append(r["id"])
-        texts.append(r["content"])
-        metas.append({
-            "source":   r["source"] or "",
-            "doc_type": r["doc_type"] or "text",
-            "updated_at": r["updated_at"] or "",
-        })
-
-    if ids:
+        doc_id = r["id"]
+        content = r["content"]
         try:
-            _documents_col.upsert(ids=ids, documents=texts, metadatas=metas)
-            db.executemany(
-                "UPDATE documents SET embedding_status = 'clean' WHERE id = ?",
-                [(i,) for i in ids],
-            )
-            # ── Priority 2: also update BM25 corpus for newly indexed docs ───
-            for doc_id, text, meta in zip(ids, texts, metas):
-                _bm25_add_document(doc_id, text, meta)
-        except Exception as exc:
-            log.error(f"Document upsert failed: {exc}")
-            return 0
+            vecs = _embed([content])
+            vec_blob = _serialize(vecs[0])
 
-    return len(ids)
+            existing = db.fetchone(
+                "SELECT vec_rowid FROM vec_documents_map WHERE doc_id = ?",
+                (doc_id,),
+            )
+            if existing:
+                vec_rowid = existing["vec_rowid"]
+                db.execute(
+                    "UPDATE vec_documents SET embedding = ? WHERE rowid = ?",
+                    (vec_blob, vec_rowid),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO vec_documents_map (doc_id) VALUES (?)",
+                    (doc_id,),
+                )
+                db.commit()
+                row2 = db.fetchone(
+                    "SELECT vec_rowid FROM vec_documents_map WHERE doc_id = ?",
+                    (doc_id,),
+                )
+                vec_rowid = row2["vec_rowid"]
+                db.execute(
+                    "INSERT INTO vec_documents (rowid, embedding) VALUES (?, ?)",
+                    (vec_rowid, vec_blob),
+                )
+
+            ids_to_mark.append(doc_id)
+
+            meta = {"source": r["source"] or "", "doc_type": r["doc_type"] or "text"}
+            _bm25_add_document(doc_id, content, meta)
+
+        except Exception as exc:
+            log.error("Document embed failed for %s: %s", doc_id, exc)
+
+    if ids_to_mark:
+        db.executemany(
+            "UPDATE documents SET embedding_status = 'clean' WHERE id = ?",
+            [(i,) for i in ids_to_mark],
+        )
+
+    return len(ids_to_mark)
 
 
 def _index_dirty_memories(batch_size: int = 50) -> int:
-    if not _initialized or _memory_col is None:
+    if not _initialized:
         return 0
     rows = db.fetchall(
         "SELECT id, content, session_id, tags, created_at FROM memory_entries "
@@ -454,30 +472,54 @@ def _index_dirty_memories(batch_size: int = 50) -> int:
     if not rows:
         return 0
 
-    ids, texts, metas = [], [], []
+    ids_to_mark = []
     for r in rows:
         if not r["content"] or not r["content"].strip():
             continue
-        ids.append(r["id"])
-        texts.append(r["content"])
-        metas.append({
-            "session_id": r["session_id"] or "",
-            "tags": r["tags"] or "[]",
-            "created_at": r["created_at"] or "",
-        })
-
-    if ids:
+        memory_id = r["id"]
+        content = r["content"]
         try:
-            _memory_col.upsert(ids=ids, documents=texts, metadatas=metas)
-            db.executemany(
-                "UPDATE memory_entries SET embedding_status = 'clean' WHERE id = ?",
-                [(i,) for i in ids],
-            )
-        except Exception as exc:
-            log.error(f"Memory upsert failed: {exc}")
-            return 0
+            vecs = _embed([content])
+            vec_blob = _serialize(vecs[0])
 
-    return len(ids)
+            existing = db.fetchone(
+                "SELECT vec_rowid FROM vec_memories_map WHERE memory_id = ?",
+                (memory_id,),
+            )
+            if existing:
+                vec_rowid = existing["vec_rowid"]
+                db.execute(
+                    "UPDATE vec_memories SET embedding = ? WHERE rowid = ?",
+                    (vec_blob, vec_rowid),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO vec_memories_map (memory_id) VALUES (?)",
+                    (memory_id,),
+                )
+                db.commit()
+                row2 = db.fetchone(
+                    "SELECT vec_rowid FROM vec_memories_map WHERE memory_id = ?",
+                    (memory_id,),
+                )
+                vec_rowid = row2["vec_rowid"]
+                db.execute(
+                    "INSERT INTO vec_memories (rowid, embedding) VALUES (?, ?)",
+                    (vec_rowid, vec_blob),
+                )
+
+            ids_to_mark.append(memory_id)
+
+        except Exception as exc:
+            log.error("Memory embed failed for %s: %s", memory_id, exc)
+
+    if ids_to_mark:
+        db.executemany(
+            "UPDATE memory_entries SET embedding_status = 'clean' WHERE id = ?",
+            [(i,) for i in ids_to_mark],
+        )
+
+    return len(ids_to_mark)
 
 
 def run_indexer_cycle() -> int:
@@ -556,42 +598,58 @@ def search_documents(
     doc_type: str | None = None,
 ) -> list[dict]:
     """Semantic (vector-only) search over all indexed documents."""
-    if not _initialized or not _documents_col:
+    if not _initialized:
         return []
     if not query_text.strip():
         return []
 
-    where = {"doc_type": doc_type} if doc_type else None
     try:
-        count = _documents_col.count()
-        if count == 0:
-            return []
-        results = _documents_col.query(
-            query_texts=[query_text],
-            n_results=min(top_k, count),
-            where=where,
-            include=["documents", "metadatas", "distances"],
+        query_vec = _embed([query_text])[0]
+        query_blob = _serialize(query_vec)
+
+        vec_rows = db.fetchall(
+            """
+            SELECT v.rowid, v.distance, m.doc_id
+            FROM vec_documents v
+            INNER JOIN vec_documents_map m ON m.vec_rowid = v.rowid
+            WHERE v.embedding MATCH ?
+            ORDER BY v.distance
+            LIMIT ?
+            """,
+            (query_blob, top_k * 2),
         )
     except Exception as exc:
-        log.error(f"Document search failed: {exc}")
+        log.error("Document search failed: %s", exc)
         return []
 
     out = []
-    ids   = results.get("ids",       [[]])[0]
-    docs  = results.get("documents", [[]])[0]
-    metas = results.get("metadatas", [[]])[0]
-    dists = results.get("distances", [[]])[0]
+    for vr in vec_rows:
+        doc_id = vr["doc_id"]
+        distance = vr["distance"]
+        score = round(1.0 - distance, 3) if distance <= 1.0 else round(1.0 / (1.0 + distance), 3)
 
-    for rec_id, doc, meta, dist in zip(ids, docs, metas, dists):
-        score = round(1.0 - dist, 3)
+        doc_row = db.fetchone(
+            "SELECT content, source, doc_type FROM documents WHERE id = ?",
+            (doc_id,),
+        )
+        if not doc_row:
+            continue
+
+        if doc_type and doc_row["doc_type"] != doc_type:
+            continue
+
         out.append({
-            "doc_id":       rec_id,
-            "content":      doc,
+            "doc_id":       doc_id,
+            "content":      doc_row["content"],
             "score":        score,
-            "file_source":  meta.get("source", ""),
-            "doc_type":     meta.get("doc_type", "text"),
+            "file_source":  doc_row["source"] or "",
+            "doc_type":     doc_row["doc_type"] or "text",
             "result_source": "semantic",
         })
+
+        if len(out) >= top_k:
+            break
+
     return out
 
 
@@ -601,44 +659,57 @@ def search_memories(
     tags: list[str] | None = None,
 ) -> list[dict]:
     """Semantic search over indexed memory entries."""
-    if not _initialized or not _memory_col:
+    if not _initialized:
         return []
     if not query_text.strip():
         return []
 
     try:
-        count = _memory_col.count()
-        if count == 0:
-            return []
-        results = _memory_col.query(
-            query_texts=[query_text],
-            n_results=min(top_k, count),
-            include=["documents", "metadatas", "distances"],
+        query_vec = _embed([query_text])[0]
+        query_blob = _serialize(query_vec)
+
+        vec_rows = db.fetchall(
+            """
+            SELECT v.rowid, v.distance, m.memory_id
+            FROM vec_memories v
+            INNER JOIN vec_memories_map m ON m.vec_rowid = v.rowid
+            WHERE v.embedding MATCH ?
+            ORDER BY v.distance
+            LIMIT ?
+            """,
+            (query_blob, top_k),
         )
     except Exception as exc:
-        log.error(f"Memory search failed: {exc}")
+        log.error("Memory search failed: %s", exc)
         return []
 
-    out  = []
-    ids  = results.get("ids",       [[]])[0]
-    docs = results.get("documents", [[]])[0]
-    metas = results.get("metadatas",[[]])[0]
-    dists = results.get("distances",[[]])[0]
-    now   = datetime.now(timezone.utc).isoformat()
+    out = []
+    now = datetime.now(timezone.utc).isoformat()
 
-    for rec_id, doc, meta, dist in zip(ids, docs, metas, dists):
-        score = round(1.0 - dist, 3)
+    for vr in vec_rows:
+        memory_id = vr["memory_id"]
+        distance = vr["distance"]
+        score = round(1.0 - distance, 3) if distance <= 1.0 else round(1.0 / (1.0 + distance), 3)
+
+        mem_row = db.fetchone(
+            "SELECT content, session_id FROM memory_entries WHERE id = ?",
+            (memory_id,),
+        )
+        if not mem_row:
+            continue
+
         out.append({
-            "entry_id":   rec_id,
-            "content":    doc,
+            "entry_id":   memory_id,
+            "content":    mem_row["content"],
             "score":      score,
-            "session_id": meta.get("session_id", ""),
+            "session_id": mem_row["session_id"] or "",
             "source":     "semantic",
         })
+
         try:
             db.execute(
                 "UPDATE memory_entries SET last_accessed = ? WHERE id = ?",
-                (now, rec_id),
+                (now, memory_id),
             )
         except Exception:
             pass
@@ -680,10 +751,38 @@ def delete_memory_entry(entry_id: str) -> bool:
         log.error("delete_memory_entry (SQL) failed for %s: %s", entry_id, exc)
         return False
 
-    if _initialized and _memory_col is not None:
-        try:
-            _memory_col.delete(ids=[entry_id])
-        except Exception as exc:
-            log.debug("delete_memory_entry (chroma) for %s: %s", entry_id, exc)
+    try:
+        row = db.fetchone(
+            "SELECT vec_rowid FROM vec_memories_map WHERE memory_id = ?",
+            (entry_id,),
+        )
+        if row:
+            db.execute("DELETE FROM vec_memories WHERE rowid = ?", (row["vec_rowid"],))
+            db.execute("DELETE FROM vec_memories_map WHERE memory_id = ?", (entry_id,))
+            db.commit()
+    except Exception as exc:
+        log.debug("delete_memory_entry (vec) for %s: %s", entry_id, exc)
 
     return True
+
+
+def clear_documents() -> None:
+    """Delete all document vectors and mappings."""
+    try:
+        db.execute("DELETE FROM vec_documents")
+        db.execute("DELETE FROM vec_documents_map")
+        db.commit()
+        log.info("Cleared all document vectors.")
+    except Exception as exc:
+        log.error("clear_documents failed: %s", exc)
+
+
+def clear_memories() -> None:
+    """Delete all memory vectors and mappings."""
+    try:
+        db.execute("DELETE FROM vec_memories")
+        db.execute("DELETE FROM vec_memories_map")
+        db.commit()
+        log.info("Cleared all memory vectors.")
+    except Exception as exc:
+        log.error("clear_memories failed: %s", exc)

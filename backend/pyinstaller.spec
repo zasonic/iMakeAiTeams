@@ -26,6 +26,9 @@ uvicorn_datas, uvicorn_binaries, uvicorn_hidden = collect_all("uvicorn")
 fastapi_datas, fastapi_binaries, fastapi_hidden = collect_all("fastapi")
 keyring_datas, keyring_binaries, keyring_hidden = collect_all("keyring")
 anthropic_datas, anthropic_binaries, anthropic_hidden = collect_all("anthropic")
+fastembed_datas, fastembed_binaries, fastembed_hidden = collect_all("fastembed")
+onnxruntime_datas, onnxruntime_binaries, onnxruntime_hidden = collect_all("onnxruntime")
+sqlite_vec_datas, sqlite_vec_binaries, sqlite_vec_hidden = collect_all("sqlite_vec")
 
 # All FastAPI route modules + every backend service module + everything under
 # backend/core/ — collect_submodules walks the package recursively.
@@ -38,6 +41,9 @@ hiddenimports = (
     + fastapi_hidden
     + keyring_hidden
     + anthropic_hidden
+    + fastembed_hidden
+    + onnxruntime_hidden
+    + sqlite_vec_hidden
     + hidden_routes
     + hidden_services
     + hidden_core
@@ -60,9 +66,9 @@ hiddenimports = (
     ]
 )
 
-datas = uvicorn_datas + fastapi_datas + keyring_datas + anthropic_datas
+datas = uvicorn_datas + fastapi_datas + keyring_datas + anthropic_datas + fastembed_datas + onnxruntime_datas + sqlite_vec_datas
 
-binaries = uvicorn_binaries + fastapi_binaries + keyring_binaries + anthropic_binaries
+binaries = uvicorn_binaries + fastapi_binaries + keyring_binaries + anthropic_binaries + fastembed_binaries + onnxruntime_binaries + sqlite_vec_binaries
 
 a = Analysis(
     ["server.py"],
@@ -74,11 +80,8 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Heavy deps belonging to the legacy 'full' variant. The lite installer
-        # explicitly excludes them; service_guard.@requires reports them as
-        # unavailable at runtime.
-        # Note: PIL is intentionally NOT excluded — anthropic's SDK lazy-imports
-        # it when the user attaches an image to a message.
+        # NOT dependencies of the current stack. Excludes prevent
+        # accidental transitive imports from fastembed or onnxruntime.
         "torch",
         "sentence_transformers",
         "chromadb",
@@ -105,7 +108,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    console=False,   # suppress terminal window in production
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
