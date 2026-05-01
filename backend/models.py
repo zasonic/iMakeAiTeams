@@ -323,6 +323,90 @@ def validate_handoff_packet(packet: HandoffPacket) -> HandoffPacket:
     return packet
 
 
+# Symphony-inspired proof-of-work threshold. Below this score, the local model
+# judges that the handoff's deliverables don't satisfy the requested subtask.
+# The packet is flagged (validation_passed=False) but the workflow is NOT
+# blocked — downstream agents see the warning in to_context_block() and can
+# decide whether to proceed.
+HANDOFF_POW_THRESHOLD = 4.0
+
+
+def proof_of_work_validate_handoff(
+    packet: HandoffPacket,
+    task_description: str,
+    local_client,
+) -> HandoffPacket:
+    """
+    Symphony-inspired semantic validation: judge whether the handoff's
+    deliverables actually satisfy the stated subtask, using the local model
+    (free). Updates packet.validation_passed and packet.validation_notes
+    in place. Returns the same packet.
+
+    No-op (returns packet unchanged) when:
+      - local_client is None
+      - local_client.is_available() returns False
+      - the local model fails to produce parseable JSON
+
+    This is a quality gate, not a security gate — it should never block a
+    workflow on its own. Callers compose this with validate_handoff_packet()
+    to get both structural AND semantic validation.
+    """
+    if not local_client:
+        return packet
+    try:
+        if not local_client.is_available():
+            return packet
+    except Exception:
+        return packet
+
+    system = (
+        "You are a quality auditor. Given a task description and an agent's "
+        "self-reported deliverables, judge whether the deliverables actually "
+        "satisfy the task. Be strict: empty, evasive, or off-topic outputs "
+        "should score low. Respond with ONLY a JSON object: "
+        '{"score": 0-10, "reason": "..."}'
+    )
+    user = (
+        f"TASK: {task_description[:300]}\n\n"
+        f"AGENT'S CLAIMED SUBTASK: {packet.subtask_completed[:200]}\n"
+        f"AGENT'S DELIVERABLE: {packet.artifact[:600]}\n"
+        f"AGENT'S SELF-REPORTED CONFIDENCE: {packet.confidence:.0%}"
+    )
+
+    try:
+        raw = local_client.chat(system, user, max_tokens=120)
+    except Exception:
+        return packet
+    if not raw:
+        return packet
+
+    qstart = raw.find("{")
+    qend   = raw.rfind("}")
+    if qstart == -1 or qend == -1 or qend <= qstart:
+        return packet
+    try:
+        verdict = json.loads(raw[qstart:qend + 1])
+    except (ValueError, TypeError):
+        return packet
+
+    try:
+        score = float(verdict.get("score", 10))
+    except (TypeError, ValueError):
+        return packet
+    reason = str(verdict.get("reason", "")).strip()[:200]
+
+    if score < HANDOFF_POW_THRESHOLD:
+        packet.validation_passed = False
+        packet.validation_notes.append(
+            f"proof-of-work failed: scored {score:.1f}/10 — {reason}"
+        )
+    else:
+        packet.validation_notes.append(
+            f"proof-of-work passed: scored {score:.1f}/10"
+        )
+    return packet
+
+
 # ── Phase 1: Hub routing contracts (NEW) ─────────────────────────────────────
 #
 # These types support the deterministic HubRouter that selects a worker by

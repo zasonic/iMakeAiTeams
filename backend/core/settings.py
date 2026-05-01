@@ -123,6 +123,14 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     "debate_enabled":                (bool,  True),
     "guardrails_enabled":            (bool,  False),
 
+    # DiLoCo-inspired sliding-window risk ledger. Default off — the legacy
+    # per-turn-reset behavior stays in place. When enabled, the per-conversation
+    # risk ledger persists across turns and prunes entries older than the
+    # window, catching sustained risky behavior without locking conversations
+    # out after ~9 messages.
+    "sliding_window_risk_enabled":   (bool,  False),
+    "sliding_window_risk_minutes":   (float, 10.0),
+
     # Agent / project
     "agent_project_root":            (str,   ""),
 
