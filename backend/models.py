@@ -323,6 +323,78 @@ def validate_handoff_packet(packet: HandoffPacket) -> HandoffPacket:
     return packet
 
 
+def semantic_validate_handoff(
+    packet: HandoffPacket,
+    local_client,
+    claude_client=None,
+) -> HandoffPacket:
+    """
+    Structural + semantic validation of a HandoffPacket.
+
+    Runs `validate_handoff_packet()` first, then if structural validation
+    passed, asks the local model to score whether the deliverables actually
+    satisfy the requested subtask. A score below 4 flags the packet
+    (validation_passed=False) and appends a note. The semantic check is
+    silently skipped (no flag) when the local model is unavailable or its
+    response can't be parsed — never blocks the handoff.
+    """
+    import logging as _logging
+    _log = _logging.getLogger("iMakeAiTeams.models")
+
+    validate_handoff_packet(packet)
+    if not packet.validation_passed:
+        return packet
+
+    try:
+        from services.task_artifacts import local_first_call
+    except Exception as exc:
+        _log.debug("semantic_validate_handoff: local_first_call import failed: %s", exc)
+        return packet
+
+    system = (
+        "You are a quality reviewer. Given a task description and deliverables, "
+        "score whether the deliverables satisfy the task. Return ONLY JSON: "
+        '{"score": 0-10, "reason": "one sentence"}'
+    )
+    user_message = (
+        f"TASK: {packet.subtask_completed[:300]}\n"
+        f"DELIVERABLES: {packet.artifact[:500]}"
+    )
+
+    try:
+        raw = local_first_call(local_client, claude_client, system, user_message, max_tokens=120)
+    except Exception as exc:
+        _log.debug("semantic_validate_handoff: local_first_call raised: %s", exc)
+        return packet
+    if not raw:
+        return packet
+
+    qstart = raw.find("{")
+    qend = raw.rfind("}")
+    if qstart == -1 or qend == -1 or qend <= qstart:
+        _log.debug("semantic_validate_handoff: no JSON object in response")
+        return packet
+    try:
+        verdict = json.loads(raw[qstart:qend + 1])
+    except (ValueError, TypeError) as exc:
+        _log.debug("semantic_validate_handoff: JSON parse failed: %s", exc)
+        return packet
+
+    try:
+        score = float(verdict.get("score", 10))
+    except (TypeError, ValueError):
+        _log.debug("semantic_validate_handoff: non-numeric score")
+        return packet
+    reason = str(verdict.get("reason", "")).strip()[:200]
+
+    if score < 4:
+        packet.validation_notes.append(
+            f"Semantic quality check: score {score:.1f}/10 — {reason}"
+        )
+        packet.validation_passed = False
+    return packet
+
+
 # Symphony-inspired proof-of-work threshold. Below this score, the local model
 # judges that the handoff's deliverables don't satisfy the requested subtask.
 # The packet is flagged (validation_passed=False) but the workflow is NOT

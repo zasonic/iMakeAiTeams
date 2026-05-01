@@ -337,11 +337,23 @@ class MemoryManager:
         ctx.recent_messages = self.get_buffer(conversation_id)
 
         facts = _db.fetchall(
-            "SELECT fact FROM session_facts WHERE conversation_id = ? "
-            "ORDER BY created_at DESC LIMIT 10",
+            "SELECT id, fact FROM session_facts WHERE conversation_id = ? "
+            "ORDER BY COALESCE(last_accessed, created_at) DESC LIMIT 10",
             (conversation_id,),
         )
         ctx.session_facts = [r["fact"] for r in facts]
+        if facts:
+            try:
+                now = datetime.now(timezone.utc).isoformat()
+                ids = [r["id"] for r in facts]
+                placeholders = ",".join("?" * len(ids))
+                _db.execute(
+                    f"UPDATE session_facts SET last_accessed = ? WHERE id IN ({placeholders})",
+                    tuple([now] + ids),
+                )
+                _db.commit()
+            except Exception as exc:
+                log.debug("session_facts last_accessed update failed: %s", exc)
 
         try:
             rag_results = self.rag.search(user_message, top_k=3)

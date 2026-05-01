@@ -196,7 +196,7 @@ class TaskRouter:
             # Per-complexity adaptive thresholds: error rates differ sharply
             # between simple/medium/complex buckets, so a single aggregate
             # rate over-tightens simple queries and under-tightens medium ones.
-            esc_threshold = self._adaptive_threshold(complexity=route.complexity)
+            esc_threshold = self._adaptive_threshold_for(route.complexity) if route.complexity else self._adaptive_threshold()
             if route.model == "local" and route.confidence < esc_threshold:
                 log.info(
                     "UAR escalation: confidence %.2f < threshold %.2f, "
@@ -242,6 +242,40 @@ class TaskRouter:
             return RouteDecision(model="claude", complexity="complex",
                                 reasoning=f"router error: {exc}",
                                 confidence=0.0, needs_context=True)
+
+    def _adaptive_threshold_for(self, complexity: str) -> float:
+        """
+        Per-bucket adaptive escalation threshold.
+
+        Same logic as `_adaptive_threshold()` but restricted to a single
+        complexity bucket and with a lower minimum-sample floor (5 rows
+        instead of 10). Falls back to the aggregate `_adaptive_threshold()`
+        when the per-bucket sample is too thin to be meaningful.
+        """
+        try:
+            import db as _db
+            row = _db.fetchone(
+                "SELECT COUNT(*) as total, "
+                "SUM(CASE WHEN had_error = 1 OR response_empty = 1 THEN 1 ELSE 0 END) as bad "
+                "FROM router_log WHERE route_taken = 'local' "
+                "AND complexity = ? "
+                "AND created_at > datetime('now', '-24 hours')",
+                (complexity,),
+            )
+            if not row or not row["total"] or row["total"] < 5:
+                return self._adaptive_threshold()
+
+            error_rate = row["bad"] / row["total"]
+            if error_rate > ADAPTIVE_ERROR_FLOOR:
+                adjusted = min(0.85, ESCALATION_THRESHOLD + (error_rate - ADAPTIVE_ERROR_FLOOR))
+                log.debug(
+                    "Adaptive threshold (%s bucket): local error rate %.1f%% -> threshold %.2f",
+                    complexity, error_rate * 100, adjusted,
+                )
+                return adjusted
+            return ESCALATION_THRESHOLD
+        except Exception:
+            return ESCALATION_THRESHOLD
 
     def _adaptive_threshold(self, complexity: str | None = None) -> float:
         """
