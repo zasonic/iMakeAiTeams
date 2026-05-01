@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-log = logging.getLogger("MyAIEnv.docker_manager")
+log = logging.getLogger("iMakeAiTeams.docker_manager")
 
 
 # ── Defaults & constants ─────────────────────────────────────────────────────

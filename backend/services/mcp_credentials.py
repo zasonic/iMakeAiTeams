@@ -24,7 +24,7 @@ from typing import Iterator
 
 from .mcp_loader import validate_server_id
 
-log = logging.getLogger("MyAIEnv.mcp_credentials")
+log = logging.getLogger("iMakeAiTeams.mcp_credentials")
 
 KEYRING_SERVICE_PREFIX = "iMakeAiTeams.mcp."
 

@@ -9,7 +9,7 @@ interface Props {
 
 export function FirstRunWizard({ onComplete }: Props) {
   const pushToast = useAppStore((s) => s.pushToast);
-  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [step, setStep] = useState<1 | 2 | 3 | 4 | 5 | 6>(1);
   const [apiKey, setApiKey] = useState("");
   const [verifying, setVerifying] = useState(false);
 
@@ -20,7 +20,7 @@ export function FirstRunWizard({ onComplete }: Props) {
       const rsp = await Settings.verifyApiKey(apiKey);
       if (rsp.ok) {
         pushToast({ kind: "success", text: rsp.message });
-        setStep(2);
+        setStep(3);
       } else {
         pushToast({ kind: "error", text: rsp.message });
       }
@@ -51,16 +51,35 @@ export function FirstRunWizard({ onComplete }: Props) {
       <div className="card max-w-lg w-full">
         <header className="mb-4">
           <div className="text-xs uppercase tracking-wide text-ink-faint mb-1">
-            Setup · step {step} of 3
+            Setup · step {step} of 6
           </div>
           <h1 className="text-xl font-semibold">
-            {step === 1 && "Connect to Claude"}
-            {step === 2 && "Local models"}
-            {step === 3 && "All set"}
+            {step === 1 && "Welcome to iMakeAiTeams"}
+            {step === 2 && "Connect to Claude"}
+            {step === 3 && "Local models"}
+            {step === 4 && "Your workspace"}
+            {step === 5 && "When you're ready for more"}
+            {step === 6 && "All set"}
           </h1>
         </header>
 
         {step === 1 && (
+          <div className="space-y-3">
+            <p className="text-sm text-ink-dim">
+              Build AI teams where Claude handles complex work, local models
+              handle simple tasks, and you set the rules. Everything runs on
+              your machine — your data never leaves your desktop.
+            </p>
+            <button
+              className="btn-primary w-full"
+              onClick={() => setStep(2)}
+            >
+              Get started
+            </button>
+          </div>
+        )}
+
+        {step === 2 && (
           <div className="space-y-3">
             <p className="text-sm text-ink-dim">
               Paste your Anthropic API key. It is stored in the OS keyring,
@@ -95,7 +114,7 @@ export function FirstRunWizard({ onComplete }: Props) {
           </div>
         )}
 
-        {step === 2 && (
+        {step === 3 && (
           <div className="space-y-3">
             <p className="text-sm text-ink-dim">
               Optional: install Ollama or LM Studio to route simple messages
@@ -103,14 +122,62 @@ export function FirstRunWizard({ onComplete }: Props) {
             </p>
             <button
               className="btn-primary w-full"
-              onClick={() => setStep(3)}
+              onClick={() => setStep(4)}
             >
               Continue
             </button>
           </div>
         )}
 
-        {step === 3 && (
+        {step === 4 && (
+          <div className="space-y-3">
+            <p className="text-sm text-ink-dim">
+              <strong>Chat</strong> — Talk to your AI team. Messages are routed
+              to the best model automatically.
+            </p>
+            <p className="text-sm text-ink-dim">
+              <strong>Agents</strong> — Create specialist agents with custom
+              instructions and personalities.
+            </p>
+            <p className="text-sm text-ink-dim">
+              <strong>Documents</strong> — Add files and folders so your team
+              can reference them in conversation.
+            </p>
+            <p className="text-sm text-ink-dim">
+              <strong>Memory</strong> — Your team remembers facts across
+              conversations automatically.
+            </p>
+            <p className="text-sm text-ink-dim">
+              <strong>Settings</strong> — Manage API keys, choose models, and
+              control routing behavior.
+            </p>
+            <button
+              className="btn-primary w-full"
+              onClick={() => setStep(5)}
+            >
+              Continue
+            </button>
+          </div>
+        )}
+
+        {step === 5 && (
+          <div className="space-y-3">
+            <p className="text-sm text-ink-dim">
+              At the bottom of the sidebar there's a Studio Mode toggle. Turn
+              it on to access advanced features: prompt engineering, MCP tool
+              servers, security scanning, and diagnostics. You don't need
+              these to get started.
+            </p>
+            <button
+              className="btn-primary w-full"
+              onClick={() => setStep(6)}
+            >
+              Continue
+            </button>
+          </div>
+        )}
+
+        {step === 6 && (
           <div className="space-y-3">
             <p className="text-sm text-ink-dim">
               You're ready. Open the chat tab to talk to your team.

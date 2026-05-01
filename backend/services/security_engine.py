@@ -47,7 +47,7 @@ from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Optional
 
-log = logging.getLogger("MyAIEnv.security")
+log = logging.getLogger("iMakeAiTeams.security")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -41,7 +41,7 @@ from services.security_engine import (
     validate_fact_for_storage, RiskLedger, RiskCategory, SecurityAssessment,
 )
 
-log = logging.getLogger("MyAIEnv.chat")
+log = logging.getLogger("iMakeAiTeams.chat")
 
 
 def _list_routable_agents() -> list[dict]:

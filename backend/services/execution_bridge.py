@@ -36,7 +36,7 @@ from typing import Any, Callable, Optional
 
 import sse_events
 
-log = logging.getLogger("MyAIEnv.execution_bridge")
+log = logging.getLogger("iMakeAiTeams.execution_bridge")
 
 
 APPROVAL_TIMEOUT_SEC = 60.0

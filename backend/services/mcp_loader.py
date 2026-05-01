@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-log = logging.getLogger("MyAIEnv.mcp_loader")
+log = logging.getLogger("iMakeAiTeams.mcp_loader")
 
 MANIFEST_FILENAME = "mcp.json"
 _VALID_SERVER_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")

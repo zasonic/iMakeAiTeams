@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-log = logging.getLogger("MyAIEnv.audit_log")
+log = logging.getLogger("iMakeAiTeams.audit_log")
 
 
 def _ts_ms() -> str:

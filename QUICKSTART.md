@@ -40,10 +40,10 @@ run `npm install`, create the venv yourself, and use `npm run dev`.
 
 | What | Path (Windows) |
 |---|---|
-| Settings file | `%APPDATA%\MyAIAgentHub\settings.json` |
-| Conversation database | `%APPDATA%\MyAIAgentHub\myai.db` |
-| Main process log | `%APPDATA%\MyAIAgentHub\main.log` |
-| Sidecar log | `%APPDATA%\MyAIAgentHub\sidecar.log` |
+| Settings file | `%APPDATA%\iMakeAiTeams\settings.json` |
+| Conversation database | `%APPDATA%\iMakeAiTeams\myai.db` |
+| Main process log | `%APPDATA%\iMakeAiTeams\main.log` |
+| Sidecar log | `%APPDATA%\iMakeAiTeams\sidecar.log` |
 | API key | Windows Credential Manager (service: `iMakeAiTeams`) |
 
 On macOS swap `%APPDATA%` for `~/Library/Application Support/`.
@@ -53,7 +53,7 @@ On macOS swap `%APPDATA%` for `~/Library/Application Support/`.
 **"backend\.venv is missing"** — `1-install.bat` didn't finish. Re-run it; the
 script is safe to run multiple times.
 
-**Sidecar fails to start** — open `%APPDATA%\MyAIAgentHub\sidecar.log` and
+**Sidecar fails to start** — open `%APPDATA%\iMakeAiTeams\sidecar.log` and
 look at the last 50 lines. Common causes: port 5173/5174 in use, antivirus
 blocking the PyInstaller-bundled exe, or missing Visual C++ redistributable.
 

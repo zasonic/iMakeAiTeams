@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 import db as _db
 
-log = logging.getLogger("MyAIEnv.agents")
+log = logging.getLogger("iMakeAiTeams.agents")
 
 
 def _now() -> str:
