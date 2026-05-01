@@ -39,6 +39,7 @@ from services import qwen_thinking
 from services.security_engine import (
     quarantine_chunks, render_quarantined_context, enforce_context_rules,
     validate_fact_for_storage, RiskLedger, RiskCategory, SecurityAssessment,
+    RISK_ABORT_THRESHOLD,
 )
 
 log = logging.getLogger("iMakeAiTeams.chat")
@@ -148,7 +149,11 @@ class ChatOrchestrator:
         self.router = router
         self.memory = memory
         self._settings = settings
-        self._risk_ledgers: dict[str, RiskLedger] = {}  # per-conversation
+        # DiLoCo blast-radius containment: instead of a fresh-per-turn ledger
+        # (which forgets) or a perpetual ledger (which locks out after ~9
+        # messages), keep a sliding window of the last N turn-level risk
+        # scores. Sustained high risk trips the abort; transient spikes don't.
+        self._risk_history: dict[str, list[float]] = {}  # per-conversation
         # Single boundary for worker invocation (Phase 1) with Phase 3 LLM
         # fallback wired through Qwen3 /no_think for routing decisions that
         # have no deterministic skill match.
@@ -223,10 +228,10 @@ class ChatOrchestrator:
                 (conversation_id,),
             )
             conn.commit()
-        # Drop the in-memory per-conversation risk ledger too. Without
+        # Drop the in-memory per-conversation risk history too. Without
         # this, the dict accumulated entries forever — every send to a
         # new conversation_id added one and nothing ever removed them.
-        self._risk_ledgers.pop(conversation_id, None)
+        self._risk_history.pop(conversation_id, None)
 
     def branch_conversation(self, conversation_id: str,
                             from_message_id: str) -> dict:
@@ -643,30 +648,17 @@ class ChatOrchestrator:
             security.context_violations = violations
 
             # --- Risk Ledger: track cumulative risk for THIS turn only ---
-            # Default: a fresh ledger is created each turn because DATA_READ +
+            # A fresh ledger is created each turn because DATA_READ +
             # EXTERNAL_API accumulate to 0.35 per message; persisting across
             # turns causes the conversation to hit the 3.0 abort threshold
             # after ~9 messages.
             #
-            # Opt-in: when sliding_window_risk_enabled is True, we reuse the
-            # per-conversation ledger and rely on its time-window pruning to
-            # keep recent risk in scope without compounding forever. This
-            # catches sustained risky behavior across turns (e.g. repeated
-            # injection attempts) but leaves quiet conversations unaffected.
-            sliding_enabled = bool(self._settings.get("sliding_window_risk_enabled", False))
-            if sliding_enabled:
-                window_minutes = float(self._settings.get("sliding_window_risk_minutes", 10.0))
-                window_seconds = max(60.0, window_minutes * 60.0)
-                ledger = self._risk_ledgers.get(conversation_id)
-                if ledger is None or getattr(ledger, "_sliding_window_seconds", 0.0) <= 0:
-                    # No prior ledger or one that was created without a window
-                    # (e.g. settings flipped on mid-conversation) — start fresh
-                    # so the window semantics apply consistently from here on.
-                    ledger = RiskLedger(sliding_window_seconds=window_seconds)
-                    self._risk_ledgers[conversation_id] = ledger
-            else:
-                ledger = RiskLedger()
-                self._risk_ledgers[conversation_id] = ledger
+            # DiLoCo blast-radius containment: replace the per-turn amnesia
+            # with a sliding window of the last 5 turn-level cumulative
+            # scores. A sustained injection campaign (5+ turns averaging
+            # 0.6+) trips the abort; a single spike followed by normal
+            # turns does not.
+            ledger = RiskLedger()
             ledger.record(
                 RiskCategory.DATA_READ,
                 f"Context assembled: {len(mem.rag_chunks)} RAG chunks, "
@@ -679,6 +671,15 @@ class ChatOrchestrator:
                     weight_override=0.15,  # low weight for standard chat
                 )
             security.risk_assessment = ledger.assess()
+
+            history = self._risk_history.setdefault(conversation_id, [])
+            history.append(security.risk_assessment.cumulative_score)
+            if len(history) > 5:
+                del history[:-5]
+            if len(history) >= 5:
+                window_avg = sum(history) / len(history)
+                if window_avg > RISK_ABORT_THRESHOLD / 5:
+                    security.risk_assessment.should_abort = True
 
             # --- Hard abort if risk threshold exceeded ---
             if security.risk_assessment.should_abort:
@@ -763,6 +764,42 @@ class ChatOrchestrator:
             tokens_out = worker_result.output_tokens
             if worker_result.had_error:
                 had_error = True
+
+        # ── Post-assembly alignment check (informational) ───────────────────
+        # When an agent was involved, ask the local model whether the worker's
+        # response actually addresses the user's request. Best-effort, never
+        # blocks or replaces the response — only emits an alignment_warning
+        # event when the local model says the response drifted.
+        if (
+            not had_error
+            and agent_id is not None
+            and response_text
+            and len(user_message.split()) >= 8
+        ):
+            try:
+                from services.task_artifacts import local_first_call
+                align_raw = local_first_call(
+                    self.local, None,
+                    "Does this response address the user's original request? "
+                    "Return ONLY JSON: {\"aligned\": true/false, \"reason\": \"one sentence\"}",
+                    f"REQUEST: {user_message[:300]}\nRESPONSE: {response_text[:500]}",
+                    max_tokens=100,
+                )
+                if align_raw:
+                    import json as _json
+                    _astart = align_raw.find("{")
+                    _aend = align_raw.rfind("}")
+                    if _astart != -1 and _aend != -1 and _aend > _astart:
+                        try:
+                            parsed = _json.loads(align_raw[_astart:_aend + 1])
+                        except (ValueError, TypeError):
+                            parsed = {}
+                        if parsed.get("aligned") is False:
+                            _emit_event("alignment_warning", {
+                                "reason": parsed.get("reason", "Response may not address your request"),
+                            })
+            except Exception:
+                pass  # alignment check is best-effort, never block response
 
         # ── Local response quality gate ─────────────────────────────────────
         # If response came from local and looks weak, escalate to Claude

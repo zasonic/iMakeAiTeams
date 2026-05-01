@@ -634,6 +634,11 @@ _MIGRATIONS = [
     ("vec.1.0", [
         # Tables created by CREATE TABLE/VIRTUAL TABLE IF NOT EXISTS above.
     ]),
+
+    # ── Session fact relevance decay: track last access for retrieval order ─
+    ("session_facts.last_accessed", [
+        "ALTER TABLE session_facts ADD COLUMN last_accessed TEXT",
+    ]),
 ]
 
 
