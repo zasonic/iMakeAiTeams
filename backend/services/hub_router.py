@@ -44,7 +44,7 @@ from models import (
     WorkerResult,
 )
 
-log = logging.getLogger("MyAIEnv.hub_router")
+log = logging.getLogger("iMakeAiTeams.hub_router")
 
 # Below this score, deterministic routing fails over to the LLM fallback.
 MIN_SKILL_MATCH_SCORE: float = 0.5

@@ -26,7 +26,7 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 
-APP_NAME = "MyAIAgentHub"
+APP_NAME = "iMakeAiTeams"
 APP_AUTHOR = "iMakeAiTeams"
 MIGRATION_SENTINEL = ".migrated_v5"
 V5_RENAME_SENTINEL = ".migrated_v6_rename"

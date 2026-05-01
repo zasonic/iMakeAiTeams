@@ -19,7 +19,7 @@ from services.mcp_loader import IngestError, ingest_folder, remove_server
 
 from ._base import BaseAPI
 
-log = logging.getLogger("MyAIEnv.api.mcp")
+log = logging.getLogger("iMakeAiTeams.api.mcp")
 
 
 class MCPAPI(BaseAPI):

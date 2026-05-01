@@ -41,7 +41,7 @@ from typing import Callable, Optional
 
 from services.audit_log import AuditLog
 
-log = logging.getLogger("MyAIEnv.lifecycle")
+log = logging.getLogger("iMakeAiTeams.lifecycle")
 
 DEFAULT_CONFIRMATION_TIMEOUT_S: float = 30.0
 

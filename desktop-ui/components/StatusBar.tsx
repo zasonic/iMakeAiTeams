@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from "react";
 
-import { Settings, Docker } from "@/api/client";
+import { Settings, Docker, System } from "@/api/client";
 import { useAppStore } from "@/stores/appStore";
 
 export function StatusBar() {
@@ -92,6 +92,19 @@ export function StatusBar() {
     }
   };
 
+  const handleExportLogs = async () => {
+    try {
+      await System.exportDiagnostics();
+    } catch {
+      try {
+        const path = await window.electronAPI.getUserDataPath();
+        await window.electronAPI.openExternal(path);
+      } catch (err) {
+        console.error("export logs failed:", err);
+      }
+    }
+  };
+
   const powerModeBadge = (() => {
     if (!powerModeEnabled) return null;
     if (dockerStatus?.openclaw_healthy) {
@@ -135,9 +148,14 @@ export function StatusBar() {
       <div className="flex items-center gap-3">
         {powerModeBadge}
         {status?.status === "crashed" && (
-          <button className="btn-danger text-xs" onClick={handleRestart}>
-            Restart Backend
-          </button>
+          <>
+            <button className="btn-danger text-xs" onClick={handleRestart}>
+              Restart Backend
+            </button>
+            <button className="btn-ghost text-xs" onClick={handleExportLogs}>
+              Export logs
+            </button>
+          </>
         )}
         {version && (
           <span className="text-xs text-ink-faint font-mono">v{version}</span>

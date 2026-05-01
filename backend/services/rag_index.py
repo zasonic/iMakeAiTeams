@@ -24,7 +24,7 @@ import logging
 import os
 from pathlib import Path
 
-log = logging.getLogger("MyAIEnv.rag_index")
+log = logging.getLogger("iMakeAiTeams.rag_index")
 
 # Similarity threshold below which chunks are still returned but scored
 # (the MemoryManager decides whether to include them).

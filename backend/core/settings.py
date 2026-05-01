@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("MyAIEnv.settings")
+log = logging.getLogger("iMakeAiTeams.settings")
 
 # ── Secret routing via OS keyring ────────────────────────────────────────────
 # Keys in this set are stored in the platform keyring (DPAPI on Windows,

@@ -76,9 +76,9 @@ On Windows, `3-build-installer.bat` chains all three and produces
 - SQLite DB: `user_dir() / "myai.db"`
 - API key: OS keyring under service name `iMakeAiTeams`
 
-`user_dir()` resolves to `%APPDATA%/MyAIAgentHub` on Windows,
-`~/Library/Application Support/MyAIAgentHub` on macOS,
-`~/.local/share/MyAIAgentHub` on Linux.
+`user_dir()` resolves to `%APPDATA%/iMakeAiTeams` on Windows,
+`~/Library/Application Support/iMakeAiTeams` on macOS,
+`~/.local/share/iMakeAiTeams` on Linux.
 
 ## Code style
 

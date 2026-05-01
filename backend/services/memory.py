@@ -40,7 +40,7 @@ from models import SessionHistory
 from services.prompt_library import get_active_prompt
 from services.security_engine import validate_fact_for_storage, MAX_FACTS_PER_CONVERSATION
 
-log = logging.getLogger("MyAIEnv.memory")
+log = logging.getLogger("iMakeAiTeams.memory")
 
 SIMILARITY_THRESHOLD = 0.5
 

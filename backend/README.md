@@ -35,5 +35,5 @@ Then hit `http://127.0.0.1:<port>/healthz` (port is printed to stdout as
 ## State
 
 All persistent state lives outside this folder, in
-`core/paths.py:user_dir()` (`%APPDATA%/MyAIAgentHub` on Windows). This
+`core/paths.py:user_dir()` (`%APPDATA%/iMakeAiTeams` on Windows). This
 folder is the application code; it never writes inside itself.

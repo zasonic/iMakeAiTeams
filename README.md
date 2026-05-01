@@ -1,55 +1,50 @@
 # iMakeAiTeams
 
-A local-first desktop app where Claude and local models work as a coordinated team.
-Electron shell + React UI + Python (FastAPI) sidecar.
+Build AI teams that work together on your desktop.
 
-## What's in this folder
+## What this does
 
-| Path | What it is |
-|---|---|
-| `desktop-ui/` | React renderer — the windows, panels, and chat UI |
-| `desktop-shell/` | Electron main + preload — the desktop app host |
-| `backend/` | Python FastAPI sidecar — chat orchestration, RAG, agents, MCP |
-| `branding/` | App icon and bundled-sidecar staging directory |
-| `build-scripts/` | Helpers invoked by `npm run` (sidecar build, packaging) |
-| `archive/legacy-v5/` | Historical snapshot of the predecessor app. Not used at runtime. |
-| `1-install.bat` / `.ps1` | First-time Windows setup (Node + Python + dependencies) |
-| `2-run-dev.bat` | Start the app with hot-reload |
-| `3-build-installer.bat` | Build the Windows NSIS installer |
+Chat with Claude and local AI models in a single interface. Create
+specialist agents with custom instructions and personalities. Index your
+files and folders so agents can reference them in conversation. Everything
+runs locally — your data stays on your machine.
 
-## Prerequisites
+## Download
 
-- **Windows 10/11** (Mac/Linux dev possible — see `CONTRIBUTING.md`)
-- **Node.js 20+** and **Python 3.12+** (the installer script can fetch both)
-- **Anthropic API key** — entered in the app's Settings on first launch
-- **Optional:** [Ollama](https://ollama.ai) for free local inference
+Download the latest installer from
+[Releases](https://github.com/zasonic/iMakeAiTeams/releases). Double-click
+to install. No setup required.
 
-## Quickstart (Windows)
+## What you need
 
-```text
-1. Double-click  1-install.bat   (one-time; installs Node, Python, npm + pip deps)
-2. Double-click  2-run-dev.bat   (starts Electron + React + sidecar with hot-reload)
-3. In the app    Settings -> paste your Anthropic API key
-```
+- An [Anthropic API key](https://console.anthropic.com/settings/keys).
+- Optionally, [Ollama](https://ollama.ai) for free local inference.
 
-To produce a distributable installer: double-click `3-build-installer.bat`.
-The result lands in `dist/iMakeAiTeams-Setup-<version>.exe`.
+## What you'll see
 
-See [`QUICKSTART.md`](QUICKSTART.md) for a detailed walkthrough and troubleshooting,
-or [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev-from-source flow on Mac/Linux.
+- **Chat** — Talk to your AI team; messages route to the best model automatically.
+- **Agents** — Create specialists with custom instructions and personalities.
+- **Documents** — Add files and folders for your team to reference.
+- **Memory** — Your team remembers facts across conversations.
+- **Settings** — API keys, models, and routing controls.
 
-## Architecture in one paragraph
+Toggle Studio Mode at the bottom of the sidebar for advanced features:
+prompt engineering, MCP tool servers, security scanning, and diagnostics.
 
-The Electron shell (`desktop-shell/`) owns the window and spawns the Python sidecar
-on a random localhost port with a per-launch bearer token. The React renderer
-(`desktop-ui/`) talks to the sidecar over HTTP + Server-Sent Events; all network
-traffic is 127.0.0.1. The sidecar (`backend/`) routes each message between Claude
-and a local model, manages multi-agent teams and workflows, and persists state to
-your OS user-data directory (`%APPDATA%/MyAIAgentHub` on Windows).
+## Where your data lives
 
-## Where things live at runtime
+- Settings and database in `%APPDATA%/iMakeAiTeams/` on Windows,
+  `~/Library/Application Support/iMakeAiTeams/` on macOS.
+- Logs in the same folder.
+- API key stored in the OS keyring (Windows Credential Manager / macOS
+  Keychain), not on disk.
 
-- **Settings + database:** `%APPDATA%/MyAIAgentHub/` (Windows) or
-  `~/Library/Application Support/MyAIAgentHub/` (macOS)
-- **Logs:** same folder, `main.log` and `sidecar.log`
-- **API key:** stored in the OS keyring, not on disk
+## For developers
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, architecture, and build instructions.
+
+See [QUICKSTART.md](QUICKSTART.md) for the developer quickstart using batch files.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

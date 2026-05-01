@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import {
   Docker,
   Settings,
+  System,
   type DockerStatus,
   type SettingsPayload,
 } from "@/api/client";
@@ -283,6 +284,40 @@ export function SettingsPanel() {
         pickWorkspace={pickWorkspace}
         savePmApiKey={savePmApiKey}
       />
+
+      <section className="card">
+        <h3 className="font-semibold mb-2">Troubleshooting</h3>
+        <div className="space-y-2">
+          <button
+            type="button"
+            className="btn-ghost"
+            onClick={async () => {
+              try {
+                await System.exportDiagnostics();
+                pushToast({ kind: "success", text: "Diagnostics exported" });
+              } catch {
+                pushToast({ kind: "error", text: "Export failed" });
+              }
+            }}
+          >
+            Export diagnostics
+          </button>
+          <button
+            type="button"
+            className="btn-danger"
+            onClick={() => {
+              const ok = window.confirm(
+                "This will clear your conversation history, memory, and settings. Your API key (stored in the OS keyring) will not be affected. This cannot be undone. Continue?",
+              );
+              if (ok) {
+                window.electronAPI.restartSidecar();
+              }
+            }}
+          >
+            Reset to defaults
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

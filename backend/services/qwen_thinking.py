@@ -32,7 +32,7 @@ from typing import Callable, Optional
 
 from models import RoutingDecision, TaskDescriptor
 
-log = logging.getLogger("MyAIEnv.qwen_thinking")
+log = logging.getLogger("iMakeAiTeams.qwen_thinking")
 
 THINK_DIRECTIVE: str = "/think"
 NO_THINK_DIRECTIVE: str = "/no_think"

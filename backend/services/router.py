@@ -26,7 +26,7 @@ import re
 
 from models import RouteDecision
 
-log = logging.getLogger("MyAIEnv.router")
+log = logging.getLogger("iMakeAiTeams.router")
 
 # ── Confidence thresholds ─────────────────────────────────────────────────────
 # Below this confidence, local routes escalate to Claude.
