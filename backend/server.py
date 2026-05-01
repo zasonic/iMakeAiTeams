@@ -223,7 +223,6 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
             "http://localhost:5174",
             "http://127.0.0.1:5174",
             "app://-",            # electron-vite production
-            "file://",
         ],
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],

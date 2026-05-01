@@ -105,12 +105,12 @@ class _FirewallSettings:
         val = "1" if enabled else "0"
         now = datetime.now(timezone.utc).isoformat()
         try:
-            db.execute(
-                "INSERT INTO settings (key, value, updated_at) VALUES ('firewall_enabled', ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (val, now),
-            )
-            db.commit()
+            with db.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO settings (key, value, updated_at) VALUES ('firewall_enabled', ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    (val, now),
+                )
         except Exception as exc:
             log.warning("FirewallSettings write failed: %s", exc)
         self._cached = enabled
@@ -223,26 +223,26 @@ def _make_result(
 
 def _log_scan(result: dict, scan_type: str, session_id: str | None, content_preview: str) -> None:
     try:
-        db.execute(
-            """
-            INSERT INTO security_scan_log
-                (scan_id, scan_type, verdict, scanner, score, reason,
-                 flagged_phrases_json, duration_ms, session_id, model_tier,
-                 content_preview, degraded, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, '', ?, ?, ?)
-            """,
-            (
-                result["scan_id"], scan_type, result["verdict"],
-                result["scanner"], result["score"],
-                result.get("reason", "")[:500],
-                result.get("duration_ms", 0.0),
-                session_id,
-                content_preview[:200],
-                1 if result.get("degraded") else 0,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        db.commit()
+        with db.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO security_scan_log
+                    (scan_id, scan_type, verdict, scanner, score, reason,
+                     flagged_phrases_json, duration_ms, session_id, model_tier,
+                     content_preview, degraded, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, '', ?, ?, ?)
+                """,
+                (
+                    result["scan_id"], scan_type, result["verdict"],
+                    result["scanner"], result["score"],
+                    result.get("reason", "")[:500],
+                    result.get("duration_ms", 0.0),
+                    session_id,
+                    content_preview[:200],
+                    1 if result.get("degraded") else 0,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
     except Exception as exc:
         log.warning("security_scan_log write failed: %s", exc)
 

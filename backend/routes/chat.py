@@ -20,7 +20,7 @@ router = APIRouter()
 
 class ChatSendIn(BaseModel):
     conversation_id: str
-    user_message: str
+    user_message: str = Field(..., max_length=200_000)
     agent_id: str = ""
 
 
@@ -45,7 +45,7 @@ class ChatExportIn(BaseModel):
 
 
 class ChatThinkingIn(BaseModel):
-    user_message: str
+    user_message: str = Field(..., max_length=200_000)
     budget_tokens: int = 10000
 
 
