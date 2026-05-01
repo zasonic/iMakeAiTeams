@@ -381,6 +381,10 @@ _EXECUTION_VERBS = (
     "save it to", "write to", "list processes", "check disk",
     "find files", "go to ", "click ", "browse to", "screenshot",
     "test this code", "run this", "run my", "run the",
+    "plot ", "chart ", "graph ", "visualize", "analyze this",
+    "analyze the", "show me the data", "show trends",
+    "create a chart", "create a graph", "create a plot",
+    "generate a chart", "generate a report",
 )
 
 # Phrases that almost always describe conversation, not an action request.
@@ -395,6 +399,7 @@ _CHAT_VERBS = (
 _SHELL_HINT = re.compile(r"(?i)\b(?:bash|powershell|terminal|shell|cmd|cli)\b")
 _FILE_HINT = re.compile(r"(?i)\b(?:file|folder|directory|disk|drive|repo|repository)\b")
 _CODE_FENCE = re.compile(r"```")
+_DATA_HINT = re.compile(r"(?i)\b(?:csv|xlsx?|spreadsheet|dataset|dataframe|column|row|table)\b")
 
 
 def _deterministic_score(message: str) -> tuple[float, str]:
@@ -428,6 +433,9 @@ def _deterministic_score(message: str) -> tuple[float, str]:
     if _CODE_FENCE.search(text):
         score += 0.1
         hits.append("code-fence")
+    if _DATA_HINT.search(text):
+        score += 0.2
+        hits.append("data-hint")
     if text.endswith("?"):
         score -= 0.2
         hits.append("question-mark")
