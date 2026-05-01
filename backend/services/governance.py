@@ -35,7 +35,7 @@ try:
 except ImportError:
     _db = None
 
-log = logging.getLogger("MyAIAgentHub.governance")
+log = logging.getLogger("iMakeAiTeams.governance")
 
 
 @dataclass
