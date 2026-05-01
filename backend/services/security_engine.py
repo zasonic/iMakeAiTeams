@@ -249,10 +249,18 @@ class RiskLedger:
 
     This doesn't try to detect attacks — it limits blast radius by
     putting a hard ceiling on how much damage any workflow can do.
+
+    Sliding-window mode (DiLoCo-inspired, opt-in): when constructed with
+    `sliding_window_seconds > 0`, entries older than that window are pruned
+    on every assess() call. Lets risk memory persist across turns within
+    the window without the cumulative-forever failure mode that locks a
+    conversation out after ~9 messages. Default (0) preserves the legacy
+    "fresh ledger per turn" semantics, so existing callers are unaffected.
     """
 
-    def __init__(self):
+    def __init__(self, sliding_window_seconds: float = 0.0):
         self._entries: list[RiskEntry] = []
+        self._sliding_window_seconds = max(0.0, float(sliding_window_seconds))
 
     def record(
         self,
@@ -273,7 +281,15 @@ class RiskLedger:
         self._entries.append(entry)
         return self.assess()
 
+    def _prune_outside_window(self) -> None:
+        """Drop entries older than the sliding window. No-op when disabled."""
+        if self._sliding_window_seconds <= 0:
+            return
+        cutoff = time.time() - self._sliding_window_seconds
+        self._entries = [e for e in self._entries if e.timestamp >= cutoff]
+
     def assess(self) -> RiskAssessment:
+        self._prune_outside_window()
         cumulative = sum(e.weight for e in self._entries)
         return RiskAssessment(
             entries=list(self._entries),
@@ -287,6 +303,8 @@ class RiskLedger:
 
     @property
     def score(self) -> float:
+        # Property is documented to return the current cumulative without
+        # mutating the ledger, so we don't prune here.
         return sum(e.weight for e in self._entries)
 
 

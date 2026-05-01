@@ -643,11 +643,30 @@ class ChatOrchestrator:
             security.context_violations = violations
 
             # --- Risk Ledger: track cumulative risk for THIS turn only ---
-            # A fresh ledger is created each turn because DATA_READ + EXTERNAL_API
-            # accumulate to 0.35 per message; persisting across turns causes the
-            # conversation to hit the 3.0 abort threshold after ~9 messages.
-            ledger = RiskLedger()
-            self._risk_ledgers[conversation_id] = ledger
+            # Default: a fresh ledger is created each turn because DATA_READ +
+            # EXTERNAL_API accumulate to 0.35 per message; persisting across
+            # turns causes the conversation to hit the 3.0 abort threshold
+            # after ~9 messages.
+            #
+            # Opt-in: when sliding_window_risk_enabled is True, we reuse the
+            # per-conversation ledger and rely on its time-window pruning to
+            # keep recent risk in scope without compounding forever. This
+            # catches sustained risky behavior across turns (e.g. repeated
+            # injection attempts) but leaves quiet conversations unaffected.
+            sliding_enabled = bool(self._settings.get("sliding_window_risk_enabled", False))
+            if sliding_enabled:
+                window_minutes = float(self._settings.get("sliding_window_risk_minutes", 10.0))
+                window_seconds = max(60.0, window_minutes * 60.0)
+                ledger = self._risk_ledgers.get(conversation_id)
+                if ledger is None or getattr(ledger, "_sliding_window_seconds", 0.0) <= 0:
+                    # No prior ledger or one that was created without a window
+                    # (e.g. settings flipped on mid-conversation) — start fresh
+                    # so the window semantics apply consistently from here on.
+                    ledger = RiskLedger(sliding_window_seconds=window_seconds)
+                    self._risk_ledgers[conversation_id] = ledger
+            else:
+                ledger = RiskLedger()
+                self._risk_ledgers[conversation_id] = ledger
             ledger.record(
                 RiskCategory.DATA_READ,
                 f"Context assembled: {len(mem.rag_chunks)} RAG chunks, "
