@@ -179,6 +179,8 @@ export const Chat = {
     api.post<unknown>("/api/chat/export_conversation", { conversation_id, fmt }),
   tokenStats: () => api.get<unknown>("/api/chat/token_stats"),
   routerStats: () => api.get<unknown>("/api/chat/router_stats"),
+  countTokens: (user_message: string) =>
+    api.post<{ token_count: number }>("/api/chat/count_tokens", { user_message }),
 };
 
 export const Agents = {

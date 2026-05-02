@@ -53,6 +53,10 @@ class ChatStopIn(BaseModel):
     conversation_id: str = ""
 
 
+class CountTokensIn(BaseModel):
+    user_message: str = Field(..., max_length=200_000)
+
+
 @router.post("/send")
 async def send(body: ChatSendIn, request: Request) -> dict:
     # `chat_send` is decorated with @rate_limit_chat; when refused it returns
@@ -125,3 +129,16 @@ async def router_stats(request: Request) -> dict:
 async def thinking(body: ChatThinkingIn, request: Request) -> dict:
     get_api(request).ask_with_thinking(body.user_message, body.budget_tokens)
     return {"ok": True}
+
+
+@router.post("/count_tokens")
+async def count_tokens(body: CountTokensIn, request: Request) -> dict:
+    api = get_api(request)
+    claude = getattr(api, "_claude", None)
+    if not claude:
+        return {"token_count": 0}
+    count = claude.count_tokens(
+        system="",
+        messages=[{"role": "user", "content": body.user_message}],
+    )
+    return {"token_count": count}

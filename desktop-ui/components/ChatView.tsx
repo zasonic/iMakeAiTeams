@@ -65,6 +65,7 @@ export function ChatView() {
   >("idle");
   const [activeTaskId, setActiveTaskId] = useState<string>("");
   const [loadError, setLoadError] = useState<string>("");
+  const [tokenCount, setTokenCount] = useState(0);
 
   const busy = sendPhase !== "idle";
 
@@ -129,6 +130,24 @@ export function ChatView() {
     };
   }, [ready, activeId]);
 
+  // Debounced token count — fires 800 ms after the user stops typing so the
+  // free count_tokens endpoint isn't hit on every keystroke.
+  useEffect(() => {
+    if (!ready || !input.trim()) {
+      setTokenCount(0);
+      return;
+    }
+    const timer = window.setTimeout(async () => {
+      try {
+        const result = await Chat.countTokens(input);
+        setTokenCount(result.token_count);
+      } catch {
+        setTokenCount(0);
+      }
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [input, ready]);
+
 
   const newConversation = async () => {
     try {
@@ -150,6 +169,7 @@ export function ChatView() {
     sendLockRef.current = true;
     const text = input;
     setInput("");
+    setTokenCount(0);
     setSendPhase("classifying");
     setMessages((prev) => [
       ...prev,
@@ -475,6 +495,11 @@ export function ChatView() {
               </button>
             )}
           </div>
+          {tokenCount > 0 && (
+            <div className="text-[11px] text-ink-faint text-right mt-1">
+              ~{tokenCount.toLocaleString()} tokens
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -614,7 +639,7 @@ function PowerModeMessage({ run, onApprove, onCancel }: PowerModeMessageProps) {
     <div className="max-w-[85%] rounded-xl px-4 py-3 text-sm bg-bg-2 text-ink border border-line space-y-2">
       <div className="flex items-center gap-2 text-[11px] text-ink-faint">
         <span className="px-1.5 py-0.5 rounded bg-accent/15 text-accent border border-accent/30 font-semibold">
-          ⚡ Power Mode
+          &#9889; Power Mode
         </span>
         <span className="font-mono">{run.taskId}</span>
         {showProgress && (
