@@ -31,6 +31,11 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — Per-call model override for chat_multi_turn():
+  - Adds an optional `model` parameter to chat_multi_turn() so lightweight
+    callers (e.g. ExecutionClassifier) can route to a cheaper model without
+    changing the global configuration. Fully backward-compatible.
 """
 
 from pathlib import Path
@@ -58,7 +63,7 @@ class ClaudeClient:
         self._use_caching = use_caching
         self._file_cache: dict[str, str] = {}  # file_path -> file_id
 
-    # ── Configuration ────────────────────────────────────────────────────────────
+    # ── Configuration ────────────────────────────────────────────────────────────────────
 
     def update_config(
         self,
@@ -73,7 +78,7 @@ class ClaudeClient:
         if use_caching is not None:
             self._use_caching = use_caching
 
-    # ── Content helpers ──────────────────────────────────────────────────────────
+    # ── Content helpers ──────────────────────────────────────────────────────────────────
 
     def _build_content(self, project_summary: str, user_message: str) -> list:
         """
@@ -117,7 +122,7 @@ class ClaudeClient:
             return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         return system
 
-    # ── Single-turn chat ─────────────────────────────────────────────────────────
+    # ── Single-turn chat ───────────────────────────────────────────────────────────────────────
 
     def chat(self, system: str, project_summary: str, user_message: str,
              max_tokens: int = 4096) -> str:
@@ -132,7 +137,7 @@ class ClaudeClient:
         response = self._client.messages.create(**kwargs)
         return response.content[0].text
 
-    # ── Single-turn streaming ────────────────────────────────────────────────────
+    # ── Single-turn streaming ──────────────────────────────────────────────────────────────────
 
     def stream_chat(
         self,
@@ -160,9 +165,15 @@ class ClaudeClient:
                 full_text += token
         return full_text
 
-    # ── Multi-turn chat ──────────────────────────────────────────────────────────
+    # ── Multi-turn chat ───────────────────────────────────────────────────────────────────────
 
-    def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096) -> dict:
+    def chat_multi_turn(
+        self,
+        system: str,
+        messages: list,
+        max_tokens: int = 4096,
+        model: str | None = None,
+    ) -> dict:
         """
         Send a multi-turn conversation. messages = [{"role":..., "content":...}]
         Returns dict with "text", "input_tokens", "output_tokens".
@@ -171,9 +182,13 @@ class ClaudeClient:
         repeated turns within the 5-minute cache window are billed at the
         cache-read rate (90% input-token discount on the system prompt
         portion of the request).
+
+        model: optional per-call model override. When None, uses self._model.
+               Use this to route lightweight calls (e.g. classification) to a
+               cheaper model without changing the global configuration.
         """
         kwargs = {
-            "model": self._model,
+            "model": model or self._model,
             "max_tokens": max_tokens,
             "system": self._build_system_with_cache(system),
             "messages": messages,
@@ -222,7 +237,7 @@ class ClaudeClient:
                 pass  # usage unavailable — caller handles gracefully
         return full_text, usage
 
-    # ── Tool use (agentic loop) ──────────────────────────────────────────────────
+    # ── Tool use (agentic loop) ────────────────────────────────────────────────────────────────
 
     def call_with_tools(
         self,
@@ -266,7 +281,7 @@ class ClaudeClient:
             },
         }
 
-    # ── File upload ──────────────────────────────────────────────────────────────
+    # ── File upload ──────────────────────────────────────────────────────────────────────────
 
     def upload_file(self, file_path: Path, mime_type: str) -> str:
         """
@@ -284,7 +299,7 @@ class ClaudeClient:
         self._file_cache[key] = file_id
         return file_id
 
-    # ── Chat with uploaded file ──────────────────────────────────────────────────
+    # ── Chat with uploaded file ─────────────────────────────────────────────────────────────────
 
     def chat_with_file(self, system: str, file_id: str, user_message: str) -> str:
         """
@@ -305,7 +320,7 @@ class ClaudeClient:
         )
         return response.content[0].text
 
-    # ── Extended thinking ────────────────────────────────────────────────────────
+    # ── Extended thinking ──────────────────────────────────────────────────────────────────────────
 
     def extended_thinking_chat(
         self,
@@ -338,7 +353,7 @@ class ClaudeClient:
                 answer_text = block.text
         return {"thinking": thinking_text, "answer": answer_text}
 
-    # ── Streaming extended thinking ──────────────────────────────────────────────
+    # ── Streaming extended thinking ───────────────────────────────────────────────────────────────
 
     def stream_extended_thinking_chat(
         self,

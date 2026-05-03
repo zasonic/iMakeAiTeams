@@ -26,6 +26,12 @@ Design notes:
   - ``invoke()`` is the only place under ``app/services/`` (besides the
     orchestrator's bootstrap) allowed to call worker model methods. The Phase 1
     test suite enforces this via static AST inspection.
+
+ExecutionClassifier v2:
+  LLM fallback now uses claude-haiku-4-5-20251001 (20× cheaper than Sonnet,
+  sub-200ms latency, adequate accuracy for binary chat/execution classification).
+  Existing exception handling already degrades to the deterministic result on
+  any API failure, so the fallback chain is unchanged.
 """
 
 from __future__ import annotations
@@ -71,7 +77,7 @@ class HubRouter:
         # raises if it would be needed without a fallback configured.
         self._llm_fallback = llm_fallback
 
-    # ── Skill scoring (deterministic, no LLM) ────────────────────────────────
+    # ── Skill scoring (deterministic, no LLM) ──────────────────────────────────────────
 
     @staticmethod
     def _parse_skills(raw: str | None) -> list[Skill]:
@@ -128,7 +134,7 @@ class HubRouter:
         score = max(0.0, min(1.0, score))
         return (score, scope_ok_skill.name)
 
-    # ── Public routing API ──────────────────────────────────────────────────
+    # ── Public routing API ───────────────────────────────────────────────────────
 
     def route_for_agent(self, agent_id: str, task: TaskDescriptor) -> RoutingDecision:
         """Caller-specified agent path. Validates authz; never runs the LLM."""
@@ -229,7 +235,7 @@ class HubRouter:
             skill_matched=decision.skill_matched,
         )
 
-    # ── Worker invocation (only call site for model clients) ────────────────
+    # ── Worker invocation (only call site for model clients) ──────────────────────
 
     def invoke(
         self,
@@ -261,7 +267,7 @@ class HubRouter:
             max_tokens=min(max_tokens, 2048),
         )
 
-    # ── Backend resolution (mirrors orchestrator's pre-Phase-1 logic) ────────
+    # ── Backend resolution (mirrors orchestrator's pre-Phase-1 logic) ───────────────
 
     @staticmethod
     def _resolve_backend(model_preference: str | None, hint: Optional[str]) -> str:
@@ -278,7 +284,7 @@ class HubRouter:
             return hint
         return "claude"
 
-    # ── Private dispatch (the only model-client call sites in services/) ────
+    # ── Private dispatch (the only model-client call sites in services/) ──────────
 
     def _invoke_claude(self, system, messages, max_tokens, on_token) -> WorkerResult:
         try:
@@ -354,7 +360,7 @@ class RoutingError(RuntimeError):
     """Raised when no agent can be routed and no fallback is available."""
 
 
-# ── Power Mode (v3): execution-vs-chat classifier ────────────────────────────
+# ── Power Mode (v3): execution-vs-chat classifier ────────────────────────────────────────────
 #
 # Additive tier on top of the existing hub. The classifier decides whether a
 # message describes a real-world *execution* task (write code, run shell, edit
@@ -367,7 +373,7 @@ class RoutingError(RuntimeError):
 # Strategy:
 #   1. Cheap deterministic prefilter (keyword/intent regexes). If both rails
 #      agree, skip the LLM round-trip entirely (sub-millisecond).
-#   2. Otherwise call the supplied LLM (Claude by default) with a tightly
+#   2. Otherwise call the supplied LLM (Haiku by default) with a tightly
 #      scoped JSON-only prompt. Parse + validate. On any failure, fall back
 #      to the deterministic verdict so the user never sees a hang.
 
@@ -498,6 +504,7 @@ class ExecutionClassifier:
                 _CLASSIFIER_SYSTEM,
                 [{"role": "user", "content": (message or "")[:4000]}],
                 max_tokens=120,
+                model="claude-haiku-4-5-20251001",
             )
             parsed = self._parse_llm(result.get("text") if isinstance(result, dict) else result)
         except Exception as exc:
