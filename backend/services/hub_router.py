@@ -49,6 +49,21 @@ log = logging.getLogger("iMakeAiTeams.hub_router")
 # Below this score, deterministic routing fails over to the LLM fallback.
 MIN_SKILL_MATCH_SCORE: float = 0.5
 
+# Maximum agents to include in the LLM fallback prompt. Five is enough for
+# accurate selection while keeping the prompt small enough for models under
+# 30B params (which start drifting once tool/skill descriptions pile up).
+_MAX_AGENTS_FOR_LLM: int = 5
+
+# Roles that are always included in the LLM fallback list regardless of
+# keyword score. The coordinator is special-cased because it's the
+# universal fan-out target — without it the fallback can't recover when
+# none of the specialists score well.
+_ALWAYS_INCLUDED_ROLES: frozenset[str] = frozenset({"coordinator"})
+
+# Words shorter than this are ignored during keyword scoring (filters out
+# stopwords like "and", "the", "is" without maintaining a list).
+_KEYWORD_MIN_LEN: int = 3
+
 
 class AuthorizationError(RuntimeError):
     """Raised when a task's required_scopes are not a subset of the worker's."""
@@ -62,13 +77,16 @@ class HubRouter:
         claude_client,
         local_client,
         settings,
-        llm_fallback: Optional[Callable[[TaskDescriptor], RoutingDecision]] = None,
+        llm_fallback: Optional[Callable[..., RoutingDecision]] = None,
     ):
         self._claude = claude_client
         self._local = local_client
         self._settings = settings
         # Phase 3 wires Qwen /no_think here; Phase 1 leaves it None and routing
-        # raises if it would be needed without a fallback configured.
+        # raises if it would be needed without a fallback configured. The
+        # current contract is ``fallback(task, *, agent_list=...)`` — older
+        # fallbacks that only accept ``task`` are still supported through a
+        # TypeError catch in route().
         self._llm_fallback = llm_fallback
 
     # ── Skill scoring (deterministic, no LLM) ────────────────────────────────
@@ -88,6 +106,94 @@ class HubRouter:
             if isinstance(item, dict) and item.get("name"):
                 out.append(Skill.from_dict(item))
         return out
+
+    @staticmethod
+    def _keyword_score(task_text: str, agent: dict) -> float:
+        """Score an agent's relevance to a task by keyword overlap.
+
+        Checks the agent's name, role, and skill names/descriptions against
+        the task text. Returns 0.0-1.0. No LLM call, runs in <1ms per agent.
+        Used by the route() pre-filter to narrow the LLM-fallback prompt
+        when many agents are registered (avoids context rot on small models).
+        """
+        if not task_text:
+            return 0.0
+
+        task_lower = task_text.lower()
+        task_words = set(re.findall(rf"\w{{{_KEYWORD_MIN_LEN},}}", task_lower))
+        if not task_words:
+            return 0.0
+
+        searchable_parts: list[str] = []
+        searchable_parts.append((agent.get("name") or "").lower())
+        searchable_parts.append((agent.get("role") or "").lower())
+
+        skills_raw = agent.get("skills") or "[]"
+        try:
+            skills = json.loads(skills_raw) if isinstance(skills_raw, str) else skills_raw
+            if isinstance(skills, list):
+                for skill in skills:
+                    if isinstance(skill, dict):
+                        searchable_parts.append((skill.get("name") or "").lower())
+                        desc = skill.get("description") or ""
+                        if desc:
+                            searchable_parts.append(desc.lower())
+                    elif isinstance(skill, str):
+                        searchable_parts.append(skill.lower())
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        agent_text = " ".join(searchable_parts)
+        agent_words = set(re.findall(rf"\w{{{_KEYWORD_MIN_LEN},}}", agent_text))
+        if not agent_words:
+            return 0.0
+
+        overlap = task_words & agent_words
+        score = len(overlap) / max(len(task_words), 1)
+
+        # Bonus if the agent's role appears verbatim in the task text — a
+        # cheap way to honor explicit asks like "have the writer draft this".
+        role = (agent.get("role") or "").lower()
+        if role and role in task_lower:
+            score += 0.3
+
+        return min(score, 1.0)
+
+    @classmethod
+    def _prefilter_agents(cls, task_text: str, agents: list[dict]) -> list[dict]:
+        """Pick the agents most likely to be relevant for the LLM fallback.
+
+        Keeps everyone whose role is in ``_ALWAYS_INCLUDED_ROLES`` and the
+        top ``_MAX_AGENTS_FOR_LLM`` by keyword score. If the agent list is
+        already at or below the cap, returns it unchanged so small teams
+        skip the scoring overhead.
+        """
+        if len(agents) <= _MAX_AGENTS_FOR_LLM:
+            return list(agents)
+
+        scored = sorted(
+            ((cls._keyword_score(task_text, a), a) for a in agents),
+            key=lambda x: x[0],
+            reverse=True,
+        )
+
+        selected: list[dict] = []
+        seen_ids: set[str] = set()
+        # Always-included roles first, regardless of score.
+        for _, agent in scored:
+            role = (agent.get("role") or "").lower()
+            if role in _ALWAYS_INCLUDED_ROLES and agent.get("id") not in seen_ids:
+                selected.append(agent)
+                seen_ids.add(agent.get("id", ""))
+        # Then top-scoring agents until we hit the cap.
+        for _, agent in scored:
+            if len(selected) >= _MAX_AGENTS_FOR_LLM:
+                break
+            if agent.get("id") in seen_ids:
+                continue
+            selected.append(agent)
+            seen_ids.add(agent.get("id", ""))
+        return selected
 
     @staticmethod
     def _score_match(declared: list[Skill], task: TaskDescriptor) -> tuple[float, str]:
@@ -219,7 +325,19 @@ class HubRouter:
                 f"No agent declared a skill matching {list(task.required_skills)}; "
                 "LLM fallback not configured."
             )
-        decision = self._llm_fallback(task)
+        # Pre-filter agents by keyword overlap before handing the list to the
+        # LLM. With many registered agents the fallback prompt grows fast and
+        # small models start ignoring the actual query — a keyword pass picks
+        # the top _MAX_AGENTS_FOR_LLM candidates without an extra LLM call.
+        all_agents = [dict(r) for r in _db.fetchall(
+            "SELECT id, name, role, skills, model_preference FROM agents"
+        )]
+        prefiltered = self._prefilter_agents(task.text, all_agents) if all_agents else []
+        try:
+            decision = self._llm_fallback(task, agent_list=prefiltered)
+        except TypeError:
+            # Fallback predates the agent_list kwarg — call the old signature.
+            decision = self._llm_fallback(task)
         return RoutingDecision(
             agent_id=decision.agent_id,
             backend=decision.backend,

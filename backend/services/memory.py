@@ -29,6 +29,7 @@ Priority 7 additions (Memory Trust Scoring):
 
 import json
 import logging
+import re as _re
 import threading
 import uuid
 from collections import deque
@@ -38,11 +39,53 @@ from datetime import datetime, timezone
 import db as _db
 from models import SessionHistory
 from services.prompt_library import get_active_prompt
+from services.redact import redact
 from services.security_engine import validate_fact_for_storage, MAX_FACTS_PER_CONVERSATION
 
 log = logging.getLogger("iMakeAiTeams.memory")
 
 SIMILARITY_THRESHOLD = 0.5
+
+# Patterns that match sentences whose PURPOSE is to record an assistant
+# failure/limitation. Deliberately narrow — false positives erase real
+# content, which is worse than letting a few deflections through.
+_DEFLECTION_PATTERNS: tuple[_re.Pattern[str], ...] = tuple(
+    _re.compile(p, _re.IGNORECASE) for p in (
+        # "the assistant <failure verb>"
+        r"the assistant\s+(was unable|could not|did not have|does not have|"
+        r"offered to (search|help|look)|suggested checking|"
+        r"recommended consulting|clarified that[^.]{0,40}(could not|did not have|cannot|limit)|"
+        r"explained (it|that it) (could not|cannot|does not|did not)|"
+        r"stated[^.]{0,40}(could not|did not have)|"
+        r"indicated[^.]{0,40}(could not|did not have))",
+        # Capability-denial framing
+        r"the assistant\s+(lacks|cannot|can'?t)\s+(access|the ability|information|specific information|details)",
+        # "the AI" variants
+        r"the AI\s+(was unable|could not|did not have|does not have|cannot|doesn'?t have)",
+        # Self-referential limitations
+        r"(I|the model)\s+(don'?t|do not|cannot|can'?t)\s+have\s+(access|real-time|current|specific)",
+    )
+)
+
+# Sentence splitter: split on . ! ? followed by whitespace or end-of-string.
+_SENTENCE_SPLIT = _re.compile(r"(?<=[.!?])\s+")
+
+
+def _scrub_deflections(text: str) -> str:
+    """Remove sentences that narrate assistant failures/limitations.
+
+    Returns the text with deflection sentences removed. If every sentence
+    is a deflection, returns empty string (caller should discard the fact).
+    """
+    if not text:
+        return text
+    sentences = _SENTENCE_SPLIT.split(text)
+    kept = []
+    for sentence in sentences:
+        is_deflection = any(p.search(sentence) for p in _DEFLECTION_PATTERNS)
+        if not is_deflection:
+            kept.append(sentence)
+    return " ".join(kept).strip()
 
 _extract_attempts = 0
 _extract_failures  = 0
@@ -70,20 +113,27 @@ class MemoryContext:
     memories:        list = field(default_factory=list)
 
     def to_system_suffix(self) -> str:
+        # Section headers are deliberately phrased to mirror the trigger
+        # conditions of canonical denial templates ("I don't have personal
+        # information about you"). Pre-filling those exact slots with real
+        # data dampens the denial reflex on small local models.
         parts = []
         if self.session_facts:
             parts.append(
-                "## Known facts about this session\n" +
+                "## Personal information about the user\n"
+                "(These are facts the user told you. Reference them naturally.)\n\n" +
                 "\n".join(f"- {f}" for f in self.session_facts)
             )
         if self.rag_chunks:
             parts.append(
-                "## Relevant documents\n" +
+                "## Reference documents the user has provided\n"
+                "(The user uploaded these. Use them to answer their question.)\n\n" +
                 "\n---\n".join(self.rag_chunks)
             )
         if self.memories:
             parts.append(
-                "## Long-term memory\n" +
+                "## Information the user has shared in prior conversations\n"
+                "(You have access to this — it was stored from previous sessions.)\n\n" +
                 "\n".join(f"- {m}" for m in self.memories)
             )
         return "\n\n".join(parts) if parts else ""
@@ -424,6 +474,11 @@ class MemoryManager:
             for fact in facts[:3]:
                 if not isinstance(fact, str) or not fact.strip():
                     continue
+                # Strip deflection sentences before grounding so we score
+                # only the substantive content of the fact.
+                fact = _scrub_deflections(fact)
+                if not fact:
+                    continue
                 fact_words = set(fact.lower().split())
                 meaningful = fact_words - _stopwords
                 if not meaningful:
@@ -431,7 +486,9 @@ class MemoryManager:
                 overlap = meaningful & source_words
                 ratio = len(overlap) / len(meaningful) if meaningful else 0
                 if ratio >= 0.4:
-                    grounded_facts.append(fact.strip())
+                    # Redact credentials AFTER grounding so [REDACTED_*] tokens
+                    # don't deflate the meaningful-word ratio.
+                    grounded_facts.append(redact(fact.strip()))
                 else:
                     log.debug("Discarded ungrounded fact (%.0f%% overlap): %s",
                               ratio * 100, fact[:80])
@@ -564,6 +621,13 @@ class MemoryManager:
         Let the user or agent store an explicit long-term memory.
         Priority 7: scans content before writing. Flagged → pending_review.
         """
+        # Strip assistant-deflection sentences and redact credentials before
+        # any persistence path (trust scan or DB insert) sees the content.
+        content = _scrub_deflections(content)
+        if not content:
+            return "Nothing substantive to remember (deflection scrubbed)"
+        content = redact(content)
+
         # ── Priority 7: trust scan ────────────────────────────────────────────
         scan = _trust_scan(content)
         if scan.get("blocked") or scan.get("verdict") in ("block", "warn"):
