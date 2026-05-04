@@ -1,0 +1,60 @@
+# ── iMakeAiTeams sidecar — lite bundle (~80 MB installed) ─────────────────────
+#
+# This is the only requirements file shipped with the Electron installer.
+# RAG / semantic memory uses fastembed (ONNX) + sqlite-vec instead of
+# the legacy torch + sentence-transformers + chromadb stack.
+#
+# All deps must ship as prebuilt wheels — no compile step at install time.
+# pip is invoked with --only-binary=:all: in 1-install.ps1.
+
+# ── HTTP server ──────────────────────────────────────────────────────────────
+fastapi>=0.115.0,<0.120.0
+uvicorn[standard]>=0.30.0,<0.35.0
+pydantic>=2.7.0,<3.0.0
+python-multipart>=0.0.9
+
+# ── Existing service deps (kept from archive/legacy-v5/app/requirements.txt) ─
+requests>=2.31.0
+psutil>=5.9.0
+numpy>=1.26.0
+platformdirs>=4.0.0
+
+# ── Anthropic SDK ────────────────────────────────────────────────────────────
+# >=0.50.0 required for stable thinking_delta / text_delta event types in
+# messages.stream(), used by ClaudeClient.stream_extended_thinking_chat().
+anthropic>=0.50.0
+
+# ── Resilience ───────────────────────────────────────────────────────────────
+tenacity>=8.3.0
+
+# ── Lightweight embedding & vector search ─────────────────────────────────
+# fastembed: ONNX-based embeddings, no PyTorch. ~100MB installed.
+# Replaces sentence-transformers (~2GB with torch).
+fastembed>=0.4.0
+
+# sqlite-vec: vector search as a SQLite extension. ~163KB.
+# Replaces ChromaDB.
+sqlite-vec>=0.1.6
+
+# rank-bm25: BM25 keyword search for hybrid retrieval.
+# Was imported by semantic_search.py but missing from requirements.
+rank-bm25>=0.2.2
+
+# ── OS-native secret storage (DPAPI on Win, Keychain on Mac, SecretService on
+# Linux). Keeps the legacy keyring contract used by core/settings.py and
+# services/mcp_credentials.py.
+keyring>=24.0.0
+
+# ── Power Mode (v3) — OpenClaw delegation ────────────────────────────────────
+# httpx: streaming client for the OpenClaw gateway API.
+# docker: Python SDK used by services/docker_manager.py for container probes
+#         (subprocess fallback covers hosts without the SDK installed).
+# jinja2: renders backend/templates/docker-compose.yml.j2 from user settings.
+httpx>=0.27.0
+docker>=7.1.0
+jinja2>=3.1.0
+
+# ── Dev / test ────────────────────────────────────────────────────────────────
+# Not bundled into the PyInstaller spec; installed separately for `pytest`.
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

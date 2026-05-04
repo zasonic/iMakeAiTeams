@@ -1,0 +1,37 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install JS deps
+        run: npm ci
+
+      - name: Create backend venv and install requirements
+        run: |
+          cd backend
+          python -m venv .venv
+          .venv\Scripts\pip install -r requirements.txt
+
+      - name: Build sidecar and renderer
+        run: npm run build:sidecar && npm run build
+
+      - name: Publish Windows installer
+        run: npx electron-builder --win --publish always
