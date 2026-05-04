@@ -149,10 +149,21 @@ def make_no_think_router(local_client, agents_provider: Callable[[], list[dict]]
     ``id``, ``name``, ``role``, ``skills``, ``model_preference``). Closing
     over a callable keeps the registry the single source of truth without
     forcing this module to depend on it.
+
+    The returned callable accepts an optional ``agent_list`` keyword
+    argument: when present, it is the HubRouter's pre-filtered list of
+    candidates and is used in place of ``agents_provider()`` so the
+    routing prompt stays small enough for sub-30B models to handle
+    without context rot.
     """
 
-    def _route(task: TaskDescriptor) -> RoutingDecision:
-        return no_think_route(local_client, agents_provider(), task)
+    def _route(
+        task: TaskDescriptor,
+        *,
+        agent_list: Optional[list[dict]] = None,
+    ) -> RoutingDecision:
+        candidates = agent_list if agent_list is not None else agents_provider()
+        return no_think_route(local_client, candidates, task)
 
     return _route
 

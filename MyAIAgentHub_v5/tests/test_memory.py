@@ -293,20 +293,20 @@ class TestSystemSuffix:
         ctx = MemoryContext(session_facts=["user is Alice", "prefers English"])
         suffix = ctx.to_system_suffix()
         assert "user is Alice" in suffix
-        assert "Known facts" in suffix
+        assert "Personal information about the user" in suffix
 
     def test_rag_chunks_appear_in_suffix(self):
         from services.memory import MemoryContext
         ctx = MemoryContext(rag_chunks=["Document excerpt about AI"])
         suffix = ctx.to_system_suffix()
-        assert "Relevant documents" in suffix
+        assert "Reference documents the user has provided" in suffix
         assert "AI" in suffix
 
     def test_memories_appear_in_suffix(self):
         from services.memory import MemoryContext
         ctx = MemoryContext(memories=["User previously mentioned Paris trip"])
         suffix = ctx.to_system_suffix()
-        assert "Long-term memory" in suffix
+        assert "Information the user has shared in prior conversations" in suffix
         assert "Paris" in suffix
 
     def test_combined_suffix_order(self):
@@ -317,9 +317,9 @@ class TestSystemSuffix:
             memories=["mem1"],
         )
         suffix = ctx.to_system_suffix()
-        pos_facts = suffix.index("Known facts")
-        pos_docs = suffix.index("Relevant documents")
-        pos_mem = suffix.index("Long-term memory")
+        pos_facts = suffix.index("Personal information about the user")
+        pos_docs = suffix.index("Reference documents the user has provided")
+        pos_mem = suffix.index("Information the user has shared in prior conversations")
         assert pos_facts < pos_docs < pos_mem
 
 

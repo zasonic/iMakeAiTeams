@@ -29,6 +29,7 @@ import db as _db
 from models import ChatResult, ExecutionTarget, RoutingDecision, TaskDescriptor
 from services.hub_router import HubRouter
 from services import qwen_thinking
+from services.redact import redact
 from services.security_engine import (
     quarantine_chunks, render_quarantined_context, enforce_context_rules,
     validate_fact_for_storage, RiskLedger, RiskCategory, SecurityAssessment,
@@ -583,10 +584,10 @@ class ChatOrchestrator:
                     # Replace raw RAG injection in system prompt with
                     # provenance-tagged, structurally isolated version
                     raw_rag = mem.to_system_suffix()
-                    if raw_rag and "## Relevant documents" in full_system:
+                    if raw_rag and "## Reference documents the user has provided" in full_system:
                         # Swap the raw documents section for quarantined version
                         full_system = full_system.replace(
-                            "## Relevant documents",
+                            "## Reference documents the user has provided",
                             "## Retrieved Context (Quarantined)",
                         )
 
@@ -768,15 +769,19 @@ class ChatOrchestrator:
             model_used=model_name,
         )
 
-        # Save assistant message
+        # Save assistant message — redact the persisted copy so credentials
+        # never land on disk. The streaming UI already received the original
+        # text via on_token, and ChatResult.text below stays un-redacted for
+        # the in-flight return value.
         cost = _estimate_cost(model_name, tokens_in, tokens_out, self._settings)
+        reply_text_for_storage = redact(response_text)
         asst_msg_id = str(uuid.uuid4())
         resp_now = datetime.now(timezone.utc).isoformat()
         _db.execute(
             "INSERT INTO messages (id, conversation_id, role, content, model_used, "
             "route_reason, tokens_in, tokens_out, cost_usd, created_at) "
             "VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
-            (asst_msg_id, conversation_id, response_text, model_name,
+            (asst_msg_id, conversation_id, reply_text_for_storage, model_name,
              route_reason, tokens_in, tokens_out, cost, resp_now),
         )
         _db.execute(

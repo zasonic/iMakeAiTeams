@@ -24,6 +24,8 @@ import logging
 import os
 from pathlib import Path
 
+from services.redact import redact
+
 log = logging.getLogger("MyAIEnv.rag_index")
 
 # Similarity threshold below which chunks are still returned but scored
@@ -159,7 +161,13 @@ class RAGIndex:
         return self.add_text(content, source=str(file_path))
 
     def add_text(self, text: str, source: str = "manual") -> int:
-        """Add arbitrary text to the ChromaDB index. Returns number of chunks added."""
+        """Add arbitrary text to the ChromaDB index. Returns number of chunks added.
+
+        Each chunk is scrubbed of structural credential patterns before being
+        handed to the indexer. The original text on the filesystem is left
+        untouched — only the indexed copy gets redacted, so embeddings and
+        retrieval results never carry an API key or token.
+        """
         if not text.strip():
             return 0
         ss = self._get_semantic()
@@ -172,7 +180,7 @@ class RAGIndex:
         for chunk in chunks:
             try:
                 ss.ingest_document(
-                    content=header + chunk,
+                    content=redact(header + chunk),
                     source=source,
                     doc_type="file",
                 )
@@ -270,7 +278,7 @@ class RAGIndex:
                 for chunk in chunks:
                     try:
                         ss.ingest_document(
-                            content=chunk,
+                            content=redact(chunk),
                             source="legacy_npz_migration",
                             doc_type="file",
                         )
