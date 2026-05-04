@@ -476,6 +476,29 @@ class ChatOrchestrator:
             else self._settings.get("system_prompt", "You are a helpful AI assistant.")
         )
 
+        # ── Team pipeline: activate when the selected agent coordinates a team ──
+        # When the user is chatting with an agent that's a team coordinator,
+        # decompose the request, dispatch sub-tasks to specialists via the
+        # HubRouter, chain HandoffPackets, and synthesise. Single-agent chat
+        # (no team active) falls through to the existing path below.
+        team_row = None
+        if agent_id:
+            team_row = _db.fetchone(
+                "SELECT id FROM agent_teams WHERE coordinator_id = ?",
+                (agent_id,),
+            )
+        if team_row:
+            return self._run_team_pipeline(
+                team_id=team_row["id"],
+                conversation_id=conversation_id,
+                user_message=user_message,
+                spent=spent,
+                budget=budget,
+                warn_pct=warn_pct,
+                on_event=on_event,
+                on_token=on_token,
+            )
+
         # ── Improvement 4: ToolPermissionContext enforcement ─────────────────
         _allowed_tools = None
         if agent and agent.get("allowed_tools") and agent["allowed_tools"] != "[]":
@@ -933,6 +956,122 @@ class ChatOrchestrator:
             route_reason=route_reason,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            cost_usd=cost,
+            message_id=asst_msg_id,
+            budget_warning=budget_warning,
+        )
+
+    # ── Team pipeline ────────────────────────────────────────────────────────
+
+    def _run_team_pipeline(
+        self, team_id: str, conversation_id: str, user_message: str,
+        spent: float, budget: float, warn_pct: float,
+        on_event=None, on_token=None,
+    ) -> ChatResult:
+        """Dispatch a turn to the team PipelineExecutor and persist its result.
+
+        The pipeline owns decomposition, specialist dispatch, HandoffPacket
+        chaining, and synthesis. This wrapper persists the synthesised reply
+        as a normal assistant message, updates token_usage, and refreshes
+        memory buffers so the team turn looks identical to a single-agent
+        turn from the rest of the system's point of view.
+        """
+        from services.pipeline import PipelineExecutor
+
+        history_rows = _db.fetchall(
+            "SELECT role, content FROM messages WHERE conversation_id = ? "
+            "AND role IN ('user', 'assistant') "
+            "ORDER BY created_at DESC LIMIT ?",
+            (conversation_id, MAX_HISTORY_MESSAGES),
+        )
+        history = [
+            {"role": r["role"], "content": r["content"]}
+            for r in reversed(history_rows)
+        ]
+        history = self._trim_history_to_budget(history)
+
+        executor = PipelineExecutor(self.hub_router, self._settings)
+        try:
+            result = executor.run(
+                team_id=team_id,
+                user_message=user_message,
+                conversation_id=conversation_id,
+                history=history,
+                on_event=on_event,
+                on_token=on_token,
+            )
+        except Exception as exc:
+            log.exception("Pipeline execution failed: %s", exc)
+            return ChatResult(
+                text=f"[Team pipeline error: {exc}]",
+                model="pipeline",
+                route_reason="pipeline_error",
+                tokens_in=0,
+                tokens_out=0,
+                cost_usd=0.0,
+                message_id=str(uuid.uuid4()),
+            )
+
+        synthesis = result.synthesis or ""
+        cost = _estimate_cost(
+            result.synthesis_model, result.total_tokens_in,
+            result.total_tokens_out, self._settings,
+        )
+        route_reason = f"team pipeline ({len(result.steps)} steps)"
+        asst_msg_id = str(uuid.uuid4())
+        resp_now = datetime.now(timezone.utc).isoformat()
+
+        _db.execute(
+            "INSERT INTO messages (id, conversation_id, role, content, model_used, "
+            "route_reason, tokens_in, tokens_out, cost_usd, created_at) "
+            "VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                asst_msg_id, conversation_id, redact(synthesis), "pipeline",
+                route_reason, result.total_tokens_in, result.total_tokens_out,
+                cost, resp_now,
+            ),
+        )
+        _db.execute(
+            "UPDATE conversations SET updated_at = ?, "
+            "title = CASE WHEN title = 'New conversation' THEN ? ELSE title END "
+            "WHERE id = ?",
+            (resp_now, user_message[:60], conversation_id),
+        )
+        _db.execute(
+            "INSERT INTO token_usage (id, conversation_id, model, tokens_in, "
+            "tokens_out, cost_usd, routed_reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()), conversation_id, "pipeline",
+                result.total_tokens_in, result.total_tokens_out, cost,
+                route_reason, resp_now,
+            ),
+        )
+        _db.commit()
+
+        try:
+            self.memory.add_to_buffer(conversation_id, "user", user_message)
+            self.memory.add_to_buffer(conversation_id, "assistant", synthesis)
+            self.memory.extract_facts(conversation_id, user_message, synthesis)
+        except Exception as exc:
+            log.debug("Memory update after pipeline run failed: %s", exc)
+
+        budget_warning = ""
+        if budget > 0:
+            new_spent = spent + cost
+            pct = (new_spent / budget) * 100
+            if pct >= warn_pct:
+                budget_warning = (
+                    f"⚠️ Approaching conversation budget limit "
+                    f"(${new_spent:.2f}/${budget:.2f})"
+                )
+
+        return ChatResult(
+            text=synthesis,
+            model="pipeline",
+            route_reason=route_reason,
+            tokens_in=result.total_tokens_in,
+            tokens_out=result.total_tokens_out,
             cost_usd=cost,
             message_id=asst_msg_id,
             budget_warning=budget_warning,
