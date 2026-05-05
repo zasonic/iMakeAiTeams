@@ -114,6 +114,28 @@ class MCPRegistry:
 
     # ── Resolution ──────────────────────────────────────────────────────────
 
+    def get_tools_for_tags(self, tags: list) -> list[dict]:
+        """Return MCP tools whose skill_tags overlap with the given tags.
+
+        Returns dicts with name/description/server_id keys, suitable for
+        injection into an agent's system prompt.
+        """
+        if not tags:
+            return []
+        tag_set = {str(t).lower() for t in tags if t}
+        if not tag_set:
+            return []
+        matched: list[dict] = []
+        for tool in self.all_tools():
+            tool_tags = {str(t).lower() for t in tool.skill_tags}
+            if tag_set & tool_tags:
+                matched.append({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "server_id": tool.server_id,
+                })
+        return matched
+
     def resolve_for_task(self, required_skills: Iterable[str],
                          required_scopes: Iterable[str] = ()) -> list[ToolSchema]:
         """

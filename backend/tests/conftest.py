@@ -103,6 +103,13 @@ def local_client_available():
     client.chat.return_value = '["test fact"]'
     client.chat_multi_turn.return_value = "local response"
     client.stream_multi_turn.return_value = "local streamed response"
+    client.chat_unified.return_value = {
+        "text": "local response", "input_tokens": 0, "output_tokens": 0,
+    }
+    client.stream_unified.return_value = {
+        "text": "local streamed response", "input_tokens": 0, "output_tokens": 0,
+    }
+    client.client_name.return_value = "local"
     return client
 
 

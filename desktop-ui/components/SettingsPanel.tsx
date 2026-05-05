@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import {
+  Chat,
   Docker,
   Settings,
   System,
@@ -8,6 +9,20 @@ import {
   type SettingsPayload,
 } from "@/api/client";
 import { useAppStore } from "@/stores/appStore";
+
+interface RouterStats {
+  total_exchanges: number;
+  error_rate_overall: number;
+  by_complexity: Record<string, { total: number; errors: number; error_rate: number }>;
+  by_route: Record<string, { total: number; errors: number; error_rate: number }>;
+  recent: Array<{
+    route: string;
+    complexity: string;
+    had_error: boolean;
+    model_used: string;
+    created_at: string;
+  }>;
+}
 
 const DOCKER_INSTALL_URL = "https://www.docker.com/products/docker-desktop/";
 
@@ -22,6 +37,7 @@ export function SettingsPanel() {
   const [verifying, setVerifying] = useState(false);
   const [pmApiKey, setPmApiKey] = useState("");
   const [pmBusy, setPmBusy] = useState<"start" | "stop" | "check" | null>(null);
+  const [routerStats, setRouterStats] = useState<RouterStats | null>(null);
 
   const reload = async () => {
     try {
@@ -35,6 +51,15 @@ export function SettingsPanel() {
         kind: "error",
         text: err instanceof Error ? err.message : "Could not load settings",
       });
+    }
+  };
+
+  const reloadRouterStats = async () => {
+    try {
+      const stats = (await Chat.routerStats()) as RouterStats;
+      setRouterStats(stats);
+    } catch {
+      setRouterStats(null);
     }
   };
 
@@ -56,6 +81,7 @@ export function SettingsPanel() {
     if (ready) {
       reload();
       refreshDocker();
+      reloadRouterStats();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
@@ -237,6 +263,8 @@ export function SettingsPanel() {
         </label>
       </section>
 
+      <RoutingPerformanceSection stats={routerStats} />
+
       <section className="card">
         <h3 className="font-semibold mb-2">Local models</h3>
         <label className="label">Ollama URL</label>
@@ -319,6 +347,79 @@ export function SettingsPanel() {
         </div>
       </section>
     </div>
+  );
+}
+
+function RoutingPerformanceSection({ stats }: { stats: RouterStats | null }) {
+  if (!stats || stats.total_exchanges === 0) {
+    return (
+      <section className="card">
+        <h3 className="font-semibold mb-2">Routing Performance</h3>
+        <div className="text-sm text-ink-dim">No routing data yet</div>
+      </section>
+    );
+  }
+
+  const errorPct = (stats.error_rate_overall * 100).toFixed(1);
+  const claudeCount = stats.by_route?.claude?.total ?? 0;
+  const localCount = stats.by_route?.local?.total ?? 0;
+  const complexityKeys = ["simple", "medium", "complex"];
+
+  return (
+    <section className="card">
+      <h3 className="font-semibold mb-2">Routing Performance</h3>
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        <div className="text-center">
+          <div className="text-lg font-semibold">{stats.total_exchanges}</div>
+          <div className="text-xs text-ink-dim">Total</div>
+        </div>
+        <div className="text-center">
+          <div className="text-lg font-semibold">{errorPct}%</div>
+          <div className="text-xs text-ink-dim">Error rate</div>
+        </div>
+        <div className="text-center">
+          <div className="text-lg font-semibold">
+            {claudeCount} / {localCount}
+          </div>
+          <div className="text-xs text-ink-dim">Claude / local</div>
+        </div>
+      </div>
+
+      <div className="text-xs font-semibold mb-1">By complexity</div>
+      <div className="grid grid-cols-3 gap-2 mb-3 text-xs">
+        {complexityKeys.map((k) => {
+          const b = stats.by_complexity?.[k];
+          return (
+            <div key={k} className="border border-base-700 rounded p-2">
+              <div className="capitalize text-ink-dim">{k}</div>
+              <div>
+                {b ? `${b.total} · ${(b.error_rate * 100).toFixed(1)}% err` : "—"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {stats.recent.length > 0 && (
+        <>
+          <div className="text-xs font-semibold mb-1">Recent decisions</div>
+          <div className="text-xs space-y-1 max-h-48 overflow-y-auto">
+            {stats.recent.slice(0, 10).map((r, i) => (
+              <div
+                key={i}
+                className="flex justify-between gap-2 border-b border-base-700/50 pb-1"
+              >
+                <span className="text-ink-dim">{r.route}</span>
+                <span className="text-ink-dim">{r.complexity}</span>
+                <span className={r.had_error ? "text-rose-400" : ""}>
+                  {r.model_used || "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 

@@ -57,6 +57,15 @@ def claude_mock():
     m.chat_multi_turn.return_value = {
         "text": "claude reply", "input_tokens": 10, "output_tokens": 20,
     }
+    m.chat_unified.return_value = {
+        "text": "claude reply", "input_tokens": 10, "output_tokens": 20,
+    }
+    _stream_usage = MagicMock(input_tokens=33, output_tokens=44)
+    m.stream_multi_turn.return_value = ("streamed", _stream_usage)
+    m.stream_unified.return_value = {
+        "text": "streamed", "input_tokens": 33, "output_tokens": 44,
+    }
+    m.client_name.return_value = "claude-test"
     return m
 
 
@@ -65,6 +74,13 @@ def local_mock():
     m = MagicMock()
     m.chat_multi_turn.return_value = "local reply"
     m.is_available.return_value = True
+    m.chat_unified.return_value = {
+        "text": "local reply", "input_tokens": 0, "output_tokens": 0,
+    }
+    m.stream_unified.return_value = {
+        "text": "local reply", "input_tokens": 0, "output_tokens": 0,
+    }
+    m.client_name.return_value = "local"
     return m
 
 
@@ -202,11 +218,9 @@ class TestInvoke:
         assert result.text == "claude reply"
         assert result.input_tokens == 10
         assert result.output_tokens == 20
-        claude_mock.chat_multi_turn.assert_called_once()
+        claude_mock.chat_unified.assert_called_once()
 
     def test_invoke_claude_streaming(self, hub, claude_mock):
-        usage = MagicMock(input_tokens=33, output_tokens=44)
-        claude_mock.stream_multi_turn.return_value = ("streamed", usage)
         decision = RoutingDecision(agent_id="x", backend="claude", score=1.0,
                                    reasoning="r", used_fallback=False,
                                    skill_matched="")
@@ -226,7 +240,7 @@ class TestInvoke:
         assert result.backend == "local"
 
     def test_invoke_handles_exception(self, hub, claude_mock):
-        claude_mock.chat_multi_turn.side_effect = ConnectionError("boom")
+        claude_mock.chat_unified.side_effect = ConnectionError("boom")
         decision = RoutingDecision(agent_id="x", backend="claude", score=1.0,
                                    reasoning="r", used_fallback=False,
                                    skill_matched="")
@@ -298,7 +312,7 @@ def test_fanout_amplification(in_memory_db, hub, claude_mock):
             raise ConnectionError("simulated worker failure")
         return {"text": "ok", "input_tokens": 1, "output_tokens": 1}
 
-    claude_mock.chat_multi_turn.side_effect = maybe_fail
+    claude_mock.chat_unified.side_effect = maybe_fail
 
     fanout_failures = 0
     for _ in range(TRIALS):

@@ -116,6 +116,10 @@ class TestPersistedAssistantReplyIsRedacted:
         claude.chat_multi_turn.return_value = {
             "text": reply, "input_tokens": 5, "output_tokens": 10,
         }
+        claude.chat_unified.return_value = {
+            "text": reply, "input_tokens": 5, "output_tokens": 10,
+        }
+        claude.client_name.return_value = "claude-test"
         local = MagicMock()
         local.is_available.return_value = False
 

@@ -104,6 +104,20 @@ _FACT_RETRY_PROMPT = (
     "No markdown, no explanation, no backticks. Example: [\"fact one\", \"fact two\"]\n\n"
 )
 
+_TRIPLE_PROMPT = (
+    "Extract (subject, predicate, object) triples from these facts.\n"
+    "Return ONLY a JSON array. Each element: "
+    '{"subject": "...", "predicate": "...", "object": "..."}\n'
+    "If a fact cannot be decomposed into a triple, skip it.\n\n"
+    "Facts:\n{facts}"
+)
+
+_CONTRADICTION_SIGNALS = _re.compile(
+    r"\b(no[,.]?\s|actually|that'?s wrong|that'?s not|incorrect|"
+    r"I meant|not right|correction|I said|wrong)\b",
+    _re.IGNORECASE,
+)
+
 
 @dataclass
 class MemoryContext:
@@ -388,6 +402,7 @@ class MemoryManager:
 
         facts = _db.fetchall(
             "SELECT id, fact FROM session_facts WHERE conversation_id = ? "
+            "AND (status = 'confirmed' OR status IS NULL) "
             "ORDER BY COALESCE(last_accessed, created_at) DESC LIMIT 10",
             (conversation_id,),
         )
@@ -430,6 +445,26 @@ class MemoryManager:
 
         return ctx
 
+    def _resolve_pending_facts(self, conversation_id: str, user_message: str) -> None:
+        """Promote or discard pending facts based on user's follow-up."""
+        pending = _db.fetchall(
+            "SELECT id, fact FROM session_facts "
+            "WHERE conversation_id = ? AND status = 'pending'",
+            (conversation_id,),
+        )
+        if not pending:
+            return
+        has_contradiction = bool(_CONTRADICTION_SIGNALS.search(user_message))
+        new_status = "discarded" if has_contradiction else "confirmed"
+        for row in pending:
+            _db.execute(
+                "UPDATE session_facts SET status = ? WHERE id = ?",
+                (new_status, row["id"]),
+            )
+        _db.commit()
+        if has_contradiction and pending:
+            log.info("Discarded %d pending facts (contradiction detected)", len(pending))
+
     def extract_facts(self, conversation_id: str, user_msg: str,
                       assistant_msg: str) -> None:
         """
@@ -441,6 +476,7 @@ class MemoryManager:
         if not self.local or not self.local.is_available():
             return
         _extract_attempts += 1
+        self._resolve_pending_facts(conversation_id, user_msg)
         try:
             system = get_active_prompt("fact_extractor")
             prompt = (
@@ -550,8 +586,8 @@ class MemoryManager:
 
                 _db.execute(
                     "INSERT INTO session_facts "
-                    "(id, conversation_id, fact, source, created_at) "
-                    "VALUES (?, ?, ?, 'auto', ?)",
+                    "(id, conversation_id, fact, source, status, created_at) "
+                    "VALUES (?, ?, ?, 'auto', 'pending', ?)",
                     (str(uuid.uuid4()), conversation_id, fact_clean, now),
                 )
                 existing_lower.add(fact_clean.lower())
@@ -566,11 +602,50 @@ class MemoryManager:
                 hist.add("fact_extracted",
                          f"Extracted {len(inserted_facts)} facts: {inserted_facts}")
 
+            self._extract_triples(grounded_facts, conversation_id)
+
         except Exception as exc:
             _extract_failures += 1
             if _extract_attempts >= 20 and _extract_failures / _extract_attempts > 0.5:
                 log.warning("Memory fact extraction failing frequently.")
             log.debug(f"Fact extraction failed: {exc}")
+
+    def _extract_triples(self, facts: list, conversation_id: str) -> None:
+        """Decompose grounded facts into (subject, predicate, object) triples."""
+        if not facts or not self.local or not self.local.is_available():
+            return
+        try:
+            prompt = _TRIPLE_PROMPT.format(facts="\n".join(f"- {f}" for f in facts))
+            raw = self.local.chat("", prompt, max_tokens=500)
+            if not raw:
+                return
+            text = raw.strip()
+            if "```" in text:
+                match = _re.search(r"```(?:json)?\s*\n?(.*?)```", text, _re.DOTALL)
+                if match:
+                    text = match.group(1).strip()
+            items = json.loads(text)
+            if not isinstance(items, list):
+                return
+            now = datetime.now(timezone.utc).isoformat()
+            for item in items[:20]:
+                if not isinstance(item, dict):
+                    continue
+                subj = str(item.get("subject", "")).strip()
+                pred = str(item.get("predicate", "")).strip()
+                obj = str(item.get("object", "")).strip()
+                if subj and pred and obj:
+                    _db.execute(
+                        "INSERT INTO knowledge_triples "
+                        "(id, subject, predicate, object, confidence, "
+                        "source_conversation_id, created_at, last_accessed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (str(uuid.uuid4()), redact(subj), redact(pred),
+                         redact(obj), 0.8, conversation_id, now, now),
+                    )
+            _db.commit()
+        except Exception as exc:
+            log.debug("Triple extraction failed (non-fatal): %s", exc)
 
     def _parse_facts_json(
         self,

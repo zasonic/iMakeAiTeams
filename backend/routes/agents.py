@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
+import db as _db
 from ._helpers import get_api
 
 router = APIRouter()
@@ -62,6 +63,24 @@ async def list_agents(request: Request) -> list:
 @router.get("/{agent_id}")
 async def get_agent(agent_id: str, request: Request):
     return get_api(request).agent_get(agent_id)
+
+
+@router.get("/{agent_id}/performance")
+async def agent_performance(agent_id: str, request: Request) -> dict:
+    rows = _db.fetchall(
+        "SELECT aligned, COUNT(*) as count FROM agent_performance "
+        "WHERE agent_id = ? AND created_at > datetime('now', '-7 days') "
+        "GROUP BY aligned",
+        (agent_id,),
+    )
+    total = sum(r["count"] for r in rows)
+    aligned = sum(r["count"] for r in rows if r["aligned"] == 1)
+    return {
+        "agent_id": agent_id,
+        "total_interactions": total,
+        "alignment_rate": round(aligned / total, 2) if total > 0 else 1.0,
+        "period": "7 days",
+    }
 
 
 @router.post("/create")
