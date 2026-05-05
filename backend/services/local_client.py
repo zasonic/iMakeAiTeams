@@ -15,6 +15,7 @@ import logging
 import re
 import requests
 from core.settings import Settings
+from services.llm_interface import LLMClient
 
 # Phase 3: Qwen3-30B-A3B detection. Matches LM Studio's typical id forms
 # such as "qwen3-30b-a3b", "Qwen/Qwen3-30B-A3B-Instruct", "qwen3-30b-a3b-q4_k_m".
@@ -25,7 +26,7 @@ log = logging.getLogger("iMakeAiTeams.local")
 _FALLBACK = "[Local model unavailable — no response]"
 
 
-class LocalClient:
+class LocalClient(LLMClient):
     def __init__(self, settings: Settings):
         self._settings = settings
 
@@ -220,3 +221,16 @@ class LocalClient:
             if full and full != _FALLBACK:
                 on_token(full)
         return full
+
+    # ── LLMClient interface ─────────────────────────────────────────────────
+
+    def chat_unified(self, system, messages, max_tokens=4096):
+        text = self.chat_multi_turn(system, messages, max_tokens=max_tokens)
+        return {"text": text or "", "input_tokens": 0, "output_tokens": 0}
+
+    def stream_unified(self, system, messages, on_token, max_tokens=4096):
+        text = self.stream_multi_turn(system, messages, on_token, max_tokens=max_tokens)
+        return {"text": text or "", "input_tokens": 0, "output_tokens": 0}
+
+    def client_name(self) -> str:
+        return self._settings.get("default_local_model", "local")

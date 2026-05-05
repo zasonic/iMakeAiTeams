@@ -358,12 +358,42 @@ class HubRouter:
         on_token: Optional[Callable[[str], None]] = None,
     ) -> WorkerResult:
         """Dispatch a routed task to its model client. Single source of truth."""
-        if decision.backend == "claude":
-            return self._invoke_claude(system, messages, max_tokens, on_token)
-        return self._invoke_local(
-            system, messages, max_tokens, on_token,
-            thinking_budget=int(decision.thinking_budget or 0),
-        )
+        client = self._claude if decision.backend == "claude" else self._local
+        local_max = max_tokens if decision.backend == "claude" else min(max_tokens, 2048)
+
+        # Phase 3: thinking budget for local Qwen models
+        if decision.backend == "local" and int(decision.thinking_budget or 0) > 0:
+            from services import qwen_thinking
+            budget = min(int(decision.thinking_budget), local_max)
+            text = qwen_thinking.worker_think(
+                self._local, system, messages,
+                budget_tokens=budget, on_token=on_token,
+            )
+            return WorkerResult(
+                text=text or "", backend="local",
+                model_name=client.client_name(),
+            )
+
+        try:
+            if on_token:
+                result = client.stream_unified(system, messages, on_token, max_tokens=local_max)
+            else:
+                result = client.chat_unified(system, messages, max_tokens=local_max)
+            return WorkerResult(
+                text=result["text"],
+                backend=decision.backend,
+                model_name=client.client_name(),
+                input_tokens=result.get("input_tokens", 0),
+                output_tokens=result.get("output_tokens", 0),
+            )
+        except Exception as exc:
+            log.error("%s invocation failed: %s", decision.backend, exc)
+            return WorkerResult(
+                text=f"[Error: {exc}]",
+                backend=decision.backend,
+                model_name=client.client_name(),
+                had_error=True,
+            )
 
     def target_for(self, decision: RoutingDecision, max_tokens: int) -> ExecutionTarget:
         """Public helper so the orchestrator can build an ExecutionTarget."""

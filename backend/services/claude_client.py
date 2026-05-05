@@ -38,8 +38,10 @@ from typing import Callable
 
 from anthropic import Anthropic
 
+from services.llm_interface import LLMClient
 
-class ClaudeClient:
+
+class ClaudeClient(LLMClient):
     """
     Wrapper for the Anthropic Messages API.
 
@@ -221,6 +223,30 @@ class ClaudeClient:
             except Exception:
                 pass  # usage unavailable — caller handles gracefully
         return full_text, usage
+
+    # ── LLMClient interface ─────────────────────────────────────────────────
+
+    def chat_unified(self, system, messages, max_tokens=4096):
+        result = self.chat_multi_turn(system, messages, max_tokens=max_tokens)
+        return {
+            "text": result.get("text", ""),
+            "input_tokens": int(result.get("input_tokens", 0)),
+            "output_tokens": int(result.get("output_tokens", 0)),
+        }
+
+    def stream_unified(self, system, messages, on_token, max_tokens=4096):
+        text, usage = self.stream_multi_turn(system, messages, on_token, max_tokens=max_tokens)
+        return {
+            "text": text or "",
+            "input_tokens": (getattr(usage, "input_tokens", 0) or 0) if usage else 0,
+            "output_tokens": (getattr(usage, "output_tokens", 0) or 0) if usage else 0,
+        }
+
+    def is_available(self) -> bool:
+        return bool(getattr(self._client, "api_key", None))
+
+    def client_name(self) -> str:
+        return self._model
 
     # ── Tool use (agentic loop) ──────────────────────────────────────────────────
 

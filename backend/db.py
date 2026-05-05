@@ -186,6 +186,10 @@ def _create_schema(conn: sqlite3.Connection) -> None:
                 created_at      TEXT
             )
         """)
+        try:
+            conn.execute("ALTER TABLE session_facts ADD COLUMN status TEXT DEFAULT 'confirmed'")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
         # ── Agents ────────────────────────────────────────────────────────────
         cur.execute("""
@@ -222,6 +226,20 @@ def _create_schema(conn: sqlite3.Connection) -> None:
                 PRIMARY KEY (team_id, agent_id)
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_performance (
+                id              TEXT PRIMARY KEY,
+                agent_id        TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                aligned         INTEGER,
+                quality_score   REAL,
+                tokens_used     INTEGER DEFAULT 0,
+                created_at      TEXT NOT NULL
+            )
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ap_agent ON agent_performance(agent_id)"
+        )
 
         # ── Token usage tracking ──────────────────────────────────────────────
         cur.execute("""
@@ -638,6 +656,25 @@ _MIGRATIONS = [
     # ── Session fact relevance decay: track last access for retrieval order ─
     ("session_facts.last_accessed", [
         "ALTER TABLE session_facts ADD COLUMN last_accessed TEXT",
+    ]),
+
+    # ── Deferred reflection: pending/confirmed/discarded fact lifecycle ─────
+    ("session_facts.status", [
+        "ALTER TABLE session_facts ADD COLUMN status TEXT DEFAULT 'confirmed'",
+    ]),
+
+    # ── Agent performance tracking (per-turn alignment + tokens) ─────────────
+    ("agent_performance.1.0", [
+        """CREATE TABLE IF NOT EXISTS agent_performance (
+            id              TEXT PRIMARY KEY,
+            agent_id        TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            aligned         INTEGER,
+            quality_score   REAL,
+            tokens_used     INTEGER DEFAULT 0,
+            created_at      TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_ap_agent ON agent_performance(agent_id)",
     ]),
 ]
 

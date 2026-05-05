@@ -29,11 +29,13 @@ configured threshold.
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 
 import db as _db
 from models import ChatResult, ExecutionTarget, RoutingDecision, TaskDescriptor
+from services.governance import GovernanceEngine
 from services.hub_router import HubRouter
 from services import qwen_thinking
 from services.redact import redact
@@ -61,6 +63,18 @@ def _list_routable_agents() -> list[dict]:
 MAX_HISTORY_MESSAGES = 40  # 20 user/assistant turns
 MAX_CONTEXT_CHARS = 80_000  # ~20K tokens — safe for 128K context models
                              # Leaves room for system prompt + RAG + response
+
+_COMPOUND_SIGNALS = re.compile(
+    r"\b(and also|and then|after that|additionally|plus can you|"
+    r"also please|second(?:ly)|third(?:ly)|finally|one more thing|"
+    r"on top of that|separately|another thing)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_compound(msg: str) -> bool:
+    """Detect messages containing multiple independent requests."""
+    return len(_COMPOUND_SIGNALS.findall(msg)) >= 2 or msg.count("?") >= 3
 
 # Per-million-token pricing defaults. Users can override in Settings
 # to keep cost tracking accurate when Anthropic changes prices.
@@ -144,12 +158,14 @@ def _log_router_event(
 
 class ChatOrchestrator:
     def __init__(self, claude_client, local_client, router, memory, settings,
-                 hub_router: HubRouter | None = None):
+                 hub_router: HubRouter | None = None, mcp_registry=None):
         self.claude = claude_client
         self.local = local_client
         self.router = router
         self.memory = memory
         self._settings = settings
+        self._mcp_registry = mcp_registry
+        self._governance = GovernanceEngine(settings)
         # DiLoCo blast-radius containment: instead of a fresh-per-turn ledger
         # (which forgets) or a perpetual ledger (which locks out after ~9
         # messages), keep a sliding window of the last N turn-level risk
@@ -582,6 +598,12 @@ class ChatOrchestrator:
             "needs_context": route_needs_context,
         })
 
+        if _detect_compound(user_message):
+            _emit_event("compound_query_detected", {
+                "message": "This looks like multiple requests. A team of agents might handle this better.",
+                "suggestion": "Try selecting a team coordinator for complex multi-part requests.",
+            })
+
         # ── v4.1: Adaptive memory injection budget (Engram-inspired) ─────────
         # The Engram U-shaped finding says ~25% memory, ~75% reasoning is
         # optimal. For simple queries, we cap injected context aggressively
@@ -610,6 +632,30 @@ class ChatOrchestrator:
                     "Do not attempt to use any other tools or capabilities "
                     "outside this list."
                 )
+
+        # Inject MCP tool descriptions for this agent's skills
+        if agent and agent.get("skills") and self._mcp_registry:
+            try:
+                agent_skills = (
+                    json.loads(agent["skills"]) if isinstance(agent["skills"], str)
+                    else agent["skills"]
+                )
+                skill_names = [
+                    s.get("name", "") for s in agent_skills
+                    if isinstance(s, dict)
+                ]
+                mcp_tools = self._mcp_registry.get_tools_for_tags(skill_names)
+                if mcp_tools:
+                    tool_lines = "\n".join(
+                        f"- **{t['name']}**: {t['description']}" for t in mcp_tools[:10]
+                    )
+                    full_system += (
+                        "\n\n## Available External Tools\n"
+                        "(These tools are available via MCP. Mention them if relevant.)\n\n"
+                        + tool_lines
+                    )
+            except Exception:
+                pass  # MCP injection is best-effort
 
         # ── Phase 1: Build routing decision through the HubRouter ────────────
         # The TaskRouter above decided which *backend* to use; the HubRouter
@@ -734,6 +780,44 @@ class ChatOrchestrator:
 
         # ══════════════════════════════════════════════════════════════════════
 
+        # ── Governance: enforce per-agent policies before invocation ─────────
+        if agent_id:
+            tool_verdict = self._governance.check_tool_call(
+                tool_name="chat_invoke",
+                agent_id=agent_id,
+                task_key=conversation_id,
+            )
+            if not tool_verdict.allowed:
+                _emit_event("governance_blocked", {
+                    "agent_id": agent_id,
+                    "reason": tool_verdict.reason,
+                    "policy": tool_verdict.policy_name,
+                })
+                return ChatResult(
+                    text=f"⚠️ Governance policy blocked this request: {tool_verdict.reason}",
+                    model="", route_reason="governance_blocked",
+                    tokens_in=0, tokens_out=0, cost_usd=0.0,
+                    message_id=str(uuid.uuid4()),
+                )
+
+            budget_verdict = self._governance.check_token_budget(
+                tokens_used=target.max_tokens,
+                agent_id=agent_id,
+                task_key=conversation_id,
+            )
+            if not budget_verdict.allowed:
+                _emit_event("governance_blocked", {
+                    "agent_id": agent_id,
+                    "reason": budget_verdict.reason,
+                    "policy": budget_verdict.policy_name,
+                })
+                return ChatResult(
+                    text=f"⚠️ Token budget exceeded: {budget_verdict.reason}",
+                    model="", route_reason="governance_budget",
+                    tokens_in=0, tokens_out=0, cost_usd=0.0,
+                    message_id=str(uuid.uuid4()),
+                )
+
         response_text = ""
         tokens_in = 0
         tokens_out = 0
@@ -822,6 +906,21 @@ class ChatOrchestrator:
                             _emit_event("alignment_warning", {
                                 "reason": parsed.get("reason", "Response may not address your request"),
                             })
+                        # Persist agent performance data
+                        try:
+                            _db.execute(
+                                "INSERT INTO agent_performance "
+                                "(id, agent_id, conversation_id, aligned, quality_score, tokens_used, created_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (str(uuid.uuid4()), agent_id, conversation_id,
+                                 1 if parsed.get("aligned", True) else 0,
+                                 None,  # quality_score filled by quality gate below if it runs
+                                 tokens_in + tokens_out,
+                                 datetime.now(timezone.utc).isoformat()),
+                            )
+                            _db.commit()
+                        except Exception:
+                            pass  # performance logging is best-effort
             except Exception:
                 pass  # alignment check is best-effort, never block response
 
@@ -927,6 +1026,30 @@ class ChatOrchestrator:
             (resp_now, user_message[:60], conversation_id),
         )
         _db.commit()
+
+        # Auto-title: generate a concise title from the first exchange.
+        # Only fires once — when the title is still the raw truncation.
+        conv_row = _db.fetchone(
+            "SELECT title FROM conversations WHERE id = ?", (conversation_id,)
+        )
+        if conv_row and conv_row["title"] == user_message[:60]:
+            if self.local and self.local.is_available():
+                try:
+                    title_raw = self.local.chat(
+                        "Generate a 3-6 word title for this conversation. "
+                        "Return ONLY the title text, no quotes, no explanation.",
+                        f"User: {user_message[:200]}\nAssistant: {response_text[:200]}",
+                        max_tokens=20,
+                    )
+                    if title_raw and 2 < len(title_raw.strip()) <= 80:
+                        clean_title = title_raw.strip().strip('"\'').strip()
+                        _db.execute(
+                            "UPDATE conversations SET title = ? WHERE id = ?",
+                            (clean_title, conversation_id),
+                        )
+                        _db.commit()
+                except Exception:
+                    pass  # auto-title is best-effort, never block
 
         # Token usage row
         _db.execute(

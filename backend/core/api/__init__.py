@@ -164,6 +164,13 @@ class API:
             lambda: TaskRouter(self._local, self._settings),
         )
 
+        # Phase 2: MCP tool registry (catalog only; execution deferred).
+        # Initialised before the chat orchestrator so it can be passed in.
+        self._mcp_registry = self._safe_init(
+            "mcp_registry",
+            lambda: MCPRegistry(paths.mcp_servers_dir(), self._settings),
+        )
+
         self._chat = self._safe_init(
             "chat_orchestrator",
             lambda: ChatOrchestrator(
@@ -172,13 +179,8 @@ class API:
                 router=self._router,
                 memory=self._memory,
                 settings=self._settings,
+                mcp_registry=self._mcp_registry,
             ),
-        )
-
-        # Phase 2: MCP tool registry (catalog only; execution deferred).
-        self._mcp_registry = self._safe_init(
-            "mcp_registry",
-            lambda: MCPRegistry(paths.mcp_servers_dir(), self._settings),
         )
 
         # Phase 4: append-only audit log + human-in-loop lifecycle gate.
