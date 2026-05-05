@@ -263,6 +263,23 @@ class API:
         entry = self._status.get(name, {})
         self._emit("service_status_update", {"service": name, **entry})
 
+    # ── Public accessors ─────────────────────────────────────────────────────
+    #
+    # ``_claude``/``_local`` are conventionally private but are needed by a
+    # few collaborators that compose on top of the API (e.g. the execution
+    # classifier in server.py). Exposing typed accessors avoids the
+    # ``getattr(api, "_claude", None)`` pattern leaking the underscore name.
+
+    @property
+    def claude_client(self):
+        """The configured ``ClaudeClient``, or ``None`` if init failed."""
+        return self._claude
+
+    @property
+    def local_client(self):
+        """The configured ``LocalClient``, or ``None`` if unavailable."""
+        return self._local
+
     def _safe_init(self, name, factory, *, required=False, fallback=None):
         """Run ``factory()`` and record the outcome in self._status[name].
 

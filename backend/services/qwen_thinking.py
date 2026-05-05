@@ -76,7 +76,7 @@ def strip_think_block(text: str) -> tuple[str, str]:
     return answer, reasoning_inner
 
 
-# ── Worker invocation (used by HubRouter._invoke_local in Phase 3) ─────────
+# ── Worker invocation (used by HubRouter.invoke in Phase 3) ───────────────
 
 def worker_think(
     local_client,
@@ -95,10 +95,11 @@ def worker_think(
     think = budget_tokens > 0
     full_system = with_think_directive(system, think=think)
     if on_token:
-        return local_client.stream_multi_turn(
+        text, _usage = local_client.stream_multi_turn(
             full_system, messages, on_token,
             max_tokens=max(budget_tokens, 256),
         )
+        return text
     return local_client.chat_multi_turn(
         full_system, messages, max_tokens=max(budget_tokens, 256),
     )
