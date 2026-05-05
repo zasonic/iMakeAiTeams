@@ -31,6 +31,7 @@ import json
 import logging
 import re
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 import db as _db
@@ -170,7 +171,10 @@ class ChatOrchestrator:
         # (which forgets) or a perpetual ledger (which locks out after ~9
         # messages), keep a sliding window of the last N turn-level risk
         # scores. Sustained high risk trips the abort; transient spikes don't.
-        self._risk_history: dict[str, list[float]] = {}  # per-conversation
+        # An OrderedDict bounds the per-conversation dict so quiet-but-never-
+        # deleted conversations cannot accumulate entries forever.
+        self._risk_history: "OrderedDict[str, list[float]]" = OrderedDict()
+        self._risk_history_max_conversations = 256
         # Single boundary for worker invocation (Phase 1) with Phase 3 LLM
         # fallback wired through Qwen3 /no_think for routing decisions that
         # have no deterministic skill match.
@@ -549,8 +553,6 @@ class ChatOrchestrator:
         if mem_suffix:
             full_system = system_prompt + "\n\n" + mem_suffix
 
-        _active_mem_suffix = ""
-
         # ── Fix 9: Inject tool restrictions into system prompt ───────────────
         if _allowed_tools:
             tool_names = ", ".join(_allowed_tools)
@@ -622,8 +624,6 @@ class ChatOrchestrator:
             full_system = system_prompt
             if mem_suffix:
                 full_system = system_prompt + "\n\n" + mem_suffix
-            if _active_mem_suffix:
-                full_system += "\n\n" + _active_mem_suffix
             if _allowed_tools:
                 tool_names = ", ".join(_allowed_tools)
                 full_system += (
@@ -746,6 +746,12 @@ class ChatOrchestrator:
             history.append(security.risk_assessment.cumulative_score)
             if len(history) > 5:
                 del history[:-5]
+            # Mark this conversation as most-recently-used and evict the
+            # least-recently-used once we exceed the bound. Without this
+            # the dict accumulated one entry per conversation forever.
+            self._risk_history.move_to_end(conversation_id)
+            while len(self._risk_history) > self._risk_history_max_conversations:
+                self._risk_history.popitem(last=False)
             if len(history) >= 5:
                 window_avg = sum(history) / len(history)
                 if window_avg > RISK_ABORT_THRESHOLD / 5:
@@ -925,71 +931,82 @@ class ChatOrchestrator:
                 pass  # alignment check is best-effort, never block response
 
         # ── Local response quality gate ─────────────────────────────────────
-        # If response came from local and looks weak, escalate to Claude
+        # If response came from local and looks weak, escalate to Claude.
+        # An empty local response is the strongest possible signal of failure,
+        # so it bypasses the quality scorer (which can't grade an empty input)
+        # and escalates directly.
         response_empty = len((response_text or "").strip()) < 20
+
+        def _escalate_to_claude(reason: str) -> bool:
+            nonlocal response_text, tokens_in, tokens_out, route_model, model_name
+            try:
+                escalation = RoutingDecision(
+                    agent_id=decision.agent_id,
+                    backend="claude",
+                    score=decision.score,
+                    reasoning=reason,
+                    used_fallback=False,
+                    skill_matched=decision.skill_matched,
+                )
+                esc_result = self.hub_router.invoke(
+                    escalation, full_system, messages,
+                    max_tokens=target.max_tokens, on_token=on_token,
+                )
+                response_text = esc_result.text
+                tokens_in = esc_result.input_tokens
+                tokens_out = esc_result.output_tokens
+                route_model = "claude"
+                model_name = esc_result.model_name
+                return True
+            except Exception as esc_exc:
+                log.debug("Escalation to Claude failed: %s", esc_exc)
+                return False
+
         if (
             not had_error
             and target.backend == "local"
-            and not response_empty
             and self.local and self.local.is_available()
             and len(user_message.split()) >= 5  # skip for trivial messages
         ):
-            try:
-                from services.task_artifacts import local_first_call
-                quality_raw = local_first_call(
-                    self.local, None,  # local only, no Claude fallback
-                    "Rate this response's relevance and completeness for the given question. "
-                    "Respond with ONLY a JSON: {\"score\": 0-10, \"reason\": \"...\"}",
-                    f"QUESTION: {user_message[:300]}\nRESPONSE: {(response_text or '')[:500]}",
-                    max_tokens=100,
-                )
-                if quality_raw:
-                    import json as _json
-                    _qstart = quality_raw.find("{")
-                    _qend = quality_raw.rfind("}")
-                    if _qstart != -1 and _qend != -1:
-                        try:
-                            quality = _json.loads(quality_raw[_qstart:_qend + 1])
-                        except (ValueError, TypeError):
-                            quality = {}
-                        # Coerce score to a number; a model emitting
-                        # {"score": "low"} would otherwise raise TypeError
-                        # on the comparison and silently disable escalation
-                        # via the outer `except Exception: pass` swallow.
-                        try:
-                            score = float(quality.get("score", 10))
-                        except (TypeError, ValueError):
-                            score = 10.0
-                        if score < 4:
-                            log.info("Local response scored %s — escalating to Claude", score)
+            if response_empty:
+                log.info("Local response empty — escalating to Claude")
+                _escalate_to_claude("local response empty; escalated")
+            else:
+                try:
+                    from services.task_artifacts import local_first_call
+                    quality_raw = local_first_call(
+                        self.local, None,  # local only, no Claude fallback
+                        "Rate this response's relevance and completeness for the given question. "
+                        "Respond with ONLY a JSON: {\"score\": 0-10, \"reason\": \"...\"}",
+                        f"QUESTION: {user_message[:300]}\nRESPONSE: {(response_text or '')[:500]}",
+                        max_tokens=100,
+                    )
+                    if quality_raw:
+                        import json as _json
+                        _qstart = quality_raw.find("{")
+                        _qend = quality_raw.rfind("}")
+                        if _qstart != -1 and _qend != -1:
                             try:
-                                # The previous on_token("\x00__CLEAR__") sentinel
-                                # was never handled on the renderer, so it just
-                                # appeared as gibberish in the stream. Drop it;
-                                # buffer-clear-on-escalation is a separate UX
-                                # issue (renderer would need a typed event).
-                                # Phase 1: escalation also goes through the hub.
-                                escalation = RoutingDecision(
-                                    agent_id=decision.agent_id,
-                                    backend="claude",
-                                    score=decision.score,
-                                    reasoning="local response failed quality gate; escalated",
-                                    used_fallback=False,
-                                    skill_matched=decision.skill_matched,
-                                )
-                                esc_result = self.hub_router.invoke(
-                                    escalation, full_system, messages,
-                                    max_tokens=target.max_tokens, on_token=on_token,
-                                )
-                                response_text = esc_result.text
-                                tokens_in = esc_result.input_tokens
-                                tokens_out = esc_result.output_tokens
-                                route_model = "claude"
-                                model_name = esc_result.model_name
-                            except Exception as esc_exc:
-                                log.debug("Escalation to Claude failed: %s", esc_exc)
-            except Exception:
-                pass  # quality check is best-effort, never block response
+                                quality = _json.loads(quality_raw[_qstart:_qend + 1])
+                            except (ValueError, TypeError):
+                                quality = {}
+                            # Coerce score to a number; a model emitting
+                            # {"score": "low"} would otherwise raise TypeError
+                            # on the comparison and silently disable escalation
+                            # via the outer `except Exception: pass` swallow.
+                            try:
+                                score = float(quality.get("score", 10))
+                            except (TypeError, ValueError):
+                                score = 10.0
+                            if score < 4:
+                                log.info("Local response scored %s — escalating to Claude", score)
+                                _escalate_to_claude("local response failed quality gate; escalated")
+                except Exception:
+                    pass  # quality check is best-effort, never block response
+
+        # Recompute after possible escalation so router_log records the
+        # post-escalation state, not the stale pre-escalation reading.
+        response_empty = len((response_text or "").strip()) < 20
 
         # Persist router feedback
         _log_router_event(
@@ -1012,20 +1029,48 @@ class ChatOrchestrator:
         reply_text_for_storage = redact(response_text)
         asst_msg_id = str(uuid.uuid4())
         resp_now = datetime.now(timezone.utc).isoformat()
-        _db.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, model_used, "
-            "route_reason, tokens_in, tokens_out, cost_usd, created_at) "
-            "VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
-            (asst_msg_id, conversation_id, reply_text_for_storage, model_name,
-             route_reason, tokens_in, tokens_out, cost, resp_now),
-        )
-        _db.execute(
-            "UPDATE conversations SET updated_at = ?, "
-            "title = CASE WHEN title = 'New conversation' THEN ? ELSE title END "
-            "WHERE id = ?",
-            (resp_now, user_message[:60], conversation_id),
-        )
-        _db.commit()
+        # Persist assistant message + conversation update + token_usage as a
+        # single transaction. Splitting these used to leave the DB in a torn
+        # state on a crash (message saved but token_usage missing — budget
+        # under-counted). Re-reading the running total inside the same lock
+        # also closes the race where two concurrent sends both used a stale
+        # ``spent`` and skipped the budget warning.
+        budget_warning = ""
+        with _db._lock:
+            conn = _db.get_db()
+            conn.execute(
+                "INSERT INTO messages (id, conversation_id, role, content, model_used, "
+                "route_reason, tokens_in, tokens_out, cost_usd, created_at) "
+                "VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
+                (asst_msg_id, conversation_id, reply_text_for_storage, model_name,
+                 route_reason, tokens_in, tokens_out, cost, resp_now),
+            )
+            conn.execute(
+                "UPDATE conversations SET updated_at = ?, "
+                "title = CASE WHEN title = 'New conversation' THEN ? ELSE title END "
+                "WHERE id = ?",
+                (resp_now, user_message[:60], conversation_id),
+            )
+            conn.execute(
+                "INSERT INTO token_usage (id, conversation_id, model, tokens_in, "
+                "tokens_out, cost_usd, routed_reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), conversation_id, model_name,
+                 tokens_in, tokens_out, cost, route_reason, resp_now),
+            )
+            conn.commit()
+            if budget > 0:
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage "
+                    "WHERE conversation_id = ?",
+                    (conversation_id,),
+                ).fetchone()
+                new_spent = row["total"] if row else (spent + cost)
+                pct = (new_spent / budget) * 100
+                if pct >= warn_pct:
+                    budget_warning = (
+                        f"⚠️ Approaching conversation budget limit "
+                        f"(${new_spent:.2f}/${budget:.2f})"
+                    )
 
         # Auto-title: generate a concise title from the first exchange.
         # Only fires once — when the title is still the raw truncation.
@@ -1051,27 +1096,10 @@ class ChatOrchestrator:
                 except Exception:
                     pass  # auto-title is best-effort, never block
 
-        # Token usage row
-        _db.execute(
-            "INSERT INTO token_usage (id, conversation_id, model, tokens_in, "
-            "tokens_out, cost_usd, routed_reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), conversation_id, model_name,
-             tokens_in, tokens_out, cost, route_reason, resp_now),
-        )
-        _db.commit()
-
         # Update memory
         self.memory.add_to_buffer(conversation_id, "user", user_message)
         self.memory.add_to_buffer(conversation_id, "assistant", response_text)
         self.memory.extract_facts(conversation_id, user_message, response_text)
-
-        # ── Improvement 2: Budget warning check ─────────────────────────────
-        budget_warning = ""
-        if budget > 0:
-            new_spent = spent + cost
-            pct = (new_spent / budget) * 100
-            if pct >= warn_pct:
-                budget_warning = f"\u26a0\ufe0f Approaching conversation budget limit (${new_spent:.2f}/${budget:.2f})"
 
         return ChatResult(
             text=response_text,
@@ -1210,8 +1238,21 @@ class ChatOrchestrator:
             (limit,),
         )
         total_cost = sum(r["cost"] or 0 for r in rows)
+        # Estimate what the local-served traffic would have cost on the
+        # Claude model the router would have fallen back to. Using
+        # ``_estimate_cost`` honors any user-configured ``model_prices``
+        # override and the configured comparison model, instead of the
+        # previous hardcoded Sonnet input price that ignored both.
+        comparison_model = self._settings.get(
+            "savings_comparison_model", "claude-sonnet"
+        )
         local_saved = sum(
-            (r["ti"] or 0) * 3.0 / 1_000_000
+            _estimate_cost(
+                comparison_model,
+                int(r["ti"] or 0),
+                int(r["to_"] or 0),
+                self._settings,
+            )
             for r in rows if "claude" not in (r["model"] or "").lower()
         )
         return {

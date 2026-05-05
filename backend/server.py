@@ -27,6 +27,7 @@ import signal
 import socket
 import sys
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
@@ -158,7 +159,7 @@ class _AppContainer:
                 emit=sse_events.publish,
             )
             self.execution_classifier = ExecutionClassifier(
-                claude_client=getattr(self.api, "_claude", None),
+                claude_client=self.api.claude_client,
             )
 
             # Auto-start OpenClaw if the user opted in. Always run on a
@@ -211,18 +212,29 @@ class _AppContainer:
 def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContainer]:
     container = _AppContainer(user_data)
 
-    app = FastAPI(title="iMakeAiTeams Sidecar", version="1.0.0")
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        sse_events.attach_loop(asyncio.get_running_loop())
+        yield
+
+    app = FastAPI(
+        title="iMakeAiTeams Sidecar", version="1.0.0", lifespan=_lifespan,
+    )
 
     # CORS: Electron's renderer runs on file:// or http://localhost in dev.
     # Allow only localhost origins; the Bearer middleware is the real gate.
     app.add_middleware(
         CORSMiddleware,
+        # Dev-server origins. Packaged Electron loads the renderer from
+        # ``file://`` (see desktop-shell/main.ts), whose Origin is ``null``
+        # and is not gated by this list — auth is enforced by
+        # BearerAuthMiddleware. The previous ``app://-`` entry never
+        # matched any actual origin and was removed.
         allow_origins=[
             "http://localhost:5173",
             "http://127.0.0.1:5173",
             "http://localhost:5174",
             "http://127.0.0.1:5174",
-            "app://-",            # electron-vite production
         ],
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
@@ -234,10 +246,6 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
     # request.app.state.container.
     app.state.container = container
     app.state.shutdown_event = asyncio.Event()
-
-    @app.on_event("startup")
-    async def _startup() -> None:
-        sse_events.attach_loop(asyncio.get_running_loop())
 
     # Register routers
     from routes import (

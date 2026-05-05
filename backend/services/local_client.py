@@ -177,9 +177,14 @@ class LocalClient(LLMClient):
             return _FALLBACK
 
     def stream_multi_turn(self, system: str, messages: list, on_token,
-                          model: str | None = None, max_tokens: int = 2048) -> str:
-        """Streaming multi-turn chat. Calls on_token per chunk. Returns full text.
-        Falls back to non-streaming on any error rather than crashing."""
+                          model: str | None = None,
+                          max_tokens: int = 2048) -> tuple[str, object]:
+        """Streaming multi-turn chat. Calls on_token per chunk.
+
+        Returns ``(full_text, usage)`` to mirror ``ClaudeClient.stream_multi_turn``;
+        local backends do not report usage, so the second element is always None.
+        Falls back to non-streaming on any error rather than crashing.
+        """
         b = self._backend()
         model = model or self._settings.get("default_local_model", "")
         url = self._url(b)
@@ -220,7 +225,7 @@ class LocalClient(LLMClient):
             full = self.chat_multi_turn(system, messages, model=model, max_tokens=max_tokens)
             if full and full != _FALLBACK:
                 on_token(full)
-        return full
+        return full, None
 
     # ── LLMClient interface ─────────────────────────────────────────────────
 
@@ -229,7 +234,9 @@ class LocalClient(LLMClient):
         return {"text": text or "", "input_tokens": 0, "output_tokens": 0}
 
     def stream_unified(self, system, messages, on_token, max_tokens=4096):
-        text = self.stream_multi_turn(system, messages, on_token, max_tokens=max_tokens)
+        text, _usage = self.stream_multi_turn(
+            system, messages, on_token, max_tokens=max_tokens,
+        )
         return {"text": text or "", "input_tokens": 0, "output_tokens": 0}
 
     def client_name(self) -> str:

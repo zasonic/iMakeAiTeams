@@ -186,10 +186,9 @@ def _create_schema(conn: sqlite3.Connection) -> None:
                 created_at      TEXT
             )
         """)
-        try:
-            conn.execute("ALTER TABLE session_facts ADD COLUMN status TEXT DEFAULT 'confirmed'")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        # The ``status`` and ``last_accessed`` columns are added by the
+        # migrations below — keeping column adds in one place avoids
+        # duplicate-column noise on every fresh-database startup.
 
         # ── Agents ────────────────────────────────────────────────────────────
         cur.execute("""
@@ -226,20 +225,10 @@ def _create_schema(conn: sqlite3.Connection) -> None:
                 PRIMARY KEY (team_id, agent_id)
             )
         """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS agent_performance (
-                id              TEXT PRIMARY KEY,
-                agent_id        TEXT NOT NULL,
-                conversation_id TEXT NOT NULL,
-                aligned         INTEGER,
-                quality_score   REAL,
-                tokens_used     INTEGER DEFAULT 0,
-                created_at      TEXT NOT NULL
-            )
-        """)
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ap_agent ON agent_performance(agent_id)"
-        )
+        # ``agent_performance`` is created by its own migration below
+        # (``agent_performance.1.0``). Keeping the create in one place
+        # avoids the duplicate ``CREATE TABLE``/``CREATE INDEX`` calls
+        # that fired on every startup.
 
         # ── Token usage tracking ──────────────────────────────────────────────
         cur.execute("""
