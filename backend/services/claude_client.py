@@ -31,6 +31,13 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — Extended thinking in agentic tool-use loops:
+  - call_with_tools() accepts an optional thinking_budget parameter. When
+    set, thinking blocks are returned alongside text and tool_use blocks so
+    agentic orchestrators can inspect reasoning before acting on tool calls.
+    max_tokens is automatically raised to budget + 2048 when the caller's
+    value would be too small to accommodate the thinking allocation.
 """
 
 from pathlib import Path
@@ -60,7 +67,7 @@ class ClaudeClient(LLMClient):
         self._use_caching = use_caching
         self._file_cache: dict[str, str] = {}  # file_path -> file_id
 
-    # ── Configuration ────────────────────────────────────────────────────────────
+    # ── Configuration ─────────────────────────────────────────────────────────────
 
     def update_config(
         self,
@@ -75,7 +82,7 @@ class ClaudeClient(LLMClient):
         if use_caching is not None:
             self._use_caching = use_caching
 
-    # ── Content helpers ──────────────────────────────────────────────────────────
+    # ── Content helpers ─────────────────────────────────────────────────────────────
 
     def _build_content(self, project_summary: str, user_message: str) -> list:
         """
@@ -119,7 +126,7 @@ class ClaudeClient(LLMClient):
             return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         return system
 
-    # ── Single-turn chat ─────────────────────────────────────────────────────────
+    # ── Single-turn chat ─────────────────────────────────────────────────────────────
 
     def chat(self, system: str, project_summary: str, user_message: str,
              max_tokens: int = 4096) -> str:
@@ -134,7 +141,7 @@ class ClaudeClient(LLMClient):
         response = self._client.messages.create(**kwargs)
         return response.content[0].text
 
-    # ── Single-turn streaming ────────────────────────────────────────────────────
+    # ── Single-turn streaming ──────────────────────────────────────────────────────────
 
     def stream_chat(
         self,
@@ -162,7 +169,7 @@ class ClaudeClient(LLMClient):
                 full_text += token
         return full_text
 
-    # ── Multi-turn chat ──────────────────────────────────────────────────────────
+    # ── Multi-turn chat ─────────────────────────────────────────────────────────────
 
     def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096) -> dict:
         """
@@ -224,7 +231,7 @@ class ClaudeClient(LLMClient):
                 pass  # usage unavailable — caller handles gracefully
         return full_text, usage
 
-    # ── LLMClient interface ─────────────────────────────────────────────────
+    # ── LLMClient interface ───────────────────────────────────────────────
 
     def chat_unified(self, system, messages, max_tokens=4096):
         result = self.chat_multi_turn(system, messages, max_tokens=max_tokens)
@@ -248,7 +255,7 @@ class ClaudeClient(LLMClient):
     def client_name(self) -> str:
         return self._model
 
-    # ── Tool use (agentic loop) ──────────────────────────────────────────────────
+    # ── Tool use (agentic loop) ──────────────────────────────────────────────────────
 
     def call_with_tools(
         self,
@@ -256,13 +263,25 @@ class ClaudeClient(LLMClient):
         messages: list,
         tools: list,
         max_tokens: int = 8192,
+        thinking_budget: int | None = None,
     ) -> dict:
         """
         Call the Messages API with tool definitions.
         Returns a dict matching the Anthropic response shape:
           {"content": [...], "stop_reason": "end_turn"|"tool_use", ...}
-        Each content block is {"type":"text","text":...} or
-        {"type":"tool_use","id":..."name":..."input":...}.
+        Each content block is {"type":"text","text":...},
+        {"type":"tool_use","id":..."name":..."input":...}, or
+        {"type":"thinking","thinking":...} (only when thinking_budget is set).
+
+        Parameters
+        ----------
+        thinking_budget
+            When set, extended thinking is enabled with this token budget.
+            max_tokens is automatically raised to budget + 2048 if needed,
+            ensuring there is always headroom for the answer after thinking.
+            Thinking blocks are included in the returned content list so
+            agentic orchestrators can log or display Claude's reasoning
+            before acting on tool calls.
         """
         kwargs = {
             "model": self._model,
@@ -271,10 +290,16 @@ class ClaudeClient(LLMClient):
             "messages": messages,
             "tools": tools,
         }
+        if thinking_budget is not None:
+            # Ensure max_tokens can accommodate thinking + answer output.
+            kwargs["max_tokens"] = max(max_tokens, thinking_budget + 2048)
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
         response = self._client.messages.create(**kwargs)
         content = []
         for block in response.content:
-            if block.type == "text":
+            if block.type == "thinking":
+                content.append({"type": "thinking", "thinking": block.thinking})
+            elif block.type == "text":
                 content.append({"type": "text", "text": block.text})
             elif block.type == "tool_use":
                 content.append({
@@ -310,7 +335,7 @@ class ClaudeClient(LLMClient):
         self._file_cache[key] = file_id
         return file_id
 
-    # ── Chat with uploaded file ──────────────────────────────────────────────────
+    # ── Chat with uploaded file ──────────────────────────────────────────────────────
 
     def chat_with_file(self, system: str, file_id: str, user_message: str) -> str:
         """
@@ -331,7 +356,7 @@ class ClaudeClient(LLMClient):
         )
         return response.content[0].text
 
-    # ── Extended thinking ────────────────────────────────────────────────────────
+    # ── Extended thinking ───────────────────────────────────────────────────────────
 
     def extended_thinking_chat(
         self,
