@@ -1,18 +1,18 @@
 """
-services/hub_router.py — Phase 1: Centralized hub routing.
+services/hub_router.py -- Phase 1: Centralized hub routing.
 
 Single boundary that selects a worker (agent) for a TaskDescriptor and is the
 only call site permitted to invoke ``claude_client`` / ``local_client`` for
 worker work.
 
 Routing strategy:
-  1. ``route_for_agent(agent_id, task)`` — caller specifies the agent; router
+  1. ``route_for_agent(agent_id, task)`` -- caller specifies the agent; router
      validates skill/scope authorization, then returns a RoutingDecision.
-  2. ``route(task)`` — caller does not specify an agent; router scores all
+  2. ``route(task)`` -- caller does not specify an agent; router scores all
      skill-declaring agents by deterministic skill match (target p99 < 50ms).
      If no agent's score exceeds ``MIN_SKILL_MATCH_SCORE``, the LLM fallback
-     hook fires (filled in by Phase 3 — see ``_llm_fallback``).
-  3. ``invoke(decision, system, messages, ...)`` — dispatches the chosen
+     hook fires (filled in by Phase 3 -- see ``_llm_fallback``).
+  3. ``invoke(decision, system, messages, ...)`` -- dispatches the chosen
      decision to the right model client and returns a uniform WorkerResult.
 
 Authz model:
@@ -56,7 +56,7 @@ _MAX_AGENTS_FOR_LLM: int = 5
 
 # Roles that are always included in the LLM fallback list regardless of
 # keyword score. The coordinator is special-cased because it's the
-# universal fan-out target — without it the fallback can't recover when
+# universal fan-out target -- without it the fallback can't recover when
 # none of the specialists score well.
 _ALWAYS_INCLUDED_ROLES: frozenset[str] = frozenset({"coordinator"})
 
@@ -84,12 +84,12 @@ class HubRouter:
         self._settings = settings
         # Phase 3 wires Qwen /no_think here; Phase 1 leaves it None and routing
         # raises if it would be needed without a fallback configured. The
-        # current contract is ``fallback(task, *, agent_list=...)`` — older
+        # current contract is ``fallback(task, *, agent_list=...)`` -- older
         # fallbacks that only accept ``task`` are still supported through a
         # TypeError catch in route().
         self._llm_fallback = llm_fallback
 
-    # ── Skill scoring (deterministic, no LLM) ────────────────────────────────
+    # ── Skill scoring (deterministic, no LLM) ──────────────────────────────────────────
 
     @staticmethod
     def _parse_skills(raw: str | None) -> list[Skill]:
@@ -151,7 +151,7 @@ class HubRouter:
         overlap = task_words & agent_words
         score = len(overlap) / max(len(task_words), 1)
 
-        # Bonus if the agent's role appears verbatim in the task text — a
+        # Bonus if the agent's role appears verbatim in the task text -- a
         # cheap way to honor explicit asks like "have the writer draft this".
         role = (agent.get("role") or "").lower()
         if role and role in task_lower:
@@ -202,7 +202,7 @@ class HubRouter:
 
         Score combines:
           - Required-skill coverage: fraction of task.required_skills present in
-            declared skill names. Zero means no overlap → unrouteable.
+            declared skill names. Zero means no overlap -> unrouteable.
           - Scope fit: required_scopes must be a subset of the declared skill's
             scopes for at least one matched skill.
           - Specificity bonus: agents with fewer total skills get a small boost
@@ -224,7 +224,7 @@ class HubRouter:
             None,
         )
         if scope_ok_skill is None:
-            return (0.0, "")  # no skill can satisfy scopes → unauthorized
+            return (0.0, "")  # no skill can satisfy scopes -> unauthorized
 
         # Specificity: 1.0 when agent declares only the matched skill,
         # decays as the agent declares unrelated skills.
@@ -234,7 +234,7 @@ class HubRouter:
         score = max(0.0, min(1.0, score))
         return (score, scope_ok_skill.name)
 
-    # ── Public routing API ──────────────────────────────────────────────────
+    # ── Public routing API ───────────────────────────────────────────────────────────────────
 
     def route_for_agent(self, agent_id: str, task: TaskDescriptor) -> RoutingDecision:
         """Caller-specified agent path. Validates authz; never runs the LLM."""
@@ -250,7 +250,7 @@ class HubRouter:
 
         # Authz: if the task declared required_skills/scopes, the agent must
         # cover them. If the task is open (no required_skills), we accept any
-        # agent — this preserves the existing chat flow where the user picks
+        # agent -- this preserves the existing chat flow where the user picks
         # an agent freely.
         if task.required_skills and score == 0.0:
             raise AuthorizationError(
@@ -319,7 +319,7 @@ class HubRouter:
                 thinking_budget=self._capped_budget(best_row),
             )
 
-        # No deterministic winner — use LLM fallback if Phase 3 wired one.
+        # No deterministic winner -- use LLM fallback if Phase 3 wired one.
         if self._llm_fallback is None:
             raise RoutingError(
                 f"No agent declared a skill matching {list(task.required_skills)}; "
@@ -327,7 +327,7 @@ class HubRouter:
             )
         # Pre-filter agents by keyword overlap before handing the list to the
         # LLM. With many registered agents the fallback prompt grows fast and
-        # small models start ignoring the actual query — a keyword pass picks
+        # small models start ignoring the actual query -- a keyword pass picks
         # the top _MAX_AGENTS_FOR_LLM candidates without an extra LLM call.
         all_agents = [dict(r) for r in _db.fetchall(
             "SELECT id, name, role, skills, model_preference FROM agents"
@@ -336,7 +336,7 @@ class HubRouter:
         try:
             decision = self._llm_fallback(task, agent_list=prefiltered)
         except TypeError:
-            # Fallback predates the agent_list kwarg — call the old signature.
+            # Fallback predates the agent_list kwarg -- call the old signature.
             decision = self._llm_fallback(task)
         return RoutingDecision(
             agent_id=decision.agent_id,
@@ -347,14 +347,14 @@ class HubRouter:
             skill_matched=decision.skill_matched,
         )
 
-    # ── Worker invocation (only call site for model clients) ────────────────
+    # ── Worker invocation (only call site for model clients) ────────────────────────
 
     def invoke(
         self,
         decision: RoutingDecision,
         system: str,
         messages: list,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         on_token: Optional[Callable[[str], None]] = None,
     ) -> WorkerResult:
         """Dispatch a routed task to its model client. Single source of truth."""
@@ -409,7 +409,7 @@ class HubRouter:
             max_tokens=min(max_tokens, 2048),
         )
 
-    # ── Backend resolution (mirrors orchestrator's pre-Phase-1 logic) ────────
+    # ── Backend resolution (mirrors orchestrator's pre-Phase-1 logic) ────────────────
 
     @staticmethod
     def _resolve_backend(model_preference: str | None, hint: Optional[str]) -> str:
@@ -431,14 +431,14 @@ class RoutingError(RuntimeError):
     """Raised when no agent can be routed and no fallback is available."""
 
 
-# ── Power Mode (v3): execution-vs-chat classifier ────────────────────────────
+# ── Power Mode (v3): execution-vs-chat classifier ──────────────────────────────────────────
 #
 # Additive tier on top of the existing hub. The classifier decides whether a
 # message describes a real-world *execution* task (write code, run shell, edit
 # files, browse the web) or a *chat* exchange (questions, follow-ups, settings).
 # When Power Mode is enabled and the verdict is "execution", routes/docker.py
 # hands the message off to the execution bridge instead of the normal chat
-# pipeline. When Power Mode is disabled, this classifier is never consulted —
+# pipeline. When Power Mode is disabled, this classifier is never consulted --
 # the existing chat flow runs untouched.
 #
 # Strategy:
@@ -483,7 +483,7 @@ def _deterministic_score(message: str) -> tuple[float, str]:
     """Return (signed_score, reasoning).
 
     Positive scores lean toward execution; negative toward chat. Magnitude
-    encodes confidence; |score| ≥ 0.6 is enough to skip the LLM.
+    encodes confidence; |score| >= 0.6 is enough to skip the LLM.
     """
     text = (message or "").strip().lower()
     if not text:
@@ -529,7 +529,7 @@ _CLASSIFIER_SYSTEM = (
     "discussion, memory recall, settings tweaks). "
     "Return STRICT JSON with keys: route (\"chat\" or \"execution\"), "
     "confidence (0.0-1.0), reasoning (one short sentence). No prose, no "
-    "markdown — JSON only."
+    "markdown -- JSON only."
 )
 
 
@@ -561,7 +561,7 @@ class ExecutionClassifier:
             }
 
         if self._claude is None:
-            # No LLM available — bias toward "chat" so the existing pipeline
+            # No LLM available -- bias toward "chat" so the existing pipeline
             # handles the message rather than failing closed.
             return {
                 "route": "chat" if det_score < 0 else "execution",

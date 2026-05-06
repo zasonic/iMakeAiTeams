@@ -22,7 +22,7 @@ v4.3 — System-prompt caching in multi-turn paths:
 
 v5.1 — Caching + streaming-thinking enhancements:
   - System-prompt caching is now applied uniformly across every multi-turn
-    code path, cutting input-token cost on follow-up turns by 50–80% on
+    code path, cutting input-token cost on follow-up turns by 50-80% on
     long system prompts.
   - New stream_extended_thinking_chat() delivers thinking + answer tokens
     in real-time via on_thinking_token / on_text_token callbacks, letting
@@ -31,6 +31,13 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — max_tokens default raised from 4096 to 8192:
+  - Claude Sonnet 4.6 and Opus 4.7 support 8192 output tokens per turn
+    without any beta header. The previous 4096 ceiling silently truncated
+    long code generations, detailed plans, and multi-step reasoning.
+  - call_with_tools() and extended-thinking paths are unchanged (already
+    at 8192 and 16000 respectively).
 """
 
 from pathlib import Path
@@ -60,7 +67,7 @@ class ClaudeClient(LLMClient):
         self._use_caching = use_caching
         self._file_cache: dict[str, str] = {}  # file_path -> file_id
 
-    # ── Configuration ────────────────────────────────────────────────────────────
+    # ── Configuration ────────────────────────────────────────────────────────────────────────
 
     def update_config(
         self,
@@ -75,7 +82,7 @@ class ClaudeClient(LLMClient):
         if use_caching is not None:
             self._use_caching = use_caching
 
-    # ── Content helpers ──────────────────────────────────────────────────────────
+    # ── Content helpers ───────────────────────────────────────────────────────────────────
 
     def _build_content(self, project_summary: str, user_message: str) -> list:
         """
@@ -100,13 +107,13 @@ class ClaudeClient(LLMClient):
         When prompt caching is enabled and the system string is non-empty, the
         prompt is wrapped in an ephemeral cache_control block.  This lets the
         API cache the compiled token representation for up to 5 minutes, so
-        consecutive turns that share the same system prompt pay only 0.1× the
+        consecutive turns that share the same system prompt pay only 0.1x the
         normal input-token rate on cache reads (90% savings, which translates
-        to roughly 50–80% lower input-token cost on a typical multi-turn
+        to roughly 50-80% lower input-token cost on a typical multi-turn
         conversation that re-sends the same system prompt every turn).
 
         The Messages API accepts both string and list-of-content-blocks forms
-        for `system`, so this is transparent to callers — no behavioural
+        for `system`, so this is transparent to callers -- no behavioural
         change beyond reduced cost.
 
         Falls back to a plain string when:
@@ -119,10 +126,10 @@ class ClaudeClient(LLMClient):
             return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         return system
 
-    # ── Single-turn chat ─────────────────────────────────────────────────────────
+    # ── Single-turn chat ─────────────────────────────────────────────────────────────────────
 
     def chat(self, system: str, project_summary: str, user_message: str,
-             max_tokens: int = 4096) -> str:
+             max_tokens: int = 8192) -> str:
         """Send a single-turn chat and return the response as a plain string."""
         content = self._build_content(project_summary, user_message)
         kwargs: dict = {
@@ -134,7 +141,7 @@ class ClaudeClient(LLMClient):
         response = self._client.messages.create(**kwargs)
         return response.content[0].text
 
-    # ── Single-turn streaming ────────────────────────────────────────────────────
+    # ── Single-turn streaming ──────────────────────────────────────────────────────────────────
 
     def stream_chat(
         self,
@@ -142,7 +149,7 @@ class ClaudeClient(LLMClient):
         project_summary: str,
         user_message: str,
         on_token: Callable[[str], None],
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
     ) -> str:
         """
         Stream a chat response, calling on_token for each text token.
@@ -162,9 +169,9 @@ class ClaudeClient(LLMClient):
                 full_text += token
         return full_text
 
-    # ── Multi-turn chat ──────────────────────────────────────────────────────────
+    # ── Multi-turn chat ─────────────────────────────────────────────────────────────────────
 
-    def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096) -> dict:
+    def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 8192) -> dict:
         """
         Send a multi-turn conversation. messages = [{"role":..., "content":...}]
         Returns dict with "text", "input_tokens", "output_tokens".
@@ -192,7 +199,7 @@ class ClaudeClient(LLMClient):
         system: str,
         messages: list,
         on_token: Callable[[str], None],
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
     ) -> tuple[str, object]:
         """
         Stream a multi-turn conversation with per-token callback.
@@ -221,12 +228,12 @@ class ClaudeClient(LLMClient):
             try:
                 usage = stream.get_final_usage()
             except Exception:
-                pass  # usage unavailable — caller handles gracefully
+                pass  # usage unavailable -- caller handles gracefully
         return full_text, usage
 
-    # ── LLMClient interface ─────────────────────────────────────────────────
+    # ── LLMClient interface ─────────────────────────────────────────────────────────────────
 
-    def chat_unified(self, system, messages, max_tokens=4096):
+    def chat_unified(self, system, messages, max_tokens=8192):
         result = self.chat_multi_turn(system, messages, max_tokens=max_tokens)
         return {
             "text": result.get("text", ""),
@@ -234,7 +241,7 @@ class ClaudeClient(LLMClient):
             "output_tokens": int(result.get("output_tokens", 0)),
         }
 
-    def stream_unified(self, system, messages, on_token, max_tokens=4096):
+    def stream_unified(self, system, messages, on_token, max_tokens=8192):
         text, usage = self.stream_multi_turn(system, messages, on_token, max_tokens=max_tokens)
         return {
             "text": text or "",
@@ -248,7 +255,7 @@ class ClaudeClient(LLMClient):
     def client_name(self) -> str:
         return self._model
 
-    # ── Tool use (agentic loop) ──────────────────────────────────────────────────
+    # ── Tool use (agentic loop) ───────────────────────────────────────────────────────────────────
 
     def call_with_tools(
         self,
@@ -292,7 +299,7 @@ class ClaudeClient(LLMClient):
             },
         }
 
-    # ── File upload ──────────────────────────────────────────────────────────────
+    # ── File upload ─────────────────────────────────────────────────────────────────────────
 
     def upload_file(self, file_path: Path, mime_type: str) -> str:
         """
@@ -310,12 +317,12 @@ class ClaudeClient(LLMClient):
         self._file_cache[key] = file_id
         return file_id
 
-    # ── Chat with uploaded file ──────────────────────────────────────────────────
+    # ── Chat with uploaded file ──────────────────────────────────────────────────────────────────
 
     def chat_with_file(self, system: str, file_id: str, user_message: str) -> str:
         """
         Send a chat that references a previously uploaded file by its file_id.
-        Uses the Files API beta header — verify header date against Anthropic docs
+        Uses the Files API beta header -- verify header date against Anthropic docs
         if this feature stops working after an API update.
         """
         content = [
@@ -324,14 +331,14 @@ class ClaudeClient(LLMClient):
         ]
         response = self._client.messages.create(
             model=self._model,
-            max_tokens=4096,
+            max_tokens=8192,
             system=system,
             messages=[{"role": "user", "content": content}],
             extra_headers={"anthropic-beta": "files-api-2025-04-14"},
         )
         return response.content[0].text
 
-    # ── Extended thinking ────────────────────────────────────────────────────────
+    # ── Extended thinking ────────────────────────────────────────────────────────────────────
 
     def extended_thinking_chat(
         self,
@@ -364,7 +371,7 @@ class ClaudeClient(LLMClient):
                 answer_text = block.text
         return {"thinking": thinking_text, "answer": answer_text}
 
-    # ── Streaming extended thinking ──────────────────────────────────────────────
+    # ── Streaming extended thinking ───────────────────────────────────────────────────────────────
 
     def stream_extended_thinking_chat(
         self,
@@ -380,7 +387,7 @@ class ClaudeClient(LLMClient):
         chunks to optional callbacks as they arrive.
 
         This lets the UI render the reasoning timeline in real time instead
-        of blocking on a full round-trip — the user sees Claude "thinking"
+        of blocking on a full round-trip -- the user sees Claude "thinking"
         token-by-token, then the answer streaming in immediately after.
 
         Parameters
@@ -401,7 +408,7 @@ class ClaudeClient(LLMClient):
         without changing downstream code.
 
         Falls back to the blocking extended_thinking_chat() if the SDK
-        raises while opening the stream — older Anthropic SDK versions or
+        raises while opening the stream -- older Anthropic SDK versions or
         models that don't yet emit thinking_delta events will degrade
         gracefully rather than hard-fail.
         """
@@ -441,7 +448,7 @@ class ClaudeClient(LLMClient):
                                 on_text_token(chunk)
             return {"thinking": thinking_text, "answer": answer_text}
         except Exception:
-            # Streaming-thinking not supported on this model/SDK version —
+            # Streaming-thinking not supported on this model/SDK version --
             # fall back to the blocking variant so the caller still gets a
             # well-formed result (without per-chunk callbacks).
             return self.extended_thinking_chat(
