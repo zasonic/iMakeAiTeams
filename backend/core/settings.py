@@ -144,6 +144,12 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     # the human for approval. Default on for new installs; user-toggleable.
     "escalation_channel_enabled":    (bool,  True),
 
+    # Phase 6: Hackett et al. (ACL 2025) Reader/Actor split. When True the
+    # orchestrator runs a 3-phase pipeline (read → act → synthesize) where
+    # the Actor never sees raw retrieved data and may only call tools the
+    # Reader proposed. Default False so existing behavior is preserved.
+    "reader_actor_split_enabled":    (bool,  False),
+
     # Agent / project
     "agent_project_root":            (str,   ""),
 

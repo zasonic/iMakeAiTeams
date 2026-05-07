@@ -276,12 +276,39 @@ class GovernanceEngine:
         self._policies = dict(_DEFAULT_POLICIES)
         self._tool_counts: dict[str, int] = {}  # task_key -> count
         self._token_counts: dict[str, int] = {}  # task_key -> tokens used
+        # Phase 6 Reader/Actor split: per-task allowlist of tool names the
+        # Reader proposed for this turn. Populated by the orchestrator before
+        # the Actor invocation; consulted by check_tool_call when the
+        # reader_actor_split_enabled setting is on and the call is from the
+        # Actor role.
+        self._proposed_tools: dict[str, frozenset[str]] = {}
         self._enabled = True
         self.escalation_channel = EscalationChannel(settings)
 
         # Load custom policies from settings
         if settings:
             self._load_custom_policies(settings)
+
+    # ── Phase 6: Reader/Actor split tool gating ──────────────────────────────
+
+    def set_proposed_tools(self, task_key: str, tool_names) -> None:
+        """Record the Reader's proposed tool names for the Actor's turn."""
+        if not task_key:
+            return
+        self._proposed_tools[task_key] = frozenset(
+            str(t) for t in (tool_names or []) if str(t)
+        )
+
+    def clear_proposed_tools(self, task_key: str) -> None:
+        self._proposed_tools.pop(task_key, None)
+
+    def _split_enabled(self) -> bool:
+        if self._settings is None:
+            return False
+        try:
+            return bool(self._settings.get("reader_actor_split_enabled", False))
+        except Exception:
+            return False
 
     def _load_custom_policies(self, settings) -> None:
         """Load governance_policies from settings.json."""
@@ -327,9 +354,31 @@ class GovernanceEngine:
         """
         Check if a tool call is allowed by governance policy.
         Called before tool execution in the agent loop.
+
+        Phase 6: when ``agent_role == "actor"`` and reader_actor_split is on,
+        the tool name must also appear in the Reader's proposed_tools for
+        ``task_key``. This is the architectural wall — the Actor cannot call
+        a tool the Reader did not authorize this turn.
         """
         if not self._enabled:
             return PolicyVerdict(allowed=True)
+
+        # Phase 6 Reader/Actor split gate. Runs before the policy lookup so
+        # an Actor proposing an out-of-plan tool is rejected even if no
+        # role-specific policy exists.
+        if agent_role == "actor" and self._split_enabled():
+            allowed = self._proposed_tools.get(task_key, frozenset())
+            if tool_name not in allowed:
+                verdict = PolicyVerdict(
+                    allowed=False,
+                    reason=(
+                        f"Tool '{tool_name}' not in Reader's proposed_tools "
+                        f"for this turn (allowed: {sorted(allowed)})"
+                    ),
+                    policy_name="reader_actor_split",
+                )
+                self._log_evaluation(verdict, tool_name, agent_id, task_key)
+                return verdict
 
         policy = self._get_policy(agent_id, agent_role)
 
@@ -399,6 +448,7 @@ class GovernanceEngine:
         """Reset tool and token counters for a task."""
         self._tool_counts.pop(task_key, None)
         self._token_counts.pop(task_key, None)
+        self._proposed_tools.pop(task_key, None)
 
     # ── Audit logging ─────────────────────────────────────────────────────
 

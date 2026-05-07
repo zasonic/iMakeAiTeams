@@ -541,6 +541,61 @@ class WorkerResult:
     had_error:     bool = False
 
 
+# Phase 6: Hackett et al. (ACL 2025) Reader/Actor split. The Reader produces
+# this structured plan; the Actor executes against it without ever seeing the
+# raw user message or raw retrieved data.
+@dataclass(frozen=True)
+class ReaderOutput:
+    intent:          str                      # what the user is asking
+    constraints:     tuple[str, ...] = ()     # explicit constraints from the message
+    relevant_facts:  tuple[str, ...] = ()     # facts the Reader believes are relevant
+    proposed_tools:  tuple[str, ...] = ()     # tool NAMES the Reader proposes
+    red_flags:       tuple[str, ...] = ()     # suspicious patterns in retrieved data
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "intent": self.intent,
+            "constraints": list(self.constraints),
+            "relevant_facts": list(self.relevant_facts),
+            "proposed_tools": list(self.proposed_tools),
+            "red_flags": list(self.red_flags),
+        }, ensure_ascii=False)
+
+    @classmethod
+    def from_raw(cls, raw: str) -> "ReaderOutput":
+        """Parse the Reader's JSON output. Tolerant of stray fences/prose."""
+        if not raw:
+            return cls(intent="")
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if "\n" in cleaned:
+                cleaned = cleaned.split("\n", 1)[1]
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end <= start:
+            return cls(intent="")
+        try:
+            d = json.loads(cleaned[start:end + 1])
+        except (TypeError, ValueError):
+            return cls(intent="")
+        if not isinstance(d, dict):
+            return cls(intent="")
+
+        def _str_list(v) -> tuple[str, ...]:
+            if not isinstance(v, list):
+                return ()
+            return tuple(str(x) for x in v if isinstance(x, (str, int, float)))
+
+        return cls(
+            intent=str(d.get("intent", "")),
+            constraints=_str_list(d.get("constraints")),
+            relevant_facts=_str_list(d.get("relevant_facts")),
+            proposed_tools=_str_list(d.get("proposed_tools")),
+            red_flags=_str_list(d.get("red_flags")),
+        )
+
+
 def extract_handoff_packet(
     raw_response: str,
     agent_id:     str,
