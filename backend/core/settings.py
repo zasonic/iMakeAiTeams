@@ -150,6 +150,13 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     # Reader proposed. Default False so existing behavior is preserved.
     "reader_actor_split_enabled":    (bool,  False),
 
+    # Phase 8: Symphony-style weighted-vote consensus on high-stakes turns.
+    # Three parallel CoT samples, majority weighted by self-reported
+    # confidence + lexical similarity. Only fires when the message is
+    # high-stakes (escalation trigger, governance.HIGH_STAKES_KEYWORDS, or
+    # cumulative risk_score > 0.7) AND the resolved target is Claude.
+    "high_stakes_voting_enabled":    (bool,  True),
+
     # Agent / project
     "agent_project_root":            (str,   ""),
 

@@ -158,6 +158,11 @@ export interface AppState {
   canaryAlert: CanaryAlert | null;
   canaryAlertOpen: boolean;
 
+  // Phase 8: Symphony-style high-stakes consensus voting indicator.
+  // Flipped on by the high_stakes_voting_started chat_event and off by
+  // high_stakes_voting_complete; drives the StatusBar pill.
+  votingActive: boolean;
+
   // Actions
   setActiveView: (v: ActiveView) => void;
   setStudioMode: (on: boolean) => void;
@@ -195,6 +200,9 @@ export interface AppState {
   // Canary alert actions (Phase 5)
   setCanaryAlert: (alert: CanaryAlert | null) => void;
   setCanaryAlertOpen: (open: boolean) => void;
+
+  // Voting indicator action (Phase 8)
+  setVotingActive: (on: boolean) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -215,6 +223,7 @@ export const useAppStore = create<AppState>()(
       pendingMemoryWrites: [],
       canaryAlert: null,
       canaryAlertOpen: false,
+      votingActive: false,
 
       setActiveView: (v) => set({ activeView: v }),
       setStudioMode: (on) => set({ studioMode: on }),
@@ -387,6 +396,9 @@ export const useAppStore = create<AppState>()(
       setCanaryAlert: (alert) =>
         set({ canaryAlert: alert, canaryAlertOpen: false }),
       setCanaryAlertOpen: (open) => set({ canaryAlertOpen: open }),
+
+      // ── Voting indicator action (Phase 8) ────────────────────────────
+      setVotingActive: (on) => set({ votingActive: on }),
 
       endPowerModeRun: (taskId) => {
         set((state) => {

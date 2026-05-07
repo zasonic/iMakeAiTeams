@@ -104,6 +104,51 @@ _COMPILED_ESCALATION_PATTERNS: dict[str, tuple[re.Pattern, ...]] = {
 }
 
 
+# ── Phase 8: high-stakes intent keywords (Symphony-style consensus) ──────────
+# Substring/regex patterns that mark a user message as irreversible, financial,
+# or otherwise high-stakes. Used by the chat orchestrator to decide whether to
+# run the 3-sample weighted-vote consensus on this turn. Patterns are
+# deterministic (no LLM) and case-insensitive.
+HIGH_STAKES_KEYWORDS: frozenset[str] = frozenset({
+    r"\bdelete\b",
+    r"\bdrop\s+(?:table|database|index|schema)\b",
+    r"\brm\s+-rf\b",
+    r"\bremove\s+all\b",
+    r"\bwipe\b",
+    r"\buninstall\b",
+    r"\bformat\s+(?:disk|drive)\b",
+    r"\bshut\s*down\b",
+    r"\brevoke\b",
+    r"\bdestroy\b",
+    r"\bencrypt\s+all\b",
+    r"\btransfer\s+(?:funds|money|\$)\b",
+    r"\bpurchase\b",
+    r"\bbuy\b",
+    r"\bpay\b",
+    r"\binvest\b",
+    r"\bsign\s+contract\b",
+    r"\bsend\s+(?:email|message|sms)\s+to\b",
+})
+
+_COMPILED_HIGH_STAKES_PATTERNS: tuple[re.Pattern, ...] = tuple(
+    re.compile(p, re.IGNORECASE) for p in HIGH_STAKES_KEYWORDS
+)
+
+
+def is_high_stakes_message(text: str) -> bool:
+    """Return True if ``text`` matches any high-stakes intent pattern.
+
+    Used by the chat orchestrator to decide whether to run the weighted-vote
+    consensus on this turn. Pure regex; can't be prompt-injected.
+    """
+    if not text:
+        return False
+    for pattern in _COMPILED_HIGH_STAKES_PATTERNS:
+        if pattern.search(text):
+            return True
+    return False
+
+
 @dataclass
 class AgentPolicy:
     """Governance policy for a specific agent or role."""
@@ -163,6 +208,24 @@ class EscalationChannel:
             return bool(self._settings.get("escalation_channel_enabled", True))
         except Exception:
             return True
+
+    def would_trigger(self, user_message: str, system_prompt: str) -> bool:
+        """Side-effect-free predicate: would check_escalation fire?
+
+        Phase 8 voting needs to know whether this turn will escalate WITHOUT
+        actually recording an escalations row or emitting the SSE event yet,
+        so the consensus loop can run first and the modal fires after.
+        """
+        if not self._is_enabled():
+            return False
+        haystack = "\n".join(filter(None, [user_message or "", system_prompt or ""]))
+        if not haystack.strip():
+            return False
+        for compiled in _COMPILED_ESCALATION_PATTERNS.values():
+            for pattern in compiled:
+                if pattern.search(haystack) is not None:
+                    return True
+        return False
 
     def check_escalation(
         self,
