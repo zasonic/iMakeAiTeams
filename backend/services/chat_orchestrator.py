@@ -1032,12 +1032,15 @@ class ChatOrchestrator:
         # Persist assistant message + conversation update + token_usage as a
         # single transaction. Splitting these used to leave the DB in a torn
         # state on a crash (message saved but token_usage missing — budget
-        # under-counted). Re-reading the running total inside the same lock
-        # also closes the race where two concurrent sends both used a stale
+        # under-counted). _db.transaction() rolls back on exception so a
+        # mid-write SQLite error leaves both rows absent, never just one.
+        # Re-reading the running total inside the same transaction also
+        # closes the race where two concurrent sends both used a stale
         # ``spent`` and skipped the budget warning.
+        # Auto-title runs AFTER this transaction (not inside) to preserve
+        # current behavior — it makes a blocking LLM call we don't hold locks across.
         budget_warning = ""
-        with _db._lock:
-            conn = _db.get_db()
+        with _db.transaction() as conn:
             conn.execute(
                 "INSERT INTO messages (id, conversation_id, role, content, model_used, "
                 "route_reason, tokens_in, tokens_out, cost_usd, created_at) "
@@ -1057,7 +1060,6 @@ class ChatOrchestrator:
                 (str(uuid.uuid4()), conversation_id, model_name,
                  tokens_in, tokens_out, cost, route_reason, resp_now),
             )
-            conn.commit()
             if budget > 0:
                 row = conn.execute(
                     "SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage "

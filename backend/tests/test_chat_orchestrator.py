@@ -396,3 +396,207 @@ class TestConversationCRUD:
         orch.send(conv_id, "My important question about elephants")
         row = in_memory_db.fetchone("SELECT title FROM conversations WHERE id = ?", (conv_id,))
         assert "elephant" in row["title"].lower()
+
+
+# ── Codebase review fixes ─────────────────────────────────────────────────────
+
+class TestReviewBugFixes:
+    """Regression tests for Bugs 1, 4, 5, 6 from CODEBASE_REVIEW_REPORT.md."""
+
+    def test_bug1_rag_trim_path_does_not_raise(self, in_memory_db, claude_client,
+                                                local_client_unavailable, settings):
+        """Bug 1: RAG-trim branch must not reference removed `_active_mem_suffix`."""
+        from services.memory import MemoryContext
+
+        orch = _make_orchestrator(in_memory_db, claude_client, local_client_unavailable,
+                                   settings, routing="claude")
+        conv_id = orch.create_conversation()
+
+        # Force memory.get_context to return more RAG chunks than `complex`'s
+        # cap of 8 so the trim branch fires.
+        big_ctx = MemoryContext(
+            session_facts=[],
+            rag_chunks=[f"chunk {i}" for i in range(20)],
+            memories=[],
+        )
+        orch.memory.get_context = MagicMock(return_value=big_ctx)
+        orch.memory.should_summarize = MagicMock(return_value=False)
+        orch.memory.add_to_buffer = MagicMock()
+        orch.memory.extract_facts = MagicMock()
+
+        claude_client.chat_multi_turn = MagicMock(return_value={
+            "text": "answer", "input_tokens": 5, "output_tokens": 3
+        })
+
+        # Must not raise AttributeError / NameError / UnboundLocalError.
+        result = orch.send(conv_id, "tell me about elephants in detail please")
+        assert result.text == "answer"
+
+    def test_bug4_router_log_records_post_escalation_response_empty(
+        self, in_memory_db, claude_client, local_client_available, settings,
+    ):
+        """Bug 4: After empty local triggers escalation, router_log must
+        record response_empty=False with the post-escalation response."""
+        from services.chat_orchestrator import ChatOrchestrator
+        from services.memory import MemoryManager
+        from models import RouteDecision
+
+        router = MagicMock()
+        router.classify.return_value = RouteDecision(
+            model="local", complexity="complex", reasoning="test"
+        )
+        mem = MemoryManager(None, None, local_client_available)
+        orch = ChatOrchestrator(claude_client, local_client_available, router, mem, settings)
+        conv_id = orch.create_conversation()
+
+        # Local returns empty — triggers the empty-response escalation gate.
+        local_client_available.chat_unified.return_value = {
+            "text": "", "input_tokens": 0, "output_tokens": 0,
+        }
+        local_client_available.stream_unified.return_value = {
+            "text": "", "input_tokens": 0, "output_tokens": 0,
+        }
+
+        # Claude (escalation target) returns a substantive response.
+        long_response = "This is a fully formed Claude answer that escalation produced for the user's question."
+        claude_client.chat_multi_turn = MagicMock(return_value={
+            "text": long_response, "input_tokens": 5, "output_tokens": 25,
+        })
+
+        result = orch.send(conv_id, "Tell me about quantum mechanics please")
+
+        assert result.text == long_response
+        assert len(result.text.strip()) >= 20
+
+        row = in_memory_db.fetchone(
+            "SELECT response_empty FROM router_log WHERE conversation_id = ?",
+            (conv_id,),
+        )
+        assert row is not None
+        assert row["response_empty"] == 0, (
+            f"router_log should record post-escalation response_empty=False, got {row['response_empty']}"
+        )
+
+    def test_bug5_concurrent_sends_share_budget_state(
+        self, in_memory_db, claude_client, local_client_unavailable, settings,
+    ):
+        """Bug 5: With two overlapping sends, the second's budget warning must
+        reflect the first's cost (i.e. SUM is re-read inside the post-write lock)."""
+        import threading
+        import time
+
+        settings.set("max_conversation_budget_usd", 1.0)
+        settings.set("budget_warning_threshold_pct", 50.0)
+
+        orch = _make_orchestrator(
+            in_memory_db, claude_client, local_client_unavailable,
+            settings, routing="claude",
+        )
+        conv_id = orch.create_conversation()
+
+        # Each send: 100k input + 20k output Sonnet tokens → ~$0.60 cost.
+        # Two overlapping sends together cross the 50% warning threshold.
+        barrier = threading.Barrier(2, timeout=10)
+
+        def slow_llm(*_args, **_kwargs):
+            barrier.wait()  # both threads enter LLM call simultaneously
+            time.sleep(0.05)
+            return {"text": "ok", "input_tokens": 100_000, "output_tokens": 20_000}
+
+        claude_client.chat_multi_turn = MagicMock(side_effect=slow_llm)
+
+        results = {}
+
+        def call_send(i):
+            results[i] = orch.send(conv_id, f"message {i} please tell me")
+
+        t1 = threading.Thread(target=call_send, args=(0,))
+        t2 = threading.Thread(target=call_send, args=(1,))
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        warnings = [r.budget_warning for r in results.values() if r and r.budget_warning]
+        assert len(warnings) >= 1, f"expected at least one budget warning, got {warnings}"
+
+        # Extract the dollar amounts reported in each warning. The send that
+        # ran second must report > $1.00 because it sees both costs summed.
+        # The pre-fix bug used a stale `spent` so each warning would only
+        # show its own ~$0.60 contribution, never the cumulative total.
+        import re
+        spent_amounts = []
+        for w in warnings:
+            m = re.search(r"\$([\d.]+)/", w)
+            if m:
+                spent_amounts.append(float(m.group(1)))
+
+        assert max(spent_amounts) > 1.0, (
+            f"second send did not see first's cost; spent_amounts={spent_amounts}"
+        )
+
+    def test_bug6_sqlite_error_rolls_back_assistant_and_token_usage(
+        self, in_memory_db, claude_client, local_client_unavailable, settings,
+    ):
+        """Bug 6: A SQLite error during the post-LLM transaction must leave
+        the assistant message and token_usage row both absent (atomic)."""
+        import sqlite3
+        import db as _db_mod
+
+        orch = _make_orchestrator(
+            in_memory_db, claude_client, local_client_unavailable,
+            settings, routing="claude",
+        )
+        conv_id = orch.create_conversation()
+
+        claude_client.chat_multi_turn = MagicMock(return_value={
+            "text": "answer", "input_tokens": 5, "output_tokens": 3,
+        })
+
+        real_conn = _db_mod.get_db()
+
+        # sqlite3.Connection.execute can't be patched directly, so wrap the
+        # connection in a delegator that fails on INSERT INTO token_usage.
+        class FailingTokenUsageConn:
+            def __init__(self, real):
+                self._real = real
+
+            def execute(self, sql, *args, **kwargs):
+                if "INSERT INTO token_usage" in sql:
+                    raise sqlite3.OperationalError("simulated mid-write error")
+                return self._real.execute(sql, *args, **kwargs)
+
+            def commit(self):
+                return self._real.commit()
+
+            def rollback(self):
+                return self._real.rollback()
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        wrapper = FailingTokenUsageConn(real_conn)
+        with patch.object(_db_mod, "_conn", wrapper):
+            with pytest.raises(sqlite3.OperationalError):
+                orch.send(conv_id, "trigger the rollback please")
+
+        user_count = in_memory_db.fetchone(
+            "SELECT COUNT(*) AS c FROM messages "
+            "WHERE conversation_id = ? AND role = 'user'",
+            (conv_id,),
+        )["c"]
+        asst_count = in_memory_db.fetchone(
+            "SELECT COUNT(*) AS c FROM messages "
+            "WHERE conversation_id = ? AND role = 'assistant'",
+            (conv_id,),
+        )["c"]
+        tok_count = in_memory_db.fetchone(
+            "SELECT COUNT(*) AS c FROM token_usage WHERE conversation_id = ?",
+            (conv_id,),
+        )["c"]
+
+        # The user-message INSERT runs in its own earlier transaction so it
+        # persists. The assistant-message + token_usage transaction must
+        # have rolled back together.
+        assert user_count == 1
+        assert asst_count == 0 and tok_count == 0, (
+            f"expected both rolled back; got asst={asst_count}, tok={tok_count}"
+        )
