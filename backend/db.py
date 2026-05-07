@@ -702,6 +702,20 @@ _MIGRATIONS = [
         )""",
         "CREATE INDEX IF NOT EXISTS idx_pending_writes_conv ON pending_writes(conversation_id)",
     ]),
+
+    # ── Phase 5: Local-model behavior-drift canary (arXiv 2511.15992) ────────
+    ("phase5.canary_baseline", [
+        """CREATE TABLE IF NOT EXISTS canary_baseline (
+            id            TEXT PRIMARY KEY,
+            model_id      TEXT NOT NULL,
+            prompt_hash   TEXT NOT NULL,
+            prompt_text   TEXT NOT NULL,
+            response_text TEXT NOT NULL,
+            embedding     BLOB NOT NULL,
+            captured_at   TEXT NOT NULL
+        )""",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_canary_model_hash ON canary_baseline(model_id, prompt_hash)",
+    ]),
 ]
 
 

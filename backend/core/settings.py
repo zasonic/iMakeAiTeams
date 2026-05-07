@@ -97,6 +97,12 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     "memory_history_cap":          (int,   40),
     "memory_write_gate_enabled":   (bool,  True),
 
+    # Phase 5: Local-model behavior-drift canary (arXiv 2511.15992).
+    # When enabled, the canary captures a 30-prompt baseline on the first
+    # observed load of each model_id and re-checks on subsequent loads.
+    # mean_drift > 0.40 emits a `model_canary_alert` SSE event.
+    "model_canary_enabled":        (bool,  True),
+
     # Health / diagnostics
     "health_check_enabled":        (bool,  True),
     "diagnostics_retention_days":  (int,   7),

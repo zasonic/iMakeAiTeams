@@ -317,6 +317,10 @@ export const System = {
   scanLog: (limit = 50, verdict_filter = "") =>
     api.get<unknown[]>("/api/system/security/scan_log", { limit, verdict_filter }),
   openUrl: (url: string) => api.post<unknown>("/api/system/open_url", { url }),
+  resetCanary: (model_id: string) =>
+    api.post<{ ok: boolean; deleted?: number; error?: string }>(
+      `/api/system/canary/reset/${encodeURIComponent(model_id)}`,
+    ),
 };
 
 export const Lifecycle = {
