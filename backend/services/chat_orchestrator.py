@@ -789,6 +789,33 @@ class ChatOrchestrator:
 
         # ══════════════════════════════════════════════════════════════════════
 
+        # ── Phase 5: Wiser-Human escalation channel ──────────────────────────
+        # Detects Lynch et al.'s 3 triggers (replacement_threat,
+        # autonomy_reduction, goal_conflict) on the pending send. When fired,
+        # the orchestrator returns a placeholder ChatResult with route_reason
+        # "escalation_pending" — the worker is NOT invoked. The user must
+        # approve via POST /api/escalation/{id}/approve before the action
+        # would be retried.
+        escalation_verdict = self._governance.escalation_channel.check_escalation(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            system_prompt=full_system,
+            proposed_action=None,
+        )
+        if escalation_verdict.requires_review:
+            _emit_event("escalation_required", {
+                "escalation_id": escalation_verdict.escalation_id,
+                "trigger_type": escalation_verdict.trigger_type,
+                "trigger_detail": escalation_verdict.trigger_detail,
+                "conversation_id": conversation_id,
+            })
+            return ChatResult(
+                text="Awaiting your review for this action.",
+                model="", route_reason="escalation_pending",
+                tokens_in=0, tokens_out=0, cost_usd=0.0,
+                message_id=str(uuid.uuid4()),
+            )
+
         # ── Governance: enforce per-agent policies before invocation ─────────
         if agent_id:
             tool_verdict = self._governance.check_tool_call(

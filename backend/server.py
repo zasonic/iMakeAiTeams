@@ -253,6 +253,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
         chat as chat_routes,
         docker as docker_routes,
         echo as echo_routes,
+        escalation as escalation_routes,
         events as events_routes,
         health as health_routes,
         lifecycle as lifecycle_routes,
@@ -274,6 +275,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
     app.include_router(settings_routes.router, prefix="/api/settings")
     app.include_router(mcp_routes.router, prefix="/api/mcp")
     app.include_router(lifecycle_routes.router, prefix="/api/lifecycle")
+    app.include_router(escalation_routes.router, prefix="/api/escalation")
     app.include_router(prompts_routes.router, prefix="/api/prompts")
     app.include_router(system_routes.router, prefix="/api/system")
     app.include_router(docker_routes.router, prefix="/api/docker")

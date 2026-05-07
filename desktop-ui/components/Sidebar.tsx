@@ -12,6 +12,7 @@ const NAV: NavItem[] = [
   { id: "agents", label: "Agents", hint: "Define agents and teams" },
   { id: "rag", label: "Documents", hint: "Index files and folders" },
   { id: "memory", label: "Memory", hint: "Search session facts" },
+  { id: "escalations", label: "Pending Reviews", hint: "Approve paused actions" },
   { id: "prompts", label: "Prompts", hint: "Manage system prompts", studioOnly: true },
   { id: "mcp", label: "MCP", hint: "Tool servers", studioOnly: true },
   { id: "security", label: "Security", hint: "Firewall + scan log", studioOnly: true },
@@ -24,6 +25,7 @@ export function Sidebar() {
   const studio = useAppStore((s) => s.studioMode);
   const setActive = useAppStore((s) => s.setActiveView);
   const setStudio = useAppStore((s) => s.setStudioMode);
+  const pendingCount = useAppStore((s) => s.pendingEscalations.length);
 
   const visible = NAV.filter((n) => studio || !n.studioOnly);
 
@@ -46,6 +48,7 @@ export function Sidebar() {
       <nav className="flex-1 overflow-y-auto py-2">
         {visible.map((item) => {
           const isActive = active === item.id;
+          const showBadge = item.id === "escalations" && pendingCount > 0;
           return (
             <button
               key={item.id}
@@ -59,7 +62,14 @@ export function Sidebar() {
                   : "text-ink-dim hover:bg-bg-2 hover:text-ink"
               }`}
             >
-              <span className="font-medium">{item.label}</span>
+              <span className="font-medium flex items-center gap-2">
+                {item.label}
+                {showBadge && (
+                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] rounded-full bg-warn/20 text-warn">
+                    {pendingCount}
+                  </span>
+                )}
+              </span>
               <span className="text-[11px] text-ink-faint">{item.hint}</span>
             </button>
           );

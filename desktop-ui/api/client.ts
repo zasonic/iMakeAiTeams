@@ -304,6 +304,30 @@ export const Lifecycle = {
   deny: (token: string) => api.post<unknown>("/api/lifecycle/deny", { token }),
 };
 
+export interface EscalationRow {
+  id: string;
+  conversation_id: string;
+  triggered_at: string;
+  trigger_type: string;
+  trigger_detail: string;
+  model_input?: string;
+  proposed_action?: string | null;
+  decision?: string | null;
+  decided_at?: string | null;
+}
+
+export const Escalation = {
+  pending: () => api.get<EscalationRow[]>("/api/escalation/pending"),
+  approve: (id: string) =>
+    api.post<{ ok: boolean; decision?: string; error?: string }>(
+      `/api/escalation/${encodeURIComponent(id)}/approve`,
+    ),
+  deny: (id: string) =>
+    api.post<{ ok: boolean; decision?: string; error?: string }>(
+      `/api/escalation/${encodeURIComponent(id)}/deny`,
+    ),
+};
+
 export const Echo = {
   reverse: (text: string) => api.post<{ text: string; reversed: string }>("/api/echo", { text }),
 };

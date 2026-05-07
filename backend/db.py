@@ -670,6 +670,22 @@ _MIGRATIONS = [
     ("phase4.mast_category", [
         "ALTER TABLE router_log ADD COLUMN mast_category TEXT DEFAULT NULL",
     ]),
+
+    # ── Phase 5: Wiser-Human-style escalation channel ────────────────────────
+    ("phase5.escalations", [
+        """CREATE TABLE IF NOT EXISTS escalations (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            triggered_at    TEXT NOT NULL,
+            trigger_type    TEXT NOT NULL,
+            trigger_detail  TEXT,
+            model_input     TEXT,
+            proposed_action TEXT,
+            decision        TEXT,
+            decided_at      TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_escalations_conv ON escalations(conversation_id)",
+    ]),
 ]
 
 

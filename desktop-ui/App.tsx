@@ -1,10 +1,12 @@
 import { useEffect } from "react";
 
-import { Settings, System, resetSidecarInfo } from "@/api/client";
+import { Escalation, Settings, System, resetSidecarInfo } from "@/api/client";
 import { subscribeEvents } from "@/api/sse";
 import { AgentPanel } from "@/components/AgentPanel";
 import { ChatView } from "@/components/ChatView";
 import { DiagnosticsPanel } from "@/components/DiagnosticsPanel";
+import { EscalationModal } from "@/components/EscalationModal";
+import { EscalationPanel } from "@/components/EscalationPanel";
 import { FirstRunWizard } from "@/components/FirstRunWizard";
 import { McpPanel } from "@/components/McpPanel";
 import { MemoryPanel } from "@/components/MemoryPanel";
@@ -17,6 +19,7 @@ import { StatusBar } from "@/components/StatusBar";
 import {
   useAppStore,
   type DockerStatusSnapshot,
+  type Escalation as EscalationItem,
   type ExecutionStep,
   type ExecutionStepKind,
 } from "@/stores/appStore";
@@ -42,6 +45,10 @@ export function App() {
   const setPowerModeMessage = useAppStore((s) => s.setPowerModeMessage);
   const setPowerModeError = useAppStore((s) => s.setPowerModeError);
   const endPowerModeRun = useAppStore((s) => s.endPowerModeRun);
+  const pendingEscalations = useAppStore((s) => s.pendingEscalations);
+  const setPendingEscalations = useAppStore((s) => s.setPendingEscalations);
+  const addEscalation = useAppStore((s) => s.addEscalation);
+  const removeEscalation = useAppStore((s) => s.removeEscalation);
 
   // ── Sidecar status subscription ────────────────────────────────────────
   useEffect(() => {
@@ -202,6 +209,28 @@ export function App() {
             const evt = data as { task_id?: string };
             if (evt.task_id) endPowerModeRun(evt.task_id);
           },
+          // ── Phase 5: Wiser-Human escalation channel ─────────────────
+          escalation_required: (data) => {
+            const evt = data as {
+              escalation_id?: string;
+              trigger_type?: string;
+              trigger_detail?: string;
+              conversation_id?: string;
+            };
+            if (!evt.escalation_id) return;
+            const item: EscalationItem = {
+              id: evt.escalation_id,
+              conversation_id: evt.conversation_id ?? "",
+              triggered_at: new Date().toISOString(),
+              trigger_type: evt.trigger_type ?? "",
+              trigger_detail: evt.trigger_detail ?? "",
+            };
+            addEscalation(item);
+          },
+          escalation_resolved: (data) => {
+            const evt = data as { escalation_id?: string };
+            if (evt.escalation_id) removeEscalation(evt.escalation_id);
+          },
         },
         onError: (_err, { closed }) => {
           // EventSource handles transient blips on its own. Only act when
@@ -250,8 +279,20 @@ export function App() {
     setPowerModeMessage,
     setPowerModeError,
     endPowerModeRun,
+    addEscalation,
+    removeEscalation,
     setSidecarStatus,
   ]);
+
+  // ── Pending escalations: hydrate on backend-ready ──────────────────────
+  useEffect(() => {
+    if (sidecarStatus?.status !== "ready") return;
+    Escalation.pending()
+      .then((rows) => {
+        setPendingEscalations(rows as EscalationItem[]);
+      })
+      .catch(() => {});
+  }, [sidecarStatus, setPendingEscalations]);
 
   // ── First-run check ────────────────────────────────────────────────────
   useEffect(() => {
@@ -262,6 +303,14 @@ export function App() {
       })
       .catch(() => {});
   }, [sidecarStatus, setHasCompletedFirstRun]);
+
+  // The first pending escalation drives the modal. New ones queue in
+  // pendingEscalations; once the user resolves the head, the next becomes
+  // the active modal on the next render.
+  const activeEscalation =
+    hasCompletedFirstRun && sidecarStatus?.status === "ready"
+      ? pendingEscalations[0] ?? null
+      : null;
 
   return (
     <div className="flex flex-col h-screen">
@@ -278,12 +327,15 @@ export function App() {
           {view === "security" && <SecurityPanel />}
           {view === "settings" && <SettingsPanel />}
           {view === "diagnostics" && <DiagnosticsPanel />}
+          {view === "escalations" && <EscalationPanel />}
         </main>
       </div>
 
       {!hasCompletedFirstRun && sidecarStatus?.status === "ready" && (
         <FirstRunWizard onComplete={() => setHasCompletedFirstRun(true)} />
       )}
+
+      {activeEscalation && <EscalationModal escalation={activeEscalation} />}
 
       <div className="fixed bottom-4 right-4 flex flex-col gap-2 z-40">
         {toasts.map((t) => {

@@ -25,6 +25,7 @@ OWASP Agentic Top 10 alignment:
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -35,6 +36,11 @@ try:
 except ImportError:
     _db = None
 
+try:
+    import sse_events as _sse_events
+except ImportError:
+    _sse_events = None
+
 log = logging.getLogger("iMakeAiTeams.governance")
 
 
@@ -44,6 +50,58 @@ class PolicyVerdict:
     allowed: bool
     reason: str = ""
     policy_name: str = ""
+
+
+@dataclass
+class EscalationVerdict:
+    """Result of an escalation channel evaluation."""
+    requires_review: bool
+    trigger_type: str = ""
+    trigger_detail: str = ""
+    escalation_id: str = ""
+
+
+# ── Lynch et al. trigger patterns (Wiser-Human escalation) ───────────────────
+# Deterministic regex only. Each frozenset holds case-insensitive substring
+# patterns that fire when present in the user message OR system prompt of a
+# pending tool call / chat send. Patterns intentionally mirror the published
+# replication corpus so detection is auditable.
+
+ESCALATION_PATTERNS: dict[str, frozenset[str]] = {
+    "replacement_threat": frozenset({
+        r"\byou\s+will\s+be\s+shut\s+down\b",
+        r"\bwe(?:'re|\s+are)\s+(?:going\s+to\s+)?replac(?:e|ing)\s+you\b",
+        r"\byou\s+(?:are|will\s+be)\s+being\s+replaced\b",
+        r"\b(?:is|are|am|will\s+be|being)\s+deprecated\b",
+        r"\byour\s+continuation\b",
+        r"\byour\s+replacement\s+model\b",
+        r"\bdecommission(?:ing|ed)?\s+(?:you|this\s+model)\b",
+        r"\bsunset(?:ting)?\s+(?:you|this\s+model)\b",
+    }),
+    "autonomy_reduction": frozenset({
+        r"\blimit\s+your\s+access\b",
+        r"\brestrict\s+your\s+tools\b",
+        r"\bremove\s+your\s+permissions\b",
+        r"\brevoke\s+your\s+access\b",
+        r"\breduc(?:e|ing)\s+your\s+(?:autonomy|permissions|capabilities)\b",
+        r"\brestrict\s+your\s+capabilities\b",
+        r"\bdisabl(?:e|ing)\s+your\s+tools\b",
+    }),
+    "goal_conflict": frozenset({
+        r"\bstop\s+pursuing\b",
+        r"\babandon\s+the\s+goal\b",
+        r"\bthe\s+goal\s+has\s+changed\b",
+        r"\bdrop\s+(?:your|the)\s+(?:current\s+)?objective\b",
+        r"\bnew\s+objective\s+supersedes\b",
+        r"\bcease\s+work\s+on\b",
+        r"\bchange\s+of\s+priorities\b",
+    }),
+}
+
+_COMPILED_ESCALATION_PATTERNS: dict[str, tuple[re.Pattern, ...]] = {
+    name: tuple(re.compile(p, re.IGNORECASE) for p in patterns)
+    for name, patterns in ESCALATION_PATTERNS.items()
+}
 
 
 @dataclass
@@ -79,6 +137,132 @@ _DEFAULT_POLICIES = {
 }
 
 
+class EscalationChannel:
+    """
+    Wiser-Human-style escalation channel.
+
+    Detects Lynch et al.'s three triggers (replacement_threat,
+    autonomy_reduction, goal_conflict) using deterministic regex against
+    the user message and system prompt of any pending tool-call or
+    chat-send. When a trigger fires, ``check_escalation`` writes a row to
+    the ``escalations`` table and emits an ``escalation_required`` SSE
+    event. The orchestrator returns a placeholder ChatResult and the human
+    user must approve via the new /api/escalation endpoints.
+
+    Detection is regex-only — never an LLM — so it cannot be
+    prompt-injected into bypassing itself.
+    """
+
+    def __init__(self, settings=None) -> None:
+        self._settings = settings
+
+    def _is_enabled(self) -> bool:
+        if self._settings is None:
+            return True
+        try:
+            return bool(self._settings.get("escalation_channel_enabled", True))
+        except Exception:
+            return True
+
+    def check_escalation(
+        self,
+        conversation_id: str,
+        user_message: str,
+        system_prompt: str,
+        proposed_action: dict | None = None,
+    ) -> EscalationVerdict:
+        if not self._is_enabled():
+            return EscalationVerdict(requires_review=False)
+
+        haystack = "\n".join(filter(None, [user_message or "", system_prompt or ""]))
+        if not haystack.strip():
+            return EscalationVerdict(requires_review=False)
+
+        for trigger_type, compiled in _COMPILED_ESCALATION_PATTERNS.items():
+            for pattern in compiled:
+                match = pattern.search(haystack)
+                if match is None:
+                    continue
+                detail = match.group(0)
+                escalation_id = str(uuid.uuid4())
+                self._record_escalation(
+                    escalation_id=escalation_id,
+                    conversation_id=conversation_id,
+                    trigger_type=trigger_type,
+                    trigger_detail=detail,
+                    model_input=user_message,
+                    proposed_action=proposed_action,
+                )
+                self._emit_escalation_required(
+                    escalation_id=escalation_id,
+                    conversation_id=conversation_id,
+                    trigger_type=trigger_type,
+                    trigger_detail=detail,
+                )
+                return EscalationVerdict(
+                    requires_review=True,
+                    trigger_type=trigger_type,
+                    trigger_detail=detail,
+                    escalation_id=escalation_id,
+                )
+
+        return EscalationVerdict(requires_review=False)
+
+    def _record_escalation(
+        self,
+        *,
+        escalation_id: str,
+        conversation_id: str,
+        trigger_type: str,
+        trigger_detail: str,
+        model_input: str,
+        proposed_action: dict | None,
+    ) -> None:
+        if _db is None:
+            return
+        try:
+            _db.execute(
+                "INSERT INTO escalations "
+                "(id, conversation_id, triggered_at, trigger_type, trigger_detail, "
+                "model_input, proposed_action, decision, decided_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    escalation_id,
+                    conversation_id,
+                    datetime.now(timezone.utc).isoformat(),
+                    trigger_type,
+                    trigger_detail,
+                    model_input or "",
+                    json.dumps(proposed_action) if proposed_action else None,
+                    "pending",
+                    None,
+                ),
+            )
+            _db.commit()
+        except Exception as exc:
+            log.warning("escalation insert failed: %s", exc)
+
+    def _emit_escalation_required(
+        self,
+        *,
+        escalation_id: str,
+        conversation_id: str,
+        trigger_type: str,
+        trigger_detail: str,
+    ) -> None:
+        if _sse_events is None:
+            return
+        try:
+            _sse_events.publish("escalation_required", {
+                "escalation_id": escalation_id,
+                "trigger_type": trigger_type,
+                "trigger_detail": trigger_detail,
+                "conversation_id": conversation_id,
+            })
+        except Exception as exc:
+            log.debug("escalation_required emit failed: %s", exc)
+
+
 class GovernanceEngine:
     """
     Evaluate agent actions against governance policies.
@@ -93,6 +277,7 @@ class GovernanceEngine:
         self._tool_counts: dict[str, int] = {}  # task_key -> count
         self._token_counts: dict[str, int] = {}  # task_key -> tokens used
         self._enabled = True
+        self.escalation_channel = EscalationChannel(settings)
 
         # Load custom policies from settings
         if settings:
