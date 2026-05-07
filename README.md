@@ -1,73 +1,51 @@
 # iMakeAiTeams
 
-Build AI teams that work together on your desktop.
+Build AI teams that work together on your desktop. Chat with Claude and
+local models, create specialist agents, index your files, and keep
+everything on your machine.
 
-## What this does
-
-Chat with Claude and local AI models in a single interface. Create
-specialist agents with custom instructions and personalities. Index your
-files and folders so agents can reference them in conversation. Everything
-runs locally — your data stays on your machine.
-
-## Download
+## Install
 
 Download the latest installer from
-[Releases](https://github.com/zasonic/iMakeAiTeams/releases). Double-click
-to install. No setup required.
+[Releases](https://github.com/zasonic/iMakeAiTeams/releases) and double-click.
+No setup required.
 
-## What you need
+You will need:
+- An [Anthropic API key](https://console.anthropic.com/settings/keys).
+- [Ollama](https://ollama.com/download) or [LM Studio](https://lmstudio.ai/)
+  for local models (optional but recommended — keeps simple messages free).
 
-- An [Anthropic API key](https://console.anthropic.com/settings/keys) — required.
-- [Ollama](https://ollama.com/download) — recommended. Lets simple
-  messages run locally for free instead of every message going to Claude.
-- Or [LM Studio](https://lmstudio.ai/) — auto-detected if you already use it.
+## Run
 
-## What you'll see
+Open the app, paste your API key in Settings, and start chatting. Messages
+route automatically: simple turns go to a local model when one is available,
+complex turns go to Claude.
 
-- **Chat** — Talk to your AI team; messages route to the best model automatically.
-- **Agents** — Create specialists with custom instructions and personalities.
-- **Documents** — Add files and folders for your team to reference.
-- **Memory** — Your team remembers facts across conversations.
-- **Settings** — API keys, models, and routing controls.
+For developers (Windows): double-click `Start.bat`. First run installs
+Node, Python, and dependencies; subsequent runs go straight to dev mode.
 
-### How routing works
+```
+Start.bat                    # install + dev (Windows)
+npm run dev                  # cross-platform dev (after manual setup)
+dev\build-installer.bat      # produce NSIS installer (Windows)
+```
 
-Each message is classified before it is sent. Simple requests
-(greetings, formatting, short answers) go to your local model when one
-is available; complex requests (analysis, planning, code review) go to
-Claude. If no local model is running, every message routes to Claude
-and a "Local model offline" indicator appears in the status bar so you
-know costs are higher.
+## Where things live
 
-### How search works
-
-Document indexing and semantic memory run entirely on your machine
-using fastembed (ONNX) and sqlite-vec. No text leaves your computer
-for embedding. The index lives next to the rest of the app data
-(see "Where your data lives").
-
-Toggle Studio Mode at the bottom of the sidebar for advanced features:
-prompt engineering, MCP tool servers, security scanning, and diagnostics.
-
-## Where your data lives
-
-- Settings and database in `%APPDATA%/iMakeAiTeams/` on Windows,
+- App data: `%APPDATA%/iMakeAiTeams/` on Windows,
   `~/Library/Application Support/iMakeAiTeams/` on macOS,
-  `~/.config/iMakeAiTeams/` on Linux.
-- Document and memory vectors live inside the same SQLite database
-  (sqlite-vec extension) — no separate vector store directory.
-- Logs in the same folder.
-- API key stored in the OS keyring (Windows Credential Manager / macOS
-  Keychain / Linux SecretService), not on disk.
+  `~/.config/iMakeAiTeams/` on Linux. Settings, SQLite database, and logs
+  all live there. The API key is in the OS keyring, not on disk.
+- Source layout: `desktop-ui/` (React renderer), `desktop-shell/` (Electron
+  main + preload), `backend/` (Python FastAPI sidecar), `branding/` (icon +
+  staged sidecar bundle), `dev/` (developer scripts).
 
-## For developers
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, architecture, and build instructions.
-
-On Windows, double-click `Start.bat` to install prerequisites (first run) and
-launch the app with hot-reload. Run `dev\build-installer.bat` to produce the
-NSIS installer.
-
-## License
+Deeper docs:
+- [docs/USER-GUIDE.md](docs/USER-GUIDE.md) — features and how to use them.
+- [docs/architecture.md](docs/architecture.md) — services, schemas, IPC.
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — dev setup and build flow.
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — common errors.
+- [docs/FAQ.md](docs/FAQ.md) — common questions.
+- [docs/legacy.md](docs/legacy.md) — pre-v6 code lives on the legacy/v5 branch.
 
 MIT — see [LICENSE](LICENSE).
