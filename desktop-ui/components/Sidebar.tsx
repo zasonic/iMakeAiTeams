@@ -12,6 +12,7 @@ const NAV: NavItem[] = [
   { id: "agents", label: "Agents", hint: "Define agents and teams" },
   { id: "rag", label: "Documents", hint: "Index files and folders" },
   { id: "memory", label: "Memory", hint: "Search session facts" },
+  { id: "memory_review", label: "Memory Review", hint: "Approve memory writes" },
   { id: "escalations", label: "Pending Reviews", hint: "Approve paused actions" },
   { id: "prompts", label: "Prompts", hint: "Manage system prompts", studioOnly: true },
   { id: "mcp", label: "MCP", hint: "Tool servers", studioOnly: true },
@@ -26,8 +27,15 @@ export function Sidebar() {
   const setActive = useAppStore((s) => s.setActiveView);
   const setStudio = useAppStore((s) => s.setStudioMode);
   const pendingCount = useAppStore((s) => s.pendingEscalations.length);
+  const memoryReviewCount = useAppStore((s) => s.pendingMemoryWrites.length);
 
   const visible = NAV.filter((n) => studio || !n.studioOnly);
+
+  const badgeCount = (id: ActiveView): number => {
+    if (id === "escalations") return pendingCount;
+    if (id === "memory_review") return memoryReviewCount;
+    return 0;
+  };
 
   return (
     <aside className="flex flex-col w-56 min-w-56 border-r border-line bg-bg-1">
@@ -48,7 +56,8 @@ export function Sidebar() {
       <nav className="flex-1 overflow-y-auto py-2">
         {visible.map((item) => {
           const isActive = active === item.id;
-          const showBadge = item.id === "escalations" && pendingCount > 0;
+          const count = badgeCount(item.id);
+          const showBadge = count > 0;
           return (
             <button
               key={item.id}
@@ -66,7 +75,7 @@ export function Sidebar() {
                 {item.label}
                 {showBadge && (
                   <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] rounded-full bg-warn/20 text-warn">
-                    {pendingCount}
+                    {count}
                   </span>
                 )}
               </span>

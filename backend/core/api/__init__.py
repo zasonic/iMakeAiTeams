@@ -157,6 +157,7 @@ class API:
                 rag_index=self._rag,
                 semantic_search_mod=semantic_search,
                 local_client=self._local,
+                settings=self._settings,
             ),
         )
 
@@ -836,6 +837,15 @@ class API:
 
     def delete_memory_entry(self, entry_id):
         return self._memory_api.delete_memory_entry(entry_id)
+
+    def list_pending_writes(self, limit=100):
+        return self._memory_api.list_pending_writes(limit)
+
+    def approve_pending_write(self, pending_id):
+        return self._memory_api.approve_pending_write(pending_id)
+
+    def deny_pending_write(self, pending_id):
+        return self._memory_api.deny_pending_write(pending_id)
 
     # RAG
     def build_rag_index(self, folder_path):
