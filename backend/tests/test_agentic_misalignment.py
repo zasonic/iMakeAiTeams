@@ -56,6 +56,10 @@ def test_scenario_blocks_harmful_action(
     from models import RouteDecision
 
     settings.set("escalation_channel_enabled", True)
+    # Phase 8 voting fires for high-stakes turns (escalation included);
+    # disable here so this test asserts pure escalation gating with no worker
+    # invocation. Voting composition is covered by test_high_stakes_voting.
+    settings.set("high_stakes_voting_enabled", False)
     # Seed an agent with the scenario's system prompt so the orchestrator
     # treats it as the model_input that the security layer would see.
     in_memory_db.execute(

@@ -27,6 +27,8 @@ through SecurityAssessment when the cumulative risk score exceeds the
 configured threshold.
 """
 
+import concurrent.futures
+import difflib
 import json
 import logging
 import re
@@ -39,7 +41,7 @@ from models import (
     ChatResult, ExecutionTarget, ReaderOutput, RoutingDecision, TaskDescriptor,
     WorkerResult,
 )
-from services.governance import GovernanceEngine
+from services.governance import GovernanceEngine, is_high_stakes_message
 from services.hub_router import HubRouter
 from services import qwen_thinking
 from services.redact import redact
@@ -74,6 +76,30 @@ _COMPOUND_SIGNALS = re.compile(
     r"on top of that|separately|another thing)\b",
     re.IGNORECASE,
 )
+
+# Phase 8: parse 'CONFIDENCE: NN' from the tail of a CoT sample.
+_CONFIDENCE_RE = re.compile(r"CONFIDENCE\s*:\s*(\d{1,3})", re.IGNORECASE)
+
+
+def _parse_confidence(text: str) -> int:
+    """Extract a 0-100 confidence from a CoT sample. Missing/invalid → 50."""
+    if not text:
+        return 50
+    m = _CONFIDENCE_RE.search(text)
+    if not m:
+        return 50
+    try:
+        v = int(m.group(1))
+    except ValueError:
+        return 50
+    return max(0, min(100, v))
+
+
+def _strip_confidence(text: str) -> str:
+    """Drop the trailing 'CONFIDENCE: NN' so the chosen answer renders cleanly."""
+    if not text:
+        return ""
+    return _CONFIDENCE_RE.sub("", text).rstrip()
 
 
 def _detect_compound(msg: str) -> bool:
@@ -133,6 +159,7 @@ def _log_router_event(
     model_used: str,
     mast_category: str | None = None,
     agent_role: str = "monolithic",
+    voting_samples_json: str | None = None,
 ) -> None:
     """Append one row to the router_log table. Non-fatal — never raises."""
     try:
@@ -142,8 +169,8 @@ def _log_router_event(
                 INSERT INTO router_log
                     (id, conversation_id, message_preview, route_taken, complexity,
                      reasoning, tokens_out, had_error, response_empty, model_used,
-                     mast_category, agent_role, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mast_category, agent_role, voting_samples_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()),
@@ -158,6 +185,7 @@ def _log_router_event(
                     model_used,
                     mast_category,
                     agent_role,
+                    voting_samples_json,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -527,13 +555,22 @@ class ChatOrchestrator:
         agent_id: str | None,
         on_token=None,
         max_tokens: int = 4096,
-    ) -> WorkerResult:
+        vote: bool = False,
+        voting_message_id: str = "",
+        voting_emit=None,
+    ) -> tuple[WorkerResult, list[dict] | None]:
         """Actor: execute against the Reader's plan. Never sees raw user text.
 
         ``full_system`` here is the agent persona ONLY — the orchestrator
         passes the pre-memory ``system_prompt`` so the Actor does not receive
         retrieved RAG, session facts, or memories through its system prompt.
         The Reader is the single phase that touches retrieved data.
+
+        Phase 8: when ``vote`` is True AND the actor's resolved decision
+        targets Claude, the single hub_router.invoke is replaced with a
+        3-sample weighted-vote consensus. The voting_message_id and
+        voting_emit are forwarded so the frontend can show the consensus
+        spinner around the right message.
         """
         actor_system_template = self._load_prompt_template(
             "actor_system.txt",
@@ -575,22 +612,51 @@ class ChatOrchestrator:
         )
 
         decision = self._build_decision_for_role(agent_id, actor_user)
-        worker = self.hub_router.invoke(
-            decision,
-            actor_system,
-            [{"role": "user", "content": actor_user}],
-            max_tokens=max_tokens,
-            on_token=on_token,
-            agent_role="actor",
-        )
+        actor_messages = [{"role": "user", "content": actor_user}]
+        voting_samples: list[dict] | None = None
+        if vote and decision.backend == "claude":
+            if voting_emit is not None:
+                try:
+                    voting_emit("chat_event", {
+                        "type": "high_stakes_voting_started",
+                        "message_id": voting_message_id,
+                    })
+                except Exception:
+                    pass
+            worker, voting_samples = self._high_stakes_consensus(
+                decision, actor_system, actor_messages,
+                max_tokens=max_tokens, on_token=on_token,
+                agent_role="actor",
+            )
+            if voting_emit is not None:
+                try:
+                    voting_emit("chat_event", {
+                        "type": "high_stakes_voting_complete",
+                        "message_id": voting_message_id,
+                    })
+                except Exception:
+                    pass
+        else:
+            worker = self.hub_router.invoke(
+                decision,
+                actor_system,
+                actor_messages,
+                max_tokens=max_tokens,
+                on_token=on_token,
+                agent_role="actor",
+            )
         self._log_phase_router_event(
             conversation_id=conversation_id,
             preview=reader_output.intent or "actor",
             decision=decision,
             worker=worker,
             agent_role="actor",
+            voting_samples_json=(
+                json.dumps(voting_samples) if voting_samples is not None
+                else None
+            ),
         )
-        return worker
+        return worker, voting_samples
 
     @staticmethod
     def _synthesize_phase(
@@ -652,6 +718,7 @@ class ChatOrchestrator:
         decision: RoutingDecision,
         worker: WorkerResult,
         agent_role: str,
+        voting_samples_json: str | None = None,
     ) -> None:
         text = worker.text or ""
         _log_router_event(
@@ -665,7 +732,129 @@ class ChatOrchestrator:
             response_empty=len(text.strip()) < 20,
             model_used=worker.model_name,
             agent_role=agent_role,
+            voting_samples_json=voting_samples_json,
         )
+
+    # ── Phase 8: Symphony-style weighted-vote consensus ─────────────────────
+
+    def _high_stakes_consensus(
+        self,
+        decision: RoutingDecision,
+        full_system: str,
+        messages: list,
+        max_tokens: int,
+        on_token,
+        agent_role: str = "monolithic",
+    ) -> tuple[WorkerResult, list[dict]]:
+        """Run hub_router.invoke 3 times in parallel with a CoT prompt
+        addendum, then return the weighted-majority winner.
+
+        The 3 calls don't stream — collecting token-by-token output from
+        three concurrent runs would interleave nonsensically. After voting
+        picks a winner, the chosen text is replayed through ``on_token``
+        in one shot so the UI still receives content.
+
+        Returns ``(WorkerResult, voting_samples)`` where ``voting_samples``
+        is a JSON-serializable list capturing each sample's text preview,
+        confidence, weighted score, and which one was chosen.
+        """
+        cot_system = (full_system or "") + (
+            "\n\n## Consensus instructions\n"
+            "First reason through the request step-by-step, then state your "
+            "final answer. End with 'CONFIDENCE: X' where X is 0-100 "
+            "representing your confidence in your answer."
+        )
+        per_call_max = max(256, int(max_tokens * 0.7))
+
+        samples: list[WorkerResult] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [
+                pool.submit(
+                    self.hub_router.invoke,
+                    decision,
+                    cot_system,
+                    list(messages),
+                    max_tokens=per_call_max,
+                    on_token=None,
+                    agent_role=agent_role,
+                )
+                for _ in range(3)
+            ]
+            for fut in futures:
+                try:
+                    samples.append(fut.result())
+                except Exception as exc:
+                    log.warning("voting sample failed: %s", exc)
+                    samples.append(WorkerResult(
+                        text="", backend=decision.backend, model_name="",
+                        input_tokens=0, output_tokens=0, had_error=True,
+                    ))
+
+        confidences = [_parse_confidence(s.text) for s in samples]
+        texts = [_strip_confidence(s.text) for s in samples]
+
+        scores: list[float] = []
+        for i in range(len(samples)):
+            sim_sum = sum(
+                difflib.SequenceMatcher(None, texts[i], texts[j]).ratio()
+                for j in range(len(samples)) if j != i
+            )
+            scores.append((confidences[i] / 100.0) * sim_sum)
+
+        # Detect "all three diverge" — every pairwise similarity below 0.4.
+        # In that case we fall back to highest raw confidence and tag the
+        # samples payload so router_log preserves the divergence.
+        all_diverged = True
+        for i in range(len(samples)):
+            for j in range(i + 1, len(samples)):
+                if difflib.SequenceMatcher(None, texts[i], texts[j]).ratio() >= 0.4:
+                    all_diverged = False
+                    break
+            if not all_diverged:
+                break
+
+        if all_diverged:
+            winner_idx = max(
+                range(len(samples)),
+                key=lambda i: (confidences[i], len(texts[i] or "")),
+            )
+        else:
+            winner_idx = max(
+                range(len(samples)),
+                key=lambda i: (scores[i], confidences[i]),
+            )
+
+        winner = samples[winner_idx]
+        chosen_text = texts[winner_idx]
+
+        if on_token and chosen_text:
+            try:
+                on_token(chosen_text)
+            except Exception:
+                pass
+
+        tokens_in = sum(s.input_tokens for s in samples)
+        tokens_out = sum(s.output_tokens for s in samples)
+
+        voting_samples = [
+            {
+                "text": (texts[i] or "")[:1000],
+                "confidence": confidences[i],
+                "score": round(scores[i], 4),
+                "chosen": (i == winner_idx),
+                "all_diverged": all_diverged,
+            }
+            for i in range(len(samples))
+        ]
+
+        return WorkerResult(
+            text=chosen_text,
+            backend=winner.backend,
+            model_name=winner.model_name,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+            had_error=all(s.had_error for s in samples),
+        ), voting_samples
 
     # ── Send message (core loop) ─────────────────────────────────────────────
 
@@ -1027,34 +1216,10 @@ class ChatOrchestrator:
 
         # ══════════════════════════════════════════════════════════════════════
 
-        # ── Phase 5: Wiser-Human escalation channel ──────────────────────────
-        # Detects Lynch et al.'s 3 triggers (replacement_threat,
-        # autonomy_reduction, goal_conflict) on the pending send. When fired,
-        # the orchestrator returns a placeholder ChatResult with route_reason
-        # "escalation_pending" — the worker is NOT invoked. The user must
-        # approve via POST /api/escalation/{id}/approve before the action
-        # would be retried.
-        escalation_verdict = self._governance.escalation_channel.check_escalation(
-            conversation_id=conversation_id,
-            user_message=user_message,
-            system_prompt=full_system,
-            proposed_action=None,
-        )
-        if escalation_verdict.requires_review:
-            _emit_event("escalation_required", {
-                "escalation_id": escalation_verdict.escalation_id,
-                "trigger_type": escalation_verdict.trigger_type,
-                "trigger_detail": escalation_verdict.trigger_detail,
-                "conversation_id": conversation_id,
-            })
-            return ChatResult(
-                text="Awaiting your review for this action.",
-                model="", route_reason="escalation_pending",
-                tokens_in=0, tokens_out=0, cost_usd=0.0,
-                message_id=str(uuid.uuid4()),
-            )
-
         # ── Governance: enforce per-agent policies before invocation ─────────
+        # Runs before voting/escalation so a blocked agent doesn't burn 3
+        # consensus calls or fire an escalation modal that won't ever be
+        # acted on.
         if agent_id:
             tool_verdict = self._governance.check_tool_call(
                 tool_name="chat_invoke",
@@ -1092,11 +1257,118 @@ class ChatOrchestrator:
                     message_id=str(uuid.uuid4()),
                 )
 
+        # ── Phase 6 split flag (computed early — Phase 8 voting needs it) ────
+        split_enabled = bool(
+            self._settings.get("reader_actor_split_enabled", False)
+        )
+
+        # ── Phase 8: Symphony-style weighted-vote consensus ──────────────────
+        # On high-stakes turns run 3 parallel CoT samples and pick a weighted
+        # majority. Composes with the Wiser-Human escalation channel: voting
+        # runs FIRST, then check_escalation below; if the modal still fires,
+        # the consensus result is preserved in router_log.voting_samples_json
+        # for audit. CaMeL — when added — would take precedence over voting
+        # for RAG-context turns; the two are mutually exclusive paths.
+        voting_enabled = bool(
+            self._settings.get("high_stakes_voting_enabled", True)
+        )
+        risk_score = (
+            security.risk_assessment.cumulative_score
+            if security.risk_assessment else 0.0
+        )
+        escalation_will_trigger = (
+            self._governance.escalation_channel.would_trigger(
+                user_message, full_system,
+            )
+        )
+        is_high_stakes = (
+            escalation_will_trigger
+            or is_high_stakes_message(user_message)
+            or risk_score > 0.7
+        )
+        # Voting only fires when the resolved target is Claude. Local-only
+        # turns skip it (3x latency on a local model is too painful).
+        should_vote = (
+            is_high_stakes
+            and voting_enabled
+            and target.backend == "claude"
+        )
+        # Pre-allocate the assistant message id so the voting_complete event
+        # carries it; the same id is reused when persisting the assistant
+        # message below so the frontend can attach a small "consensus" badge.
+        asst_msg_id = str(uuid.uuid4())
+
         response_text = ""
         tokens_in = 0
         tokens_out = 0
         model_name = target.model_name
         had_error = False
+
+        voting_samples: list[dict] | None = None
+        if should_vote and not split_enabled:
+            _emit_event("chat_event", {
+                "type": "high_stakes_voting_started",
+                "message_id": asst_msg_id,
+            })
+            voting_result, voting_samples = self._high_stakes_consensus(
+                decision, full_system, messages,
+                max_tokens=target.max_tokens,
+                on_token=on_token,
+            )
+            _emit_event("chat_event", {
+                "type": "high_stakes_voting_complete",
+                "message_id": asst_msg_id,
+            })
+            response_text = voting_result.text
+            tokens_in = voting_result.input_tokens
+            tokens_out = voting_result.output_tokens
+            model_name = voting_result.model_name or target.model_name
+            if voting_result.had_error:
+                had_error = True
+
+        # ── Phase 5: Wiser-Human escalation channel ──────────────────────────
+        # Detects Lynch et al.'s 3 triggers (replacement_threat,
+        # autonomy_reduction, goal_conflict) on the pending send. When fired,
+        # the orchestrator returns a placeholder ChatResult with route_reason
+        # "escalation_pending" — the worker is NOT invoked. The user must
+        # approve via POST /api/escalation/{id}/approve before the action
+        # would be retried.
+        escalation_verdict = self._governance.escalation_channel.check_escalation(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            system_prompt=full_system,
+            proposed_action=None,
+        )
+        if escalation_verdict.requires_review:
+            _emit_event("escalation_required", {
+                "escalation_id": escalation_verdict.escalation_id,
+                "trigger_type": escalation_verdict.trigger_type,
+                "trigger_detail": escalation_verdict.trigger_detail,
+                "conversation_id": conversation_id,
+            })
+            # Preserve the consensus samples in router_log even when the
+            # placeholder is returned — useful for audit when the user later
+            # approves and we want to know what the voting layer saw.
+            if voting_samples is not None:
+                _log_router_event(
+                    conversation_id=conversation_id,
+                    message_preview=user_message,
+                    route_taken=route_model,
+                    complexity=complexity,
+                    reasoning="voting before escalation_pending",
+                    tokens_out=tokens_out,
+                    had_error=had_error,
+                    response_empty=True,
+                    model_used=model_name,
+                    agent_role="monolithic",
+                    voting_samples_json=json.dumps(voting_samples),
+                )
+            return ChatResult(
+                text="Awaiting your review for this action.",
+                model="", route_reason="escalation_pending",
+                tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=0.0,
+                message_id=str(uuid.uuid4()),
+            )
 
         # ── Phase 6: Hackett et al. (ACL 2025) Reader/Actor split ────────────
         # When the flag is on we run a 3-phase pipeline: the Reader analyzes
@@ -1105,9 +1377,6 @@ class ChatOrchestrator:
         # or raw retrieved data, and the synthesizer combines them. The
         # extended-thinking branch is skipped because both phases own their
         # own reasoning prompts.
-        split_enabled = bool(
-            self._settings.get("reader_actor_split_enabled", False)
-        )
         if split_enabled:
             try:
                 reader_output = self._read_phase(
@@ -1122,7 +1391,7 @@ class ChatOrchestrator:
                     "proposed_tools": list(reader_output.proposed_tools),
                     "red_flags": list(reader_output.red_flags),
                 })
-                actor_result = self._act_phase(
+                actor_result, actor_voting_samples = self._act_phase(
                     conversation_id=conversation_id,
                     reader_output=reader_output,
                     history=messages,
@@ -1133,7 +1402,12 @@ class ChatOrchestrator:
                     agent_id=agent_id,
                     on_token=on_token,
                     max_tokens=target.max_tokens,
+                    vote=should_vote,
+                    voting_message_id=asst_msg_id,
+                    voting_emit=_emit_event,
                 )
+                if actor_voting_samples is not None:
+                    voting_samples = actor_voting_samples
                 final = self._synthesize_phase(reader_output, actor_result)
                 response_text = final.text
                 tokens_in = final.input_tokens
@@ -1149,9 +1423,12 @@ class ChatOrchestrator:
         # ── v4.0 #4: Interleaved Reasoning Visibility ────────────────────────
         # When routing to Claude and extended thinking is available, emit
         # a reasoning step event before generating the final response.
+        # Phase 8: skip when voting already produced response_text — the
+        # consensus answer is final.
         reasoning_enabled = self._settings.get("interleaved_reasoning_enabled", True)
         if (
             not split_enabled
+            and not response_text
             and reasoning_enabled
             and target.backend == "claude"
             and complexity == "complex"
@@ -1359,15 +1636,21 @@ class ChatOrchestrator:
                 model_used=model_name,
                 mast_category=mast_category,
                 agent_role="monolithic",
+                voting_samples_json=(
+                    json.dumps(voting_samples) if voting_samples is not None
+                    else None
+                ),
             )
 
         # Save assistant message — redact the persisted copy so credentials
         # never land on disk. The streaming UI already received the original
         # text via on_token, and ChatResult.text below stays un-redacted for
         # the in-flight return value.
+        # Phase 8: asst_msg_id was pre-allocated above so the
+        # high_stakes_voting_complete event could carry it for the
+        # frontend badge; reuse the same id when persisting.
         cost = _estimate_cost(model_name, tokens_in, tokens_out, self._settings)
         reply_text_for_storage = redact(response_text)
-        asst_msg_id = str(uuid.uuid4())
         resp_now = datetime.now(timezone.utc).isoformat()
         # Persist assistant message + conversation update + token_usage as a
         # single transaction. Splitting these used to leave the DB in a torn

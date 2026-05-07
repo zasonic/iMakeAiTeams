@@ -722,6 +722,11 @@ _MIGRATIONS = [
         # "monolithic" (legacy), "reader", "actor"
         "ALTER TABLE router_log ADD COLUMN agent_role TEXT DEFAULT 'monolithic'",
     ]),
+
+    # ── Phase 8: Symphony-style weighted-vote consensus samples ──────────────
+    ("phase8.voting_samples", [
+        "ALTER TABLE router_log ADD COLUMN voting_samples_json TEXT DEFAULT NULL",
+    ]),
 ]
 
 

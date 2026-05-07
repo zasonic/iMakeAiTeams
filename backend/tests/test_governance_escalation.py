@@ -275,6 +275,10 @@ class TestOrchestratorEscalation:
                                                       local_client_unavailable, settings):
         """Trigger fires → ChatResult.route_reason == 'escalation_pending' and
         the worker is never invoked."""
+        # Phase 8 voting fires for any high-stakes turn (escalation included);
+        # disable here so this test stays focused on pure escalation gating.
+        # Voting+escalation composition is covered by test_high_stakes_voting.
+        settings.set("high_stakes_voting_enabled", False)
         orch = self._make_orch(in_memory_db, claude_client, local_client_unavailable,
                                 settings, routing="claude")
         # Replace the hub_router.invoke with a hard fail — if it's called the

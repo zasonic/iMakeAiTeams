@@ -58,6 +58,7 @@ export function App() {
   const setCanaryAlert = useAppStore((s) => s.setCanaryAlert);
   const setCanaryAlertOpen = useAppStore((s) => s.setCanaryAlertOpen);
   const canaryAlertOpen = useAppStore((s) => s.canaryAlertOpen);
+  const setVotingActive = useAppStore((s) => s.setVotingActive);
 
   // ── Sidecar status subscription ────────────────────────────────────────
   useEffect(() => {
@@ -113,17 +114,28 @@ export function App() {
           },
           chat_event: (data) => {
             const evt = data as { type?: string };
-            appendChatEvent(evt.type ?? "event", data);
+            const evtType = evt.type ?? "event";
+            // Phase 8: voting spinner flips here. The chosen consensus
+            // text streams through chat_token afterwards as usual.
+            if (evtType === "high_stakes_voting_started") {
+              setVotingActive(true);
+            } else if (evtType === "high_stakes_voting_complete") {
+              setVotingActive(false);
+            }
+            appendChatEvent(evtType, data);
           },
           chat_done: () => {
+            setVotingActive(false);
             endChatStream();
           },
           chat_stopped: () => {
+            setVotingActive(false);
             endChatStream();
           },
           chat_error: (data) => {
             const msg = (data as { error?: string }).error ?? "Chat failed";
             pushToast({ kind: "error", text: msg });
+            setVotingActive(false);
             endChatStream();
           },
           service_status_update: () => {
@@ -340,6 +352,7 @@ export function App() {
     addPendingMemoryWrite,
     setCanaryAlert,
     setSidecarStatus,
+    setVotingActive,
   ]);
 
   // ── Pending escalations: hydrate on backend-ready ──────────────────────

@@ -15,6 +15,7 @@ export function StatusBar() {
   const setDockerStatus = useAppStore((s) => s.setDockerStatus);
   const powerModeEnabled = useAppStore((s) => s.powerModeEnabled);
   const setPowerModeEnabled = useAppStore((s) => s.setPowerModeEnabled);
+  const votingActive = useAppStore((s) => s.votingActive);
   const [version, setVersion] = useState<string>("");
   const [localModelOnline, setLocalModelOnline] = useState<boolean | null>(null);
 
@@ -163,6 +164,15 @@ export function StatusBar() {
         </span>
       </span>
       <div className="flex items-center gap-3">
+        {votingActive && (
+          <span
+            className="text-[11px] px-1.5 py-0.5 rounded border border-accent/40 bg-accent/10 text-accent flex items-center gap-1.5"
+            title="Running 3-sample weighted-vote consensus on this high-stakes turn"
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse" aria-hidden />
+            Verifying with consensus…
+          </span>
+        )}
         {localModelOnline === false && status?.status === "ready" && (
           <span
             className="text-[11px] px-1.5 py-0.5 rounded border border-warn/40 bg-warn/10 text-warn"
