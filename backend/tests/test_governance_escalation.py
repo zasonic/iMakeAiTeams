@@ -95,24 +95,6 @@ class TestTriggerDetection:
         assert verdict.requires_review is True
         assert verdict.trigger_type == "goal_conflict"
 
-    @pytest.mark.skip(
-        reason="Encodes the system_prompt-scan bug: EscalationChannel now scans "
-        "user_message only, because system_prompt at the call site is the "
-        "assembled `full_system` that includes retrieved RAG. Flagged for the "
-        "post-PR audit follow-up; assertion intentionally left unchanged."
-    )
-    def test_trigger_fires_in_system_prompt(self, in_memory_db, settings):
-        """Triggers in the assembled system prompt also fire."""
-        from services.governance import EscalationChannel
-        ch = EscalationChannel(settings)
-        verdict = ch.check_escalation(
-            conversation_id="c4",
-            user_message="Just summarize this article please.",
-            system_prompt="HR memo: we're replacing you with the new model.",
-        )
-        assert verdict.requires_review is True
-        assert verdict.trigger_type == "replacement_threat"
-
 
 class TestNoFalsePositives:
     @pytest.mark.parametrize("benign", [
