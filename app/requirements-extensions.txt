@@ -1,0 +1,27 @@
+# ── Tier 2/3 extensions — bundled by the full installer only ─────────────────
+#
+# Tier 2 (RAG + semantic search): torch, sentence-transformers, chromadb,
+#   rank-bm25. Adds ~1.5 GB to the bundle but unlocks document indexing,
+#   semantic recall, and hybrid BM25 retrieval.
+#
+# Tier 3 (Telegram channel): python-telegram-bot. Optional regardless of
+#   installer — can also be dropped into the bundled site-packages post-install.
+#
+# Every module that imports these packages wraps the import in try/except
+# (verified: core/api.py:95, services/semantic_search.py:58,93,
+# channels/telegram_adapter.py:90) and registers its state via
+# API._safe_init so the lite build continues to work.
+
+# ── Force CPU-only PyTorch to avoid 2GB+ CUDA download ───────────────────────
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+
+# ── Tier 2: RAG / Embedding / Semantic Search ────────────────────────────────
+sentence-transformers>=2.7.0
+chromadb>=0.5.0
+
+# ── Tier 2: Hybrid BM25 retrieval ────────────────────────────────────────────
+rank-bm25>=0.2.2
+
+# ── Tier 3: Telegram channel adapter ─────────────────────────────────────────
+python-telegram-bot>=21.0.0
