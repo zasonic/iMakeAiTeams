@@ -64,6 +64,25 @@ _ALWAYS_INCLUDED_ROLES: frozenset[str] = frozenset({"coordinator"})
 # stopwords like "and", "the", "is" without maintaining a list).
 _KEYWORD_MIN_LEN: int = 3
 
+# MAST (Multi-Agent System failure Taxonomy, Cemri et al. 2025) 14 codes.
+# Hard-coded so classification never depends on a live network fetch.
+_MAST_CATEGORIES: tuple[str, ...] = (
+    "1.1",  # Disobey Task Specification
+    "1.2",  # Disobey Role Specification
+    "1.3",  # Step Repetition
+    "1.4",  # Loss of Conversation History
+    "1.5",  # Unaware of Termination Conditions
+    "2.1",  # Conversation Reset
+    "2.2",  # Fail to Ask for Clarification
+    "2.3",  # Task Derailment
+    "2.4",  # Information Withholding
+    "2.5",  # Ignored Other Agent's Input
+    "2.6",  # Reasoning-Action Mismatch
+    "3.1",  # Premature Termination
+    "3.2",  # No or Incomplete Verification
+    "3.3",  # Incorrect Verification
+)
+
 
 class AuthorizationError(RuntimeError):
     """Raised when a task's required_scopes are not a subset of the worker's."""
@@ -394,6 +413,61 @@ class HubRouter:
                 model_name=client.client_name(),
                 had_error=True,
             )
+
+    # ── MAST failure-mode classification ────────────────────────────────────
+
+    def classify_failure(
+        self, user_message: str, response: str, error: str
+    ) -> str:
+        """Map a failed turn to one of the 14 MAST codes.
+
+        Best-effort: prefers Claude when available, falls back to the local
+        client. Returns a code string from ``_MAST_CATEGORIES``; on any parse
+        or call failure raises so the caller can record NULL.
+        """
+        prompt = (
+            "Classify the failure of an AI assistant turn into exactly one "
+            "MAST (Multi-Agent System failure Taxonomy) code. Reply with "
+            "ONLY the code (e.g. '1.1' or '3.2'), no prose. Valid codes: "
+            "1.1 Disobey Task Specification, 1.2 Disobey Role Specification, "
+            "1.3 Step Repetition, 1.4 Loss of Conversation History, "
+            "1.5 Unaware of Termination Conditions, 2.1 Conversation Reset, "
+            "2.2 Fail to Ask for Clarification, 2.3 Task Derailment, "
+            "2.4 Information Withholding, 2.5 Ignored Other Agent's Input, "
+            "2.6 Reasoning-Action Mismatch, 3.1 Premature Termination, "
+            "3.2 No or Incomplete Verification, 3.3 Incorrect Verification."
+        )
+        user_block = (
+            f"USER MESSAGE: {(user_message or '')[:600]}\n"
+            f"RESPONSE: {(response or '')[:600]}\n"
+            f"ERROR: {(error or '')[:300]}"
+        )
+        raw: str | None = None
+        if self._claude is not None:
+            try:
+                result = self._claude.chat_multi_turn(
+                    prompt,
+                    [{"role": "user", "content": user_block}],
+                    max_tokens=8,
+                )
+                raw = result.get("text") if isinstance(result, dict) else result
+            except Exception:
+                raw = None
+        if not raw and self._local is not None:
+            try:
+                raw = self._local.chat(prompt, user_block, max_tokens=8)
+            except Exception:
+                raw = None
+        if not raw:
+            raise RuntimeError("no classifier output")
+
+        match = re.search(r"\b([123]\.[1-6])\b", raw)
+        if not match:
+            raise ValueError(f"no MAST code in {raw!r}")
+        code = match.group(1)
+        if code not in _MAST_CATEGORIES:
+            raise ValueError(f"unknown MAST code {code!r}")
+        return code
 
     def target_for(self, decision: RoutingDecision, max_tokens: int) -> ExecutionTarget:
         """Public helper so the orchestrator can build an ExecutionTarget."""

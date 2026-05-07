@@ -128,6 +128,7 @@ def _log_router_event(
     had_error: bool,
     response_empty: bool,
     model_used: str,
+    mast_category: str | None = None,
 ) -> None:
     """Append one row to the router_log table. Non-fatal — never raises."""
     try:
@@ -136,8 +137,9 @@ def _log_router_event(
                 """
                 INSERT INTO router_log
                     (id, conversation_id, message_preview, route_taken, complexity,
-                     reasoning, tokens_out, had_error, response_empty, model_used, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     reasoning, tokens_out, had_error, response_empty, model_used,
+                     mast_category, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()),
@@ -150,6 +152,7 @@ def _log_router_event(
                     1 if had_error else 0,
                     1 if response_empty else 0,
                     model_used,
+                    mast_category,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -1009,6 +1012,17 @@ class ChatOrchestrator:
         response_empty = len((response_text or "").strip()) < 20
 
         # Persist router feedback
+        turn_failed = had_error or response_text.startswith("[Error")
+        mast_category: str | None = None
+        if turn_failed:
+            try:
+                mast_category = self.hub_router.classify_failure(
+                    user_message,
+                    response_text,
+                    response_text if response_text.startswith("[Error") else "",
+                )
+            except Exception as exc:
+                log.debug("MAST classify_failure skipped: %s", exc)
         _log_router_event(
             conversation_id=conversation_id,
             message_preview=user_message,
@@ -1016,9 +1030,10 @@ class ChatOrchestrator:
             complexity=complexity,
             reasoning=route_reason,
             tokens_out=tokens_out,
-            had_error=had_error or response_text.startswith("[Error"),
+            had_error=turn_failed,
             response_empty=response_empty,
             model_used=model_name,
+            mast_category=mast_category,
         )
 
         # Save assistant message — redact the persisted copy so credentials
