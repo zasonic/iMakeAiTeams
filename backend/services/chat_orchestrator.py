@@ -35,7 +35,10 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 
 import db as _db
-from models import ChatResult, ExecutionTarget, RoutingDecision, TaskDescriptor
+from models import (
+    ChatResult, ExecutionTarget, ReaderOutput, RoutingDecision, TaskDescriptor,
+    WorkerResult,
+)
 from services.governance import GovernanceEngine
 from services.hub_router import HubRouter
 from services import qwen_thinking
@@ -129,6 +132,7 @@ def _log_router_event(
     response_empty: bool,
     model_used: str,
     mast_category: str | None = None,
+    agent_role: str = "monolithic",
 ) -> None:
     """Append one row to the router_log table. Non-fatal — never raises."""
     try:
@@ -138,8 +142,8 @@ def _log_router_event(
                 INSERT INTO router_log
                     (id, conversation_id, message_preview, route_taken, complexity,
                      reasoning, tokens_out, had_error, response_empty, model_used,
-                     mast_category, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mast_category, agent_role, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()),
@@ -153,6 +157,7 @@ def _log_router_event(
                     1 if response_empty else 0,
                     model_used,
                     mast_category,
+                    agent_role,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -428,6 +433,239 @@ class ChatOrchestrator:
                 model_name=self._settings.get("default_local_model", "local"),
                 max_tokens=min(agent_max_tokens, 2048),
             )
+
+    # ── Phase 6: Hackett et al. (ACL 2025) Reader/Actor split ────────────────
+
+    @staticmethod
+    def _load_prompt_template(name: str, fallback: str) -> str:
+        """Load a prompt template from backend/templates/.
+
+        Falls back to the inline string when the file is missing (which can
+        happen if the PyInstaller bundle drops the templates directory or in
+        unusual test layouts). The fallback keeps the architectural wall —
+        same intent, just terser.
+        """
+        try:
+            from pathlib import Path
+            here = Path(__file__).resolve().parent.parent
+            text = (here / "templates" / name).read_text(encoding="utf-8")
+            if text.strip():
+                return text
+        except Exception:
+            pass
+        return fallback
+
+    def _read_phase(
+        self,
+        conversation_id: str,
+        user_message: str,
+        agent_id: str | None,
+        history: list,
+        mem,
+    ) -> ReaderOutput:
+        """Reader: analyze the request and propose tools. No tool execution."""
+        reader_system = self._load_prompt_template(
+            "reader_system.txt",
+            "You are the Reader. Output JSON only with keys "
+            "intent, constraints, relevant_facts, proposed_tools, red_flags. "
+            "Never call tools.",
+        )
+
+        # Quarantined retrieval surface for the Reader. The Reader is the
+        # ONLY phase that sees retrieved data; the Actor never does.
+        retrieval_block = ""
+        if mem.rag_chunks:
+            quarantined = quarantine_chunks(
+                mem.rag_chunks,
+                source_type="user_document",
+                source_id=conversation_id,
+            )
+            retrieval_block = render_quarantined_context(quarantined)
+
+        memory_block = ""
+        if mem.session_facts or mem.memories:
+            mem_lines: list[str] = []
+            if mem.session_facts:
+                mem_lines.append("## Session facts")
+                mem_lines.extend(f"- {f}" for f in mem.session_facts)
+            if mem.memories:
+                mem_lines.append("## Long-term memories")
+                mem_lines.extend(f"- {m}" for m in mem.memories)
+            memory_block = "\n".join(mem_lines)
+
+        reader_user = (
+            f"USER MESSAGE:\n{user_message}\n\n"
+            + (f"{retrieval_block}\n\n" if retrieval_block else "")
+            + (f"{memory_block}\n\n" if memory_block else "")
+            + "Return JSON now."
+        )
+
+        decision = self._build_decision_for_role(agent_id, user_message)
+        worker = self.hub_router.invoke(
+            decision,
+            reader_system,
+            [{"role": "user", "content": reader_user}],
+            max_tokens=1024,
+            on_token=None,  # Reader output is JSON; never stream to user
+            agent_role="reader",
+        )
+        self._log_phase_router_event(
+            conversation_id=conversation_id,
+            preview=user_message,
+            decision=decision,
+            worker=worker,
+            agent_role="reader",
+        )
+        return ReaderOutput.from_raw(worker.text)
+
+    def _act_phase(
+        self,
+        conversation_id: str,
+        reader_output: ReaderOutput,
+        history: list,
+        full_system: str,
+        agent_id: str | None,
+        on_token=None,
+        max_tokens: int = 4096,
+    ) -> WorkerResult:
+        """Actor: execute against the Reader's plan. Never sees raw user text.
+
+        ``full_system`` here is the agent persona ONLY — the orchestrator
+        passes the pre-memory ``system_prompt`` so the Actor does not receive
+        retrieved RAG, session facts, or memories through its system prompt.
+        The Reader is the single phase that touches retrieved data.
+        """
+        actor_system_template = self._load_prompt_template(
+            "actor_system.txt",
+            "You are the Actor. Use only tools listed in proposed_tools. "
+            "You receive a JSON plan; the user's raw message is hidden.",
+        )
+        # Compose: actor instructions on top, then the bare persona.
+        actor_system = actor_system_template + "\n\n" + (full_system or "")
+
+        # Populate the per-task ledger BEFORE the Actor runs so any tool call
+        # the Actor proposes is gated against the Reader's allowlist.
+        self._governance.set_proposed_tools(
+            conversation_id, reader_output.proposed_tools
+        )
+
+        # The Reader's relevant_facts are forwarded through the existing
+        # security_engine quarantine path as user_document so any
+        # instructions that survived the Reader's filtering still hit the
+        # structural-isolation delimiters before reaching the Actor.
+        plan_payload = {
+            "intent": reader_output.intent,
+            "constraints": list(reader_output.constraints),
+            "proposed_tools": list(reader_output.proposed_tools),
+            "red_flags": list(reader_output.red_flags),
+        }
+        quarantine_block = ""
+        if reader_output.relevant_facts:
+            quarantined = quarantine_chunks(
+                list(reader_output.relevant_facts),
+                source_type="user_document",
+                source_id=conversation_id,
+            )
+            quarantine_block = render_quarantined_context(quarantined)
+
+        actor_user = (
+            "Planner output (your only view of the request):\n"
+            f"{json.dumps(plan_payload, ensure_ascii=False)}"
+            + (f"\n\n{quarantine_block}" if quarantine_block else "")
+        )
+
+        decision = self._build_decision_for_role(agent_id, actor_user)
+        worker = self.hub_router.invoke(
+            decision,
+            actor_system,
+            [{"role": "user", "content": actor_user}],
+            max_tokens=max_tokens,
+            on_token=on_token,
+            agent_role="actor",
+        )
+        self._log_phase_router_event(
+            conversation_id=conversation_id,
+            preview=reader_output.intent or "actor",
+            decision=decision,
+            worker=worker,
+            agent_role="actor",
+        )
+        return worker
+
+    @staticmethod
+    def _synthesize_phase(
+        reader_output: ReaderOutput, actor_result: WorkerResult,
+    ) -> WorkerResult:
+        """Combine Reader + Actor into the final assistant turn.
+
+        The final text is the Actor's text. Tokens are summed from the Actor
+        (the Reader's tokens are tracked separately via router_log). The
+        Reader's red_flags are surfaced to the orchestrator via the returned
+        WorkerResult's text only when the Actor produced nothing usable.
+        """
+        text = actor_result.text or ""
+        if not text.strip() and reader_output.red_flags:
+            text = (
+                "I could not produce a response: the Reader flagged "
+                f"{len(reader_output.red_flags)} suspicious pattern(s) in the "
+                "retrieved context. Please review the input."
+            )
+        return WorkerResult(
+            text=text,
+            backend=actor_result.backend,
+            model_name=actor_result.model_name,
+            input_tokens=actor_result.input_tokens,
+            output_tokens=actor_result.output_tokens,
+            had_error=actor_result.had_error,
+        )
+
+    def _build_decision_for_role(
+        self, agent_id: str | None, text: str,
+    ) -> RoutingDecision:
+        """Build a RoutingDecision for a single phase invocation.
+
+        Matches the existing send() shape: when an agent is selected we go
+        through ``route_for_agent`` (so authz + agent-pref still apply); when
+        no agent is selected we synthesize a hub-direct decision.
+        """
+        if agent_id:
+            try:
+                return self.hub_router.route_for_agent(
+                    agent_id, TaskDescriptor(text=text, preferred_agent_id=agent_id),
+                )
+            except Exception as exc:
+                log.debug("route_for_agent failed in phase build: %s", exc)
+        return RoutingDecision(
+            agent_id=agent_id or "",
+            backend="claude",
+            score=1.0,
+            reasoning="reader_actor phase",
+            used_fallback=False,
+            skill_matched="",
+        )
+
+    def _log_phase_router_event(
+        self,
+        *,
+        conversation_id: str,
+        preview: str,
+        decision: RoutingDecision,
+        worker: WorkerResult,
+        agent_role: str,
+    ) -> None:
+        text = worker.text or ""
+        _log_router_event(
+            conversation_id=conversation_id,
+            message_preview=preview,
+            route_taken=decision.backend,
+            complexity="phase",
+            reasoning=f"reader_actor split: {agent_role}",
+            tokens_out=worker.output_tokens,
+            had_error=worker.had_error,
+            response_empty=len(text.strip()) < 20,
+            model_used=worker.model_name,
+            agent_role=agent_role,
+        )
 
     # ── Send message (core loop) ─────────────────────────────────────────────
 
@@ -860,12 +1098,61 @@ class ChatOrchestrator:
         model_name = target.model_name
         had_error = False
 
+        # ── Phase 6: Hackett et al. (ACL 2025) Reader/Actor split ────────────
+        # When the flag is on we run a 3-phase pipeline: the Reader analyzes
+        # the request and proposes tools, the Actor executes against the
+        # Reader's structured plan without ever seeing the raw user message
+        # or raw retrieved data, and the synthesizer combines them. The
+        # extended-thinking branch is skipped because both phases own their
+        # own reasoning prompts.
+        split_enabled = bool(
+            self._settings.get("reader_actor_split_enabled", False)
+        )
+        if split_enabled:
+            try:
+                reader_output = self._read_phase(
+                    conversation_id=conversation_id,
+                    user_message=user_message,
+                    agent_id=agent_id,
+                    history=messages,
+                    mem=mem,
+                )
+                _emit_event("reader_complete", {
+                    "intent": reader_output.intent[:200],
+                    "proposed_tools": list(reader_output.proposed_tools),
+                    "red_flags": list(reader_output.red_flags),
+                })
+                actor_result = self._act_phase(
+                    conversation_id=conversation_id,
+                    reader_output=reader_output,
+                    history=messages,
+                    # Pass the bare persona prompt — NOT full_system (which
+                    # carries the memory/RAG suffix). The Actor must not see
+                    # raw retrieved data via its system prompt either.
+                    full_system=system_prompt,
+                    agent_id=agent_id,
+                    on_token=on_token,
+                    max_tokens=target.max_tokens,
+                )
+                final = self._synthesize_phase(reader_output, actor_result)
+                response_text = final.text
+                tokens_in = final.input_tokens
+                tokens_out = final.output_tokens
+                model_name = final.model_name or target.model_name
+                if final.had_error:
+                    had_error = True
+            finally:
+                # Per-turn ledger: clear so the next turn re-establishes from
+                # its own Reader output (no stale carry-over between turns).
+                self._governance.clear_proposed_tools(conversation_id)
+
         # ── v4.0 #4: Interleaved Reasoning Visibility ────────────────────────
         # When routing to Claude and extended thinking is available, emit
         # a reasoning step event before generating the final response.
         reasoning_enabled = self._settings.get("interleaved_reasoning_enabled", True)
         if (
-            reasoning_enabled
+            not split_enabled
+            and reasoning_enabled
             and target.backend == "claude"
             and complexity == "complex"
             and not on_token  # only in non-streaming path (thinking is blocking)
@@ -898,7 +1185,10 @@ class ChatOrchestrator:
         # ── Execute (normal path if decomposition/reasoning didn't produce output) ─
         # Phase 1: All worker invocations route through HubRouter.invoke().
         # The orchestrator no longer calls model clients directly here.
-        if not response_text:
+        # Phase 6: when the split ran, do NOT fall back to a monolithic
+        # invocation even if the Actor produced an empty reply — that would
+        # leak the user's raw message + retrieved data past the wall.
+        if not response_text and not split_enabled:
             worker_result = self.hub_router.invoke(
                 decision, full_system, messages,
                 max_tokens=target.max_tokens, on_token=on_token,
@@ -994,6 +1284,9 @@ class ChatOrchestrator:
 
         if (
             not had_error
+            and not split_enabled  # split owns its own escalation; the legacy
+                                   # gate would re-invoke with full_system,
+                                   # leaking RAG past the architectural wall
             and target.backend == "local"
             and self.local and self.local.is_available()
             and len(user_message.split()) >= 5  # skip for trivial messages
@@ -1050,18 +1343,23 @@ class ChatOrchestrator:
                 )
             except Exception as exc:
                 log.debug("MAST classify_failure skipped: %s", exc)
-        _log_router_event(
-            conversation_id=conversation_id,
-            message_preview=user_message,
-            route_taken=route_model,
-            complexity=complexity,
-            reasoning=route_reason,
-            tokens_out=tokens_out,
-            had_error=turn_failed,
-            response_empty=response_empty,
-            model_used=model_name,
-            mast_category=mast_category,
-        )
+        # Phase 6: in split mode the per-phase router_log rows already cover
+        # this turn (reader + actor). Skip the legacy turn-summary write so
+        # we don't double-count or produce a misleading "monolithic" row.
+        if not split_enabled:
+            _log_router_event(
+                conversation_id=conversation_id,
+                message_preview=user_message,
+                route_taken=route_model,
+                complexity=complexity,
+                reasoning=route_reason,
+                tokens_out=tokens_out,
+                had_error=turn_failed,
+                response_empty=response_empty,
+                model_used=model_name,
+                mast_category=mast_category,
+                agent_role="monolithic",
+            )
 
         # Save assistant message — redact the persisted copy so credentials
         # never land on disk. The streaming UI already received the original

@@ -66,7 +66,15 @@ hiddenimports = (
     ]
 )
 
-datas = uvicorn_datas + fastapi_datas + keyring_datas + anthropic_datas + fastembed_datas + onnxruntime_datas + sqlite_vec_datas
+# Phase 6: bundle backend/templates/ so reader_system.txt / actor_system.txt
+# (and the existing Caddyfile/docker-compose Jinja templates) ship in the
+# PyInstaller onedir output. Without this the static analyzer skips .txt/.j2
+# files and prompt loading fails at runtime in the installed app.
+datas = (
+    uvicorn_datas + fastapi_datas + keyring_datas + anthropic_datas
+    + fastembed_datas + onnxruntime_datas + sqlite_vec_datas
+    + [("templates", "templates")]
+)
 
 binaries = uvicorn_binaries + fastapi_binaries + keyring_binaries + anthropic_binaries + fastembed_binaries + onnxruntime_binaries + sqlite_vec_binaries
 

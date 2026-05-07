@@ -375,8 +375,18 @@ class HubRouter:
         messages: list,
         max_tokens: int = 4096,
         on_token: Optional[Callable[[str], None]] = None,
+        agent_role: str = "monolithic",
     ) -> WorkerResult:
-        """Dispatch a routed task to its model client. Single source of truth."""
+        """Dispatch a routed task to its model client. Single source of truth.
+
+        ``agent_role`` is one of "monolithic" (legacy single-agent path),
+        "reader", or "actor" (Phase 6 Reader/Actor split). It is recorded on
+        the WorkerResult and downstream router_log row so failure analysis
+        can attribute issues to the role that produced them.
+        """
+        # Track the role for downstream logging. The actual router_log write
+        # happens in the orchestrator (single source of truth for that table).
+        self._last_agent_role = agent_role
         client = self._claude if decision.backend == "claude" else self._local
         local_max = max_tokens if decision.backend == "claude" else min(max_tokens, 2048)
 

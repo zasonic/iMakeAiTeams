@@ -716,6 +716,12 @@ _MIGRATIONS = [
         )""",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_canary_model_hash ON canary_baseline(model_id, prompt_hash)",
     ]),
+
+    # ── Phase 6: Hackett et al. (ACL 2025) Reader/Actor split ────────────────
+    ("phase6.agent_role", [
+        # "monolithic" (legacy), "reader", "actor"
+        "ALTER TABLE router_log ADD COLUMN agent_role TEXT DEFAULT 'monolithic'",
+    ]),
 ]
 
 
