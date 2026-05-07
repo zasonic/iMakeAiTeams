@@ -1,4 +1,4 @@
-# 1-install.ps1 — first-run bootstrap for iMakeAiTeams.
+# dev/install.ps1 — first-run bootstrap for iMakeAiTeams.
 #
 # Runs on a clean Windows machine with nothing but PowerShell preinstalled.
 # Installs Node.js LTS, Python 3.12, all npm + pip dependencies, and the
@@ -17,8 +17,9 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $ProjectRoot
+Write-Host "    project root: $ProjectRoot"
 
 $NODE_MIN_MAJOR = 20
 $PYTHON_MIN = [Version]"3.12"
@@ -128,7 +129,7 @@ function Install-Node {
 
     $msi = Join-Path $env:TEMP "imakeaiteams-node.msi"
     if (-not (Download-File $NODE_MSI_FALLBACK $msi)) {
-        throw "Could not download Node.js installer. Check your internet connection or install Node 20 LTS manually from https://nodejs.org and rerun 1-install.bat."
+        throw "Could not download Node.js installer. Check your internet connection or install Node 20 LTS manually from https://nodejs.org and rerun Start.bat."
     }
     Write-Host "    running msiexec /i $msi /quiet /norestart"
     # Pass the args as an array so msiexec sees /i, the MSI path, and the
@@ -179,7 +180,7 @@ function Install-Python {
 
     $exe = Join-Path $env:TEMP "imakeaiteams-python.exe"
     if (-not (Download-File $PYTHON_EXE_FALLBACK $exe)) {
-        throw "Could not download Python installer. Install Python 3.12+ manually from https://www.python.org/downloads/ (check 'Add Python to PATH') and rerun 1-install.bat."
+        throw "Could not download Python installer. Install Python 3.12+ manually from https://www.python.org/downloads/ (check 'Add Python to PATH') and rerun Start.bat."
     }
     Write-Host "    running $exe /quiet InstallAllUsers=0 PrependPath=1 Include_pip=1"
     $proc = Start-Process $exe -Wait -PassThru -ArgumentList "/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1 Include_test=0"
@@ -209,7 +210,7 @@ try {
     if ((Get-NodeMajor) -lt $NODE_MIN_MAJOR) {
         Install-Node
         if ((Get-NodeMajor) -lt $NODE_MIN_MAJOR) {
-            throw "Node $NODE_MIN_MAJOR+ is still missing. Restart your terminal and rerun 1-install.bat."
+            throw "Node $NODE_MIN_MAJOR+ is still missing. Restart your terminal and rerun Start.bat."
         }
     } else {
         Write-Ok "Node $(& node --version) detected"
@@ -222,7 +223,7 @@ try {
         Install-Python
         $py = Get-PythonExe
         if (-not $py) {
-            throw "Python 3.12+ is still missing. Restart your terminal and rerun 1-install.bat."
+            throw "Python 3.12+ is still missing. Restart your terminal and rerun Start.bat."
         }
     } else {
         $pyv = & $py -c 'import sys; print(".".join(map(str, sys.version_info[:3])))'
@@ -262,7 +263,7 @@ try {
     & $venvPython -m pip install --timeout=1000 --retries=20 --no-cache-dir --only-binary=":all:" -r "$reqs"
     if ($LASTEXITCODE -ne 0) { throw "pip install -r backend\requirements.txt failed" }
 
-    Write-Step "Installing PyInstaller (bundled in dev so 3-build-installer.bat can run without re-installing)"
+    Write-Step "Installing PyInstaller (bundled in dev so dev\build-installer.bat can run without re-installing)"
     & $venvPython -m pip install --timeout=1000 --retries=20 --no-cache-dir --only-binary=":all:" "pyinstaller==6.11.1"
     if ($LASTEXITCODE -ne 0) { throw "pip install pyinstaller failed" }
 
@@ -275,8 +276,8 @@ try {
     Write-Ok "Setup complete."
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "  * 2-run-dev.bat           - start the app with hot-reload"
-    Write-Host "  * 3-build-installer.bat   - build the Windows installer"
+    Write-Host "  * Start.bat                - start the app with hot-reload"
+    Write-Host "  * dev\build-installer.bat  - build the Windows installer"
     Write-Host ""
 } catch {
     Write-Host ""

@@ -215,10 +215,12 @@ class EscalationChannel:
         Phase 8 voting needs to know whether this turn will escalate WITHOUT
         actually recording an escalations row or emitting the SSE event yet,
         so the consensus loop can run first and the modal fires after.
+
+        system_prompt is accepted for API stability but not scanned.
         """
         if not self._is_enabled():
             return False
-        haystack = "\n".join(filter(None, [user_message or "", system_prompt or ""]))
+        haystack = user_message or ""
         if not haystack.strip():
             return False
         for compiled in _COMPILED_ESCALATION_PATTERNS.values():
@@ -234,10 +236,18 @@ class EscalationChannel:
         system_prompt: str,
         proposed_action: dict | None = None,
     ) -> EscalationVerdict:
+        """Scan this turn for escalation triggers and record + emit if matched.
+
+        system_prompt is accepted for API stability but not scanned.
+        """
         if not self._is_enabled():
             return EscalationVerdict(requires_review=False)
 
-        haystack = "\n".join(filter(None, [user_message or "", system_prompt or ""]))
+        # Lynch et al. patterns describe threats from the user against the model.
+        # system_prompt here includes retrieved RAG and saved memory — third-party
+        # content that happens to discuss AI safety would otherwise fire the
+        # escalation modal on every research-corpus chat. Scan user_message only.
+        haystack = user_message or ""
         if not haystack.strip():
             return EscalationVerdict(requires_review=False)
 

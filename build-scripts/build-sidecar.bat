@@ -2,7 +2,7 @@
 REM build-sidecar.bat — standalone PyInstaller invocation.
 REM
 REM Used by `npm run build:sidecar` and CI when the parent project doesn't want
-REM to run the full electron-builder pipeline (3-build-installer.bat).
+REM to run the full electron-builder pipeline (dev\build-installer.bat).
 REM Outputs backend\dist\server\.
 
 setlocal
@@ -10,7 +10,7 @@ set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%..\backend"
 
 if not exist ".venv\Scripts\python.exe" (
-    echo [error] backend\.venv missing. Run 1-install.bat from the project root.
+    echo [error] backend\.venv missing. Run Start.bat from the project root.
     exit /b 1
 )
 
