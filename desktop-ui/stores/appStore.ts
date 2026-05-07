@@ -18,7 +18,8 @@ export type ActiveView =
   | "mcp"
   | "security"
   | "settings"
-  | "diagnostics";
+  | "diagnostics"
+  | "escalations";
 
 export interface ToastMessage {
   id: string;
@@ -82,6 +83,18 @@ export interface PowerModeRun {
   done: boolean;
 }
 
+export interface Escalation {
+  id: string;
+  conversation_id: string;
+  triggered_at: string;
+  trigger_type: string;
+  trigger_detail: string;
+  model_input?: string;
+  proposed_action?: string | null;
+  decision?: string | null;
+  decided_at?: string | null;
+}
+
 export interface DockerStatusSnapshot {
   wsl_installed: boolean;
   docker_installed: boolean;
@@ -113,6 +126,9 @@ export interface AppState {
   dockerStatus: DockerStatusSnapshot | null;
   powerModeEnabled: boolean;
 
+  // Phase 5: Wiser-Human escalation queue
+  pendingEscalations: Escalation[];
+
   // Actions
   setActiveView: (v: ActiveView) => void;
   setStudioMode: (on: boolean) => void;
@@ -136,6 +152,11 @@ export interface AppState {
   setPowerModeMessage: (taskId: string, text: string) => void;
   setPowerModeError: (taskId: string, error: string) => void;
   endPowerModeRun: (taskId: string) => void;
+
+  // Escalation actions (Phase 5)
+  setPendingEscalations: (list: Escalation[]) => void;
+  addEscalation: (e: Escalation) => void;
+  removeEscalation: (id: string) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -152,6 +173,7 @@ export const useAppStore = create<AppState>()(
       powerModeRuns: {},
       dockerStatus: null,
       powerModeEnabled: false,
+      pendingEscalations: [],
 
       setActiveView: (v) => set({ activeView: v }),
       setStudioMode: (on) => set({ studioMode: on }),
@@ -289,6 +311,20 @@ export const useAppStore = create<AppState>()(
             },
           };
         }),
+      // ── Escalation actions (Phase 5) ──────────────────────────────────
+      setPendingEscalations: (list) => set({ pendingEscalations: list }),
+      addEscalation: (e) =>
+        set((state) => {
+          if (state.pendingEscalations.some((p) => p.id === e.id)) {
+            return state;
+          }
+          return { pendingEscalations: [...state.pendingEscalations, e] };
+        }),
+      removeEscalation: (id) =>
+        set((state) => ({
+          pendingEscalations: state.pendingEscalations.filter((p) => p.id !== id),
+        })),
+
       endPowerModeRun: (taskId) => {
         set((state) => {
           const run = state.powerModeRuns[taskId];

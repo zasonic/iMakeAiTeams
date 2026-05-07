@@ -131,6 +131,12 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     "sliding_window_risk_enabled":   (bool,  False),
     "sliding_window_risk_minutes":   (float, 10.0),
 
+    # Phase 5: Wiser-Human-style escalation channel. When the orchestrator
+    # detects a Lynch et al. trigger (replacement_threat, autonomy_reduction,
+    # goal_conflict) it pauses worker invocation and surfaces the action to
+    # the human for approval. Default on for new installs; user-toggleable.
+    "escalation_channel_enabled":    (bool,  True),
+
     # Agent / project
     "agent_project_root":            (str,   ""),
 

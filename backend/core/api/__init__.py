@@ -86,6 +86,7 @@ from .rag import RagAPI
 from .settings import SettingsAPI
 from .mcp import MCPAPI
 from .lifecycle import LifecycleAPI
+from .escalation import EscalationAPI
 
 
 class API:
@@ -206,6 +207,7 @@ class API:
         self._settings_api = SettingsAPI(self)
         self._mcp_api = MCPAPI(self)
         self._lifecycle_api = LifecycleAPI(self)
+        self._escalation_api = EscalationAPI(self)
 
     # ── Deferred initialization ───────────────────────────────────────────────
 
@@ -935,3 +937,14 @@ class API:
         return self._lifecycle_api.request_agent_shutdown_demo(
             target_id, requester_id, reason,
         )
+
+    # ── Escalation channel (Phase 5) ──────────────────────────────────────────
+
+    def list_pending_escalations(self):
+        return self._escalation_api.list_pending()
+
+    def approve_escalation(self, escalation_id):
+        return self._escalation_api.approve(escalation_id)
+
+    def deny_escalation(self, escalation_id):
+        return self._escalation_api.deny(escalation_id)
