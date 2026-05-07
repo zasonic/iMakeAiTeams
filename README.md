@@ -64,7 +64,9 @@ prompt engineering, MCP tool servers, security scanning, and diagnostics.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, architecture, and build instructions.
 
-See [QUICKSTART.md](QUICKSTART.md) for the developer quickstart using batch files.
+On Windows, double-click `Start.bat` to install prerequisites (first run) and
+launch the app with hot-reload. Run `dev\build-installer.bat` to produce the
+NSIS installer.
 
 ## License
 

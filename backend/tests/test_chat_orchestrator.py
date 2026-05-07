@@ -600,3 +600,39 @@ class TestReviewBugFixes:
         assert asst_count == 0 and tok_count == 0, (
             f"expected both rolled back; got asst={asst_count}, tok={tok_count}"
         )
+
+
+# ── MAST failure-mode tagging (Phase 4) ───────────────────────────────────────
+
+class TestMastFailureTagging:
+    def test_failed_turn_writes_non_null_mast_category(
+        self, in_memory_db, claude_client, local_client_unavailable, settings,
+    ):
+        """A turn that returns ``[Error: ...]`` from the worker must persist
+        a non-NULL mast_category on the router_log row."""
+        orch = _make_orchestrator(
+            in_memory_db, claude_client, local_client_unavailable,
+            settings, routing="claude",
+        )
+        conv_id = orch.create_conversation()
+
+        # Force the worker invocation to fail so HubRouter.invoke returns
+        # a "[Error: ...]" WorkerResult, which is the failure signal that
+        # the orchestrator routes through classify_failure().
+        claude_client.chat_multi_turn = MagicMock(
+            side_effect=RuntimeError("simulated worker failure"),
+        )
+        # Stub the classifier so the test does not depend on a live API.
+        orch.hub_router.classify_failure = MagicMock(return_value="3.2")
+
+        orch.send(conv_id, "please run a quick failure for me")
+
+        row = in_memory_db.fetchone(
+            "SELECT mast_category, had_error FROM router_log "
+            "WHERE conversation_id = ?",
+            (conv_id,),
+        )
+        assert row is not None
+        assert row["had_error"] == 1
+        assert row["mast_category"] == "3.2"
+        orch.hub_router.classify_failure.assert_called_once()

@@ -665,6 +665,11 @@ _MIGRATIONS = [
         )""",
         "CREATE INDEX IF NOT EXISTS idx_ap_agent ON agent_performance(agent_id)",
     ]),
+
+    # ── Phase 4: MAST failure-mode tagging on router_log ─────────────────────
+    ("phase4.mast_category", [
+        "ALTER TABLE router_log ADD COLUMN mast_category TEXT DEFAULT NULL",
+    ]),
 ]
 
 
