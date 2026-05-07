@@ -77,20 +77,37 @@ class RAGIndex:
             pass
         return self._semantic
 
-    # ── Index construction ────────────────────────────────────────────────────
+    # ── Index construction ────────────────────────────────────────────
 
     @staticmethod
     def _split_chunks(text: str, chunk_size: int = 800, overlap: int = 200) -> list[str]:
-        """Split text into overlapping character-level chunks."""
+        """Split text into overlapping chunks, snapping end boundaries to sentence ends.
+
+        Scans back up to min(100, chunk_size//4) characters from the target end
+        position to find the nearest sentence-ending character (.!?\\n). Chunks
+        that end on a sentence boundary retrieve more coherent context because the
+        LLM never sees a fragment starting or ending mid-sentence. Falls back to
+        the exact character boundary when no sentence end is found in the window
+        (identical behaviour to the previous fixed-size splitter).
+        """
+        _SENTENCE_ENDS = frozenset(".!?\n")
+        _SNAP_WINDOW = min(100, chunk_size // 4)
+
         chunks: list[str] = []
         start = 0
         length = len(text)
         while start < length:
             end = min(start + chunk_size, length)
+            if end < length:
+                snap_start = max(end - _SNAP_WINDOW, start + 1)
+                for i in range(end, snap_start - 1, -1):
+                    if text[i - 1] in _SENTENCE_ENDS:
+                        end = i
+                        break
             chunks.append(text[start:end])
-            if end == length:
+            if end >= length:
                 break
-            start = end - overlap
+            start = max(start + 1, end - overlap)
         return chunks
 
     def build_from_folder(
@@ -214,7 +231,7 @@ class RAGIndex:
         except Exception:
             return 0
 
-    # ── Search ────────────────────────────────────────────────────────────────
+    # ── Search ────────────────────────────────────────────────────
 
     def search(self, query: str, top_k: int = 5) -> list:
         """
