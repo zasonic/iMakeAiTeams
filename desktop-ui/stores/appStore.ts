@@ -22,10 +22,13 @@ export type ActiveView =
   | "diagnostics"
   | "escalations";
 
+export type ToastAction = "open_canary_alert";
+
 export interface ToastMessage {
   id: string;
   kind: "info" | "warn" | "error" | "success";
   text: string;
+  action?: ToastAction;
 }
 
 export interface ChatStreamState {
@@ -108,6 +111,12 @@ export interface PendingWrite {
   decided_at: string | null;
 }
 
+export interface CanaryAlert {
+  model_id: string;
+  mean_drift: number;
+  drifted_prompts: string[];
+}
+
 export interface DockerStatusSnapshot {
   wsl_installed: boolean;
   docker_installed: boolean;
@@ -145,6 +154,10 @@ export interface AppState {
   // Phase 5: MINJA-style memory write gate queue
   pendingMemoryWrites: PendingWrite[];
 
+  // Phase 5: Local-model behavior-drift canary alert (most recent only)
+  canaryAlert: CanaryAlert | null;
+  canaryAlertOpen: boolean;
+
   // Actions
   setActiveView: (v: ActiveView) => void;
   setStudioMode: (on: boolean) => void;
@@ -178,6 +191,10 @@ export interface AppState {
   setPendingMemoryWrites: (list: PendingWrite[]) => void;
   addPendingMemoryWrite: (w: PendingWrite) => void;
   removePendingMemoryWrite: (id: string) => void;
+
+  // Canary alert actions (Phase 5)
+  setCanaryAlert: (alert: CanaryAlert | null) => void;
+  setCanaryAlertOpen: (open: boolean) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -196,6 +213,8 @@ export const useAppStore = create<AppState>()(
       powerModeEnabled: false,
       pendingEscalations: [],
       pendingMemoryWrites: [],
+      canaryAlert: null,
+      canaryAlertOpen: false,
 
       setActiveView: (v) => set({ activeView: v }),
       setStudioMode: (on) => set({ studioMode: on }),
@@ -360,6 +379,14 @@ export const useAppStore = create<AppState>()(
         set((state) => ({
           pendingMemoryWrites: state.pendingMemoryWrites.filter((p) => p.id !== id),
         })),
+
+      // ── Canary alert actions (Phase 5) ───────────────────────────────
+      // Setting a fresh alert collapses the modal back to "closed" so we
+      // never auto-open over the user — the toast click is the explicit
+      // request to view details. Clearing the alert also closes the modal.
+      setCanaryAlert: (alert) =>
+        set({ canaryAlert: alert, canaryAlertOpen: false }),
+      setCanaryAlertOpen: (open) => set({ canaryAlertOpen: open }),
 
       endPowerModeRun: (taskId) => {
         set((state) => {

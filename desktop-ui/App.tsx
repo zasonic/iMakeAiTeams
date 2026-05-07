@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { Escalation, Memory, Settings, System, resetSidecarInfo } from "@/api/client";
 import { subscribeEvents } from "@/api/sse";
 import { AgentPanel } from "@/components/AgentPanel";
+import { CanaryAlertModal } from "@/components/CanaryAlertModal";
 import { ChatView } from "@/components/ChatView";
 import { DiagnosticsPanel } from "@/components/DiagnosticsPanel";
 import { EscalationModal } from "@/components/EscalationModal";
@@ -19,6 +20,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { StatusBar } from "@/components/StatusBar";
 import {
   useAppStore,
+  type CanaryAlert,
   type DockerStatusSnapshot,
   type Escalation as EscalationItem,
   type ExecutionStep,
@@ -53,6 +55,9 @@ export function App() {
   const removeEscalation = useAppStore((s) => s.removeEscalation);
   const setPendingMemoryWrites = useAppStore((s) => s.setPendingMemoryWrites);
   const addPendingMemoryWrite = useAppStore((s) => s.addPendingMemoryWrite);
+  const setCanaryAlert = useAppStore((s) => s.setCanaryAlert);
+  const setCanaryAlertOpen = useAppStore((s) => s.setCanaryAlertOpen);
+  const canaryAlertOpen = useAppStore((s) => s.canaryAlertOpen);
 
   // ── Sidecar status subscription ────────────────────────────────────────
   useEffect(() => {
@@ -235,6 +240,29 @@ export function App() {
             const evt = data as { escalation_id?: string };
             if (evt.escalation_id) removeEscalation(evt.escalation_id);
           },
+          // ── Phase 5: Local-model behavior-drift canary ───────────────
+          model_canary_alert: (data) => {
+            const evt = data as {
+              model_id?: string;
+              mean_drift?: number;
+              drifted_prompts?: string[];
+            };
+            if (!evt.model_id) return;
+            const alert: CanaryAlert = {
+              model_id: evt.model_id,
+              mean_drift:
+                typeof evt.mean_drift === "number" ? evt.mean_drift : 0,
+              drifted_prompts: Array.isArray(evt.drifted_prompts)
+                ? evt.drifted_prompts.slice(0, 3)
+                : [],
+            };
+            setCanaryAlert(alert);
+            pushToast({
+              kind: "warn",
+              text: "⚠ Model behavior changed unexpectedly. Click for details.",
+              action: "open_canary_alert",
+            });
+          },
           // ── Phase 5: MINJA-style memory write gate ───────────────────
           memory_review_required: (data) => {
             const evt = data as {
@@ -310,6 +338,7 @@ export function App() {
     addEscalation,
     removeEscalation,
     addPendingMemoryWrite,
+    setCanaryAlert,
     setSidecarStatus,
   ]);
 
@@ -377,6 +406,8 @@ export function App() {
 
       {activeEscalation && <EscalationModal escalation={activeEscalation} />}
 
+      {canaryAlertOpen && <CanaryAlertModal />}
+
       <div className="fixed bottom-4 right-4 flex flex-col gap-2 z-40">
         {toasts.map((t) => {
           const tone =
@@ -390,7 +421,12 @@ export function App() {
           return (
             <button
               key={t.id}
-              onClick={() => dismissToast(t.id)}
+              onClick={() => {
+                if (t.action === "open_canary_alert") {
+                  setCanaryAlertOpen(true);
+                }
+                dismissToast(t.id);
+              }}
               className={`max-w-sm text-left text-sm px-3 py-2 rounded-md border ${tone}`}
             >
               {t.text}

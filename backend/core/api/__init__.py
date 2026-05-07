@@ -958,3 +958,15 @@ class API:
 
     def deny_escalation(self, escalation_id):
         return self._escalation_api.deny(escalation_id)
+
+    # ── Behavior-drift canary (Phase 5) ──────────────────────────────────────
+
+    def canary_reset(self, model_id):
+        """Reset the canary baseline for ``model_id``; next load re-captures."""
+        from services import model_canary  # noqa: PLC0415
+        try:
+            deleted = model_canary.reset_baseline(str(model_id))
+            return {"ok": True, "deleted": deleted}
+        except Exception as exc:
+            self._log.warning("canary_reset(%s) failed: %s", model_id, exc)
+            return {"ok": False, "error": str(exc)}

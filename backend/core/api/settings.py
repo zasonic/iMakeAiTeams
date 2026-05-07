@@ -82,6 +82,11 @@ class SettingsAPI(BaseAPI):
                 input_sanitizer.set_firewall_enabled(bool(value))
             except Exception:
                 pass
+        if key == "default_local_model" and self._local is not None and value:
+            try:
+                self._local.signal_model_loaded(str(value))
+            except Exception:
+                pass
 
     def set_setting(self, key: str, value: Any) -> dict:
         self._settings.set(key, value)
@@ -99,6 +104,11 @@ class SettingsAPI(BaseAPI):
         if key == "firewall_enabled":
             try:
                 input_sanitizer.set_firewall_enabled(bool(value))
+            except Exception:
+                pass
+        if key == "default_local_model" and self._local is not None and value:
+            try:
+                self._local.signal_model_loaded(str(value))
             except Exception:
                 pass
         return {"ok": True}

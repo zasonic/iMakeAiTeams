@@ -111,3 +111,8 @@ async def security_scan_log(
 async def open_url(body: OpenUrlIn, request: Request) -> dict:
     get_api(request).open_url(body.url)
     return {"ok": True}
+
+
+@router.post("/canary/reset/{model_id:path}")
+async def canary_reset(model_id: str, request: Request) -> dict:
+    return get_api(request).canary_reset(model_id)

@@ -97,10 +97,14 @@ class LocalClient(LLMClient):
           model id; ``fallback_reason`` is a plain-English notice the UI can
           display verbatim.
         - On no backend reachable: empty ``model_id`` and a plain-English reason.
+
+        Whenever a non-empty ``model_id`` is identified (detected or fallback)
+        this fires the Phase 5 behavior-drift canary in a daemon thread.
         """
         models = self.list_models_detailed(backend)
         for m in models:
             if _QWEN3_30B_A3B_ID.search(str(m.get("id", ""))):
+                self.signal_model_loaded(m["id"])
                 return {
                     "detected":        True,
                     "model_id":        m["id"],
@@ -116,6 +120,7 @@ class LocalClient(LLMClient):
                 ),
             }
         fallback = models[0]["id"]
+        self.signal_model_loaded(fallback)
         return {
             "detected":        False,
             "model_id":        fallback,
@@ -125,6 +130,21 @@ class LocalClient(LLMClient):
                 "Qwen3-30B-A3B GGUF in LM Studio for the recommended setup."
             ),
         }
+
+    def signal_model_loaded(self, model_id: str) -> None:
+        """Notify the behavior-drift canary that ``model_id`` has been loaded.
+
+        Best-effort: any failure (including a missing canary module on a
+        partial install) is swallowed at warning level so the local-model
+        load path can never raise into the request handler.
+        """
+        if not model_id:
+            return
+        try:
+            from services import model_canary  # noqa: PLC0415
+            model_canary.signal_model_loaded(self, model_id, self._settings)
+        except Exception as exc:
+            log.warning("signal_model_loaded(%s) failed: %s", model_id, exc)
 
     def chat(self, system: str, user_message: str, model: str | None = None,
              max_tokens: int = 2048) -> str:
