@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from core.service_guard import requires as _requires
 
+from services import memory as _memory_svc
 from services import semantic_search
 
 from ._base import BaseAPI
@@ -42,3 +43,14 @@ class MemoryAPI(BaseAPI):
         """Delete a specific memory entry from both SQLite and ChromaDB."""
         ok = semantic_search.delete_memory_entry(entry_id)
         return {"ok": ok}
+
+    # ── MINJA-style memory injection gate (Phase 5) ──────────────────────────
+
+    def list_pending_writes(self, limit: int = 100) -> list:
+        return _memory_svc.list_pending_writes(limit)
+
+    def approve_pending_write(self, pending_id: str) -> dict:
+        return _memory_svc.approve_pending_write(pending_id)
+
+    def deny_pending_write(self, pending_id: str) -> dict:
+        return _memory_svc.deny_pending_write(pending_id)

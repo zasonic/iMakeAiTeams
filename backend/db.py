@@ -686,6 +686,22 @@ _MIGRATIONS = [
         )""",
         "CREATE INDEX IF NOT EXISTS idx_escalations_conv ON escalations(conversation_id)",
     ]),
+
+    # ── Phase 5: MINJA-style memory injection gate ───────────────────────────
+    ("phase5.pending_writes", [
+        """CREATE TABLE IF NOT EXISTS pending_writes (
+            id                  TEXT PRIMARY KEY,
+            conversation_id     TEXT,
+            write_type          TEXT NOT NULL,
+            content             TEXT NOT NULL,
+            contradicts_id      TEXT,
+            contradicts_content TEXT,
+            proposed_at         TEXT NOT NULL,
+            decision            TEXT,
+            decided_at          TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_pending_writes_conv ON pending_writes(conversation_id)",
+    ]),
 ]
 
 

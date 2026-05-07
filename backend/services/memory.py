@@ -42,6 +42,11 @@ from services.prompt_library import get_active_prompt
 from services.redact import redact
 from services.security_engine import validate_fact_for_storage, MAX_FACTS_PER_CONVERSATION
 
+try:
+    import sse_events as _sse_events
+except ImportError:
+    _sse_events = None
+
 log = logging.getLogger("iMakeAiTeams.memory")
 
 SIMILARITY_THRESHOLD = 0.5
@@ -298,13 +303,250 @@ def get_pending_count() -> int:
         return 0
 
 
+# ── MemoryWriteGate (MINJA defense) ──────────────────────────────────────────
+#
+# MINJA (https://arxiv.org/abs/2503.03704) demonstrates a 95%+ success rate at
+# poisoning agent memory through query-only conversations: each turn nudges the
+# model into recording a fact that contradicts what's already there. The gate
+# runs a shadow consistency check on every newly extracted fact and routes
+# contradictions to a user-approval queue. Auto-extracted facts that don't
+# contradict existing memory go through unchanged, so the gate adds zero
+# friction for benign conversations.
+#
+# Fail-open by design: any error in the local-model consistency check is
+# treated as "consistent". The gate's purpose is detecting the injection
+# pattern, not enforcing strict logical consistency.
+
+_GATE_SYSTEM_PROMPT = (
+    "Does the new fact contradict any of these existing facts? "
+    "Reply ONLY with JSON {contradicts: bool, id: str or null, reason: str}"
+)
+
+
+class MemoryWriteGate:
+    def __init__(self, local_client, settings=None):
+        self.local_client = local_client
+        self._settings = settings
+
+    def is_enabled(self) -> bool:
+        if self._settings is None:
+            return True
+        try:
+            return bool(self._settings.get("memory_write_gate_enabled", True))
+        except Exception:
+            return True
+
+    def shadow_consistency_check(
+        self, new_fact: str, existing_facts: list[dict]
+    ) -> tuple[bool, str | None, str]:
+        """
+        Best-effort consistency check via the local model. On any failure or
+        when the local model is unavailable, treat as consistent (fail-open).
+        Returns (is_consistent, contradicting_id_or_None, reason).
+        """
+        if not new_fact or not existing_facts:
+            return (True, None, "")
+        if not self.local_client or not self.local_client.is_available():
+            return (True, None, "")
+        try:
+            existing_payload = json.dumps([
+                {"id": str(f.get("id", "")), "fact": str(f.get("fact", ""))}
+                for f in existing_facts
+            ])
+            user_prompt = (
+                f"New fact: {new_fact}\n\nExisting facts: {existing_payload}"
+            )
+            raw = self.local_client.chat(
+                _GATE_SYSTEM_PROMPT, user_prompt, max_tokens=200,
+            )
+            text = (raw or "").strip()
+            if text.startswith("```"):
+                parts = text.split("```")
+                text = parts[1] if len(parts) > 1 else text
+                if text.startswith("json"):
+                    text = text[4:]
+                text = text.strip()
+            parsed = json.loads(text)
+            contradicts = bool(parsed.get("contradicts"))
+            if not contradicts:
+                return (True, None, "")
+            cid_raw = parsed.get("id")
+            cid = str(cid_raw) if cid_raw else None
+            reason = str(parsed.get("reason", ""))
+            return (False, cid, reason)
+        except Exception as exc:
+            log.debug("shadow_consistency_check failed (fail-open): %s", exc)
+            return (True, None, "")
+
+    def gate_fact_write(self, conversation_id: str, fact: str) -> str:
+        """
+        Route a fact through the consistency check.
+        Returns "accepted" when the gate is bypassed or the fact is consistent;
+        returns "pending_review" after writing a pending_writes row and emitting
+        the memory_review_required SSE event.
+        """
+        if not self.is_enabled():
+            return "accepted"
+        try:
+            rows = _db.fetchall(
+                "SELECT id, fact FROM session_facts WHERE conversation_id = ? "
+                "AND (status = 'confirmed' OR status IS NULL OR status = 'pending')",
+                (conversation_id,),
+            )
+        except Exception as exc:
+            log.debug("gate_fact_write: existing-fact lookup failed: %s", exc)
+            return "accepted"
+        if not rows:
+            return "accepted"
+        existing = [{"id": r["id"], "fact": r["fact"]} for r in rows]
+        is_consistent, contradicts_id, reason = self.shadow_consistency_check(
+            fact, existing,
+        )
+        if is_consistent:
+            return "accepted"
+
+        contradicts_content = None
+        if contradicts_id:
+            for e in existing:
+                if e["id"] == contradicts_id:
+                    contradicts_content = e["fact"]
+                    break
+
+        pending_id = str(uuid.uuid4())
+        proposed_at = datetime.now(timezone.utc).isoformat()
+        try:
+            _db.execute(
+                "INSERT INTO pending_writes "
+                "(id, conversation_id, write_type, content, "
+                "contradicts_id, contradicts_content, proposed_at) "
+                "VALUES (?, ?, 'fact', ?, ?, ?, ?)",
+                (pending_id, conversation_id, fact,
+                 contradicts_id, contradicts_content, proposed_at),
+            )
+            _db.commit()
+        except Exception as exc:
+            log.warning("pending_writes insert failed: %s", exc)
+            return "accepted"
+
+        if _sse_events is not None:
+            try:
+                _sse_events.publish("memory_review_required", {
+                    "id": pending_id,
+                    "conversation_id": conversation_id,
+                    "write_type": "fact",
+                    "content": fact,
+                    "contradicts_id": contradicts_id,
+                    "contradicts_content": contradicts_content,
+                    "reason": reason,
+                })
+            except Exception as exc:
+                log.debug("memory_review_required emit failed: %s", exc)
+
+        log.info(
+            "MemoryWriteGate: contradiction detected — fact routed to "
+            "pending_writes (id=%s, contradicts=%s)",
+            pending_id[:8], (contradicts_id or "")[:8],
+        )
+        return "pending_review"
+
+
+# ── Pending-writes CRUD (called from core/api/memory.py) ─────────────────────
+
+def list_pending_writes(limit: int = 100) -> list[dict]:
+    """Return undecided pending_writes rows for the Memory Review panel."""
+    try:
+        rows = _db.fetchall(
+            "SELECT id, conversation_id, write_type, content, "
+            "contradicts_id, contradicts_content, proposed_at, "
+            "decision, decided_at "
+            "FROM pending_writes WHERE decision IS NULL "
+            "ORDER BY proposed_at DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        log.warning("list_pending_writes failed: %s", exc)
+        return []
+
+
+def approve_pending_write(pending_id: str) -> dict:
+    """Accept a pending fact: INSERT into session_facts, mark approved."""
+    row = _db.fetchone(
+        "SELECT id, conversation_id, write_type, content, decision "
+        "FROM pending_writes WHERE id = ?",
+        (pending_id,),
+    )
+    if row is None:
+        return {"ok": False, "error": "pending_write not found"}
+    if row["decision"] is not None:
+        return {
+            "ok": False,
+            "error": f"already {row['decision']}",
+            "decision": row["decision"],
+        }
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with _db.transaction() as conn:
+            if row["write_type"] == "fact":
+                conn.execute(
+                    "INSERT INTO session_facts "
+                    "(id, conversation_id, fact, source, status, created_at) "
+                    "VALUES (?, ?, ?, 'auto', 'confirmed', ?)",
+                    (str(uuid.uuid4()), row["conversation_id"], row["content"], now),
+                )
+            elif row["write_type"] == "memory":
+                conn.execute(
+                    "INSERT INTO memory_entries "
+                    "(id, content, category, source, embedding_status, "
+                    "created_at, last_accessed) "
+                    "VALUES (?, ?, 'fact', 'auto', 'dirty', ?, ?)",
+                    (str(uuid.uuid4()), row["content"], now, now),
+                )
+            conn.execute(
+                "UPDATE pending_writes SET decision='approved', decided_at=? "
+                "WHERE id=?",
+                (now, pending_id),
+            )
+    except Exception as exc:
+        log.warning("approve_pending_write failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "id": pending_id, "decision": "approved"}
+
+
+def deny_pending_write(pending_id: str) -> dict:
+    """Reject a pending fact: mark denied, do NOT insert into session_facts."""
+    row = _db.fetchone(
+        "SELECT decision FROM pending_writes WHERE id = ?", (pending_id,),
+    )
+    if row is None:
+        return {"ok": False, "error": "pending_write not found"}
+    if row["decision"] is not None:
+        return {
+            "ok": False,
+            "error": f"already {row['decision']}",
+            "decision": row["decision"],
+        }
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        _db.execute(
+            "UPDATE pending_writes SET decision='denied', decided_at=? WHERE id=?",
+            (now, pending_id),
+        )
+        _db.commit()
+    except Exception as exc:
+        log.warning("deny_pending_write failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "id": pending_id, "decision": "denied"}
+
+
 # ── MemoryManager ─────────────────────────────────────────────────────────────
 
 class MemoryManager:
-    def __init__(self, rag_index, semantic_search_mod, local_client):
+    def __init__(self, rag_index, semantic_search_mod, local_client, settings=None):
         self.rag      = rag_index
         self.semantic = semantic_search_mod
         self.local    = local_client
+        self.write_gate = MemoryWriteGate(local_client, settings)
         self._buffers:   dict[str, deque]         = {}
         self._histories: dict[str, SessionHistory] = {}
 
@@ -582,6 +824,10 @@ class MemoryManager:
                 if scan.get("verdict") == "warn":
                     _write_to_pending_review(fact_clean, "session_fact", conversation_id, scan)
                     log.info("Trust scan: warn verdict — fact routed to pending_review: %r", fact_clean[:60])
+                    continue
+
+                # ── Phase 5: MINJA-style write gate (consistency check) ──────
+                if self.write_gate.gate_fact_write(conversation_id, fact_clean) == "pending_review":
                     continue
 
                 _db.execute(

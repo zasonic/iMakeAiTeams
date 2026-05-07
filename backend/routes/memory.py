@@ -56,3 +56,18 @@ async def stale(request: Request, days: int = 30) -> list:
 @router.post("/delete/{entry_id}")
 async def delete_entry(entry_id: str, request: Request) -> dict:
     return get_api(request).delete_memory_entry(entry_id)
+
+
+@router.get("/pending")
+async def list_pending(request: Request, limit: int = 100) -> list:
+    return get_api(request).list_pending_writes(limit)
+
+
+@router.post("/pending/{pending_id}/approve")
+async def approve_pending(pending_id: str, request: Request) -> dict:
+    return get_api(request).approve_pending_write(pending_id)
+
+
+@router.post("/pending/{pending_id}/deny")
+async def deny_pending(pending_id: str, request: Request) -> dict:
+    return get_api(request).deny_pending_write(pending_id)

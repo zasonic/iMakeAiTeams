@@ -14,6 +14,7 @@ export type ActiveView =
   | "agents"
   | "rag"
   | "memory"
+  | "memory_review"
   | "prompts"
   | "mcp"
   | "security"
@@ -95,6 +96,18 @@ export interface Escalation {
   decided_at?: string | null;
 }
 
+export interface PendingWrite {
+  id: string;
+  conversation_id: string | null;
+  write_type: string;
+  content: string;
+  contradicts_id: string | null;
+  contradicts_content: string | null;
+  proposed_at: string;
+  decision: string | null;
+  decided_at: string | null;
+}
+
 export interface DockerStatusSnapshot {
   wsl_installed: boolean;
   docker_installed: boolean;
@@ -129,6 +142,9 @@ export interface AppState {
   // Phase 5: Wiser-Human escalation queue
   pendingEscalations: Escalation[];
 
+  // Phase 5: MINJA-style memory write gate queue
+  pendingMemoryWrites: PendingWrite[];
+
   // Actions
   setActiveView: (v: ActiveView) => void;
   setStudioMode: (on: boolean) => void;
@@ -157,6 +173,11 @@ export interface AppState {
   setPendingEscalations: (list: Escalation[]) => void;
   addEscalation: (e: Escalation) => void;
   removeEscalation: (id: string) => void;
+
+  // Memory write gate actions (Phase 5)
+  setPendingMemoryWrites: (list: PendingWrite[]) => void;
+  addPendingMemoryWrite: (w: PendingWrite) => void;
+  removePendingMemoryWrite: (id: string) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -174,6 +195,7 @@ export const useAppStore = create<AppState>()(
       dockerStatus: null,
       powerModeEnabled: false,
       pendingEscalations: [],
+      pendingMemoryWrites: [],
 
       setActiveView: (v) => set({ activeView: v }),
       setStudioMode: (on) => set({ studioMode: on }),
@@ -323,6 +345,20 @@ export const useAppStore = create<AppState>()(
       removeEscalation: (id) =>
         set((state) => ({
           pendingEscalations: state.pendingEscalations.filter((p) => p.id !== id),
+        })),
+
+      // ── Memory write gate actions (Phase 5) ──────────────────────────
+      setPendingMemoryWrites: (list) => set({ pendingMemoryWrites: list }),
+      addPendingMemoryWrite: (w) =>
+        set((state) => {
+          if (state.pendingMemoryWrites.some((p) => p.id === w.id)) {
+            return state;
+          }
+          return { pendingMemoryWrites: [...state.pendingMemoryWrites, w] };
+        }),
+      removePendingMemoryWrite: (id) =>
+        set((state) => ({
+          pendingMemoryWrites: state.pendingMemoryWrites.filter((p) => p.id !== id),
         })),
 
       endPowerModeRun: (taskId) => {

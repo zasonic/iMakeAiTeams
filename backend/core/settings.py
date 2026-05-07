@@ -95,6 +95,7 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     # Memory
     "memory_similarity_threshold": (float, 0.5),
     "memory_history_cap":          (int,   40),
+    "memory_write_gate_enabled":   (bool,  True),
 
     # Health / diagnostics
     "health_check_enabled":        (bool,  True),

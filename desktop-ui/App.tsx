@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import { Escalation, Settings, System, resetSidecarInfo } from "@/api/client";
+import { Escalation, Memory, Settings, System, resetSidecarInfo } from "@/api/client";
 import { subscribeEvents } from "@/api/sse";
 import { AgentPanel } from "@/components/AgentPanel";
 import { ChatView } from "@/components/ChatView";
@@ -10,6 +10,7 @@ import { EscalationPanel } from "@/components/EscalationPanel";
 import { FirstRunWizard } from "@/components/FirstRunWizard";
 import { McpPanel } from "@/components/McpPanel";
 import { MemoryPanel } from "@/components/MemoryPanel";
+import { MemoryReviewPanel } from "@/components/MemoryReviewPanel";
 import { PromptPanel } from "@/components/PromptPanel";
 import { RagPanel } from "@/components/RagPanel";
 import { SecurityPanel } from "@/components/SecurityPanel";
@@ -22,6 +23,7 @@ import {
   type Escalation as EscalationItem,
   type ExecutionStep,
   type ExecutionStepKind,
+  type PendingWrite,
 } from "@/stores/appStore";
 
 export function App() {
@@ -49,6 +51,8 @@ export function App() {
   const setPendingEscalations = useAppStore((s) => s.setPendingEscalations);
   const addEscalation = useAppStore((s) => s.addEscalation);
   const removeEscalation = useAppStore((s) => s.removeEscalation);
+  const setPendingMemoryWrites = useAppStore((s) => s.setPendingMemoryWrites);
+  const addPendingMemoryWrite = useAppStore((s) => s.addPendingMemoryWrite);
 
   // ── Sidecar status subscription ────────────────────────────────────────
   useEffect(() => {
@@ -231,6 +235,30 @@ export function App() {
             const evt = data as { escalation_id?: string };
             if (evt.escalation_id) removeEscalation(evt.escalation_id);
           },
+          // ── Phase 5: MINJA-style memory write gate ───────────────────
+          memory_review_required: (data) => {
+            const evt = data as {
+              id?: string;
+              conversation_id?: string;
+              write_type?: string;
+              content?: string;
+              contradicts_id?: string | null;
+              contradicts_content?: string | null;
+            };
+            if (!evt.id) return;
+            const item: PendingWrite = {
+              id: evt.id,
+              conversation_id: evt.conversation_id ?? null,
+              write_type: evt.write_type ?? "fact",
+              content: evt.content ?? "",
+              contradicts_id: evt.contradicts_id ?? null,
+              contradicts_content: evt.contradicts_content ?? null,
+              proposed_at: new Date().toISOString(),
+              decision: null,
+              decided_at: null,
+            };
+            addPendingMemoryWrite(item);
+          },
         },
         onError: (_err, { closed }) => {
           // EventSource handles transient blips on its own. Only act when
@@ -281,6 +309,7 @@ export function App() {
     endPowerModeRun,
     addEscalation,
     removeEscalation,
+    addPendingMemoryWrite,
     setSidecarStatus,
   ]);
 
@@ -293,6 +322,16 @@ export function App() {
       })
       .catch(() => {});
   }, [sidecarStatus, setPendingEscalations]);
+
+  // ── Pending memory writes: hydrate on backend-ready ────────────────────
+  useEffect(() => {
+    if (sidecarStatus?.status !== "ready") return;
+    Memory.pending()
+      .then((rows) => {
+        setPendingMemoryWrites(rows as PendingWrite[]);
+      })
+      .catch(() => {});
+  }, [sidecarStatus, setPendingMemoryWrites]);
 
   // ── First-run check ────────────────────────────────────────────────────
   useEffect(() => {
@@ -322,6 +361,7 @@ export function App() {
           {view === "agents" && <AgentPanel />}
           {view === "rag" && <RagPanel />}
           {view === "memory" && <MemoryPanel />}
+          {view === "memory_review" && <MemoryReviewPanel />}
           {view === "prompts" && <PromptPanel />}
           {view === "mcp" && <McpPanel />}
           {view === "security" && <SecurityPanel />}

@@ -200,6 +200,18 @@ export const Agents = {
     api.post<unknown>("/api/agents/duplicate", { agent_id, new_name }),
 };
 
+export interface PendingWriteRow {
+  id: string;
+  conversation_id: string | null;
+  write_type: string;
+  content: string;
+  contradicts_id: string | null;
+  contradicts_content: string | null;
+  proposed_at: string;
+  decision: string | null;
+  decided_at: string | null;
+}
+
 export const Memory = {
   save: (content: string, category = "fact") =>
     api.post<unknown>("/api/memory/save", { content, category }),
@@ -208,6 +220,16 @@ export const Memory = {
   searchDocuments: (query: string, top_k = 10, doc_type = "") =>
     api.post<unknown[]>("/api/memory/search_documents", { query, top_k, doc_type }),
   semanticAvailable: () => api.get<{ available: boolean }>("/api/memory/semantic_available"),
+  pending: (limit = 100) =>
+    api.get<PendingWriteRow[]>("/api/memory/pending", { limit }),
+  approvePending: (id: string) =>
+    api.post<{ ok: boolean; decision?: string; error?: string }>(
+      `/api/memory/pending/${encodeURIComponent(id)}/approve`,
+    ),
+  denyPending: (id: string) =>
+    api.post<{ ok: boolean; decision?: string; error?: string }>(
+      `/api/memory/pending/${encodeURIComponent(id)}/deny`,
+    ),
 };
 
 export const Rag = {
