@@ -1,5 +1,5 @@
 """
-services/claude_client.py
+backend/services/claude_client.py
 
 Sole wrapper around the Anthropic SDK.
 
@@ -31,6 +31,18 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — Extended thinking max_tokens safety + interleaved thinking:
+  - extended_thinking_chat() and stream_extended_thinking_chat() accept an
+    optional max_tokens parameter. When omitted, max_tokens is auto-sized to
+    max(16000, budget_tokens + 4096) so answer tokens are never squeezed out
+    by a large thinking budget (the previous hardcoded 16000 left only ~1000
+    response tokens when budget_tokens was ~15000).
+  - call_with_tools() gains optional enable_thinking / thinking_budget
+    parameters. When enable_thinking=True, interleaved thinking is requested
+    via the anthropic-beta header, letting Claude reason between tool calls
+    for more accurate multi-step agent work. Falls back to standard tool use
+    on any API error so existing pipelines are never interrupted.
 """
 
 from pathlib import Path
@@ -52,6 +64,7 @@ class ClaudeClient(LLMClient):
       - Streaming multi-turn with usage tracking
       - Chat with a previously uploaded file (document source)
       - Extended thinking chat
+      - Tool use with optional interleaved thinking
     """
 
     def __init__(self, api_key: str, model: str, use_caching: bool = True):
@@ -60,7 +73,7 @@ class ClaudeClient(LLMClient):
         self._use_caching = use_caching
         self._file_cache: dict[str, str] = {}  # file_path -> file_id
 
-    # ── Configuration ────────────────────────────────────────────────────────────
+    # ── Configuration ─────────────────────────────────────────────────────────────────────────────
 
     def update_config(
         self,
@@ -75,7 +88,7 @@ class ClaudeClient(LLMClient):
         if use_caching is not None:
             self._use_caching = use_caching
 
-    # ── Content helpers ──────────────────────────────────────────────────────────
+    # ── Content helpers ────────────────────────────────────────────────────────────────────────
 
     def _build_content(self, project_summary: str, user_message: str) -> list:
         """
@@ -119,7 +132,7 @@ class ClaudeClient(LLMClient):
             return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         return system
 
-    # ── Single-turn chat ─────────────────────────────────────────────────────────
+    # ── Single-turn chat ───────────────────────────────────────────────────────────────────────
 
     def chat(self, system: str, project_summary: str, user_message: str,
              max_tokens: int = 4096) -> str:
@@ -134,7 +147,7 @@ class ClaudeClient(LLMClient):
         response = self._client.messages.create(**kwargs)
         return response.content[0].text
 
-    # ── Single-turn streaming ────────────────────────────────────────────────────
+    # ── Single-turn streaming ────────────────────────────────────────────────────────────────────
 
     def stream_chat(
         self,
@@ -162,7 +175,7 @@ class ClaudeClient(LLMClient):
                 full_text += token
         return full_text
 
-    # ── Multi-turn chat ──────────────────────────────────────────────────────────
+    # ── Multi-turn chat ────────────────────────────────────────────────────────────────────────
 
     def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096) -> dict:
         """
@@ -229,7 +242,7 @@ class ClaudeClient(LLMClient):
                 pass  # usage unavailable — caller handles gracefully
         return full_text, usage
 
-    # ── LLMClient interface ─────────────────────────────────────────────────
+    # ── LLMClient interface ──────────────────────────────────────────────────────────────────
 
     def chat_unified(self, system, messages, max_tokens=4096):
         result = self.chat_multi_turn(system, messages, max_tokens=max_tokens)
@@ -253,7 +266,7 @@ class ClaudeClient(LLMClient):
     def client_name(self) -> str:
         return self._model
 
-    # ── Tool use (agentic loop) ──────────────────────────────────────────────────
+    # ── Tool use (agentic loop) ──────────────────────────────────────────────────────────────────
 
     def call_with_tools(
         self,
@@ -261,6 +274,8 @@ class ClaudeClient(LLMClient):
         messages: list,
         tools: list,
         max_tokens: int = 8192,
+        enable_thinking: bool = False,
+        thinking_budget: int = 5000,
     ) -> dict:
         """
         Call the Messages API with tool definitions.
@@ -268,15 +283,42 @@ class ClaudeClient(LLMClient):
           {"content": [...], "stop_reason": "end_turn"|"tool_use", ...}
         Each content block is {"type":"text","text":...} or
         {"type":"tool_use","id":..."name":..."input":...}.
+
+        When enable_thinking=True, interleaved thinking is requested via the
+        anthropic-beta header (Anthropic, 2025-05-14). This allows Claude to
+        reason between tool calls, producing more accurate decisions in
+        multi-step agent loops. Thinking blocks are included in the returned
+        content list as {"type": "thinking", "thinking": "..."} so the
+        orchestrator can log or display them.
+
+        Falls back to standard tool use on any API error so existing pipelines
+        are never interrupted.
         """
-        kwargs = {
+        _max_tokens = max(max_tokens, thinking_budget + 4096) if enable_thinking else max_tokens
+        kwargs: dict = {
             "model": self._model,
-            "max_tokens": max_tokens,
+            "max_tokens": _max_tokens,
             "system": self._build_system_with_cache(system),
             "messages": messages,
             "tools": tools,
         }
-        response = self._client.messages.create(**kwargs)
+        if enable_thinking:
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+            kwargs["extra_headers"] = {"anthropic-beta": "interleaved-thinking-2025-05-14"}
+
+        try:
+            response = self._client.messages.create(**kwargs)
+        except Exception:
+            if enable_thinking:
+                # Beta header not accepted — retry without thinking so the
+                # agent loop still completes rather than raising to the user.
+                kwargs.pop("thinking", None)
+                kwargs.pop("extra_headers", None)
+                kwargs["max_tokens"] = max_tokens
+                response = self._client.messages.create(**kwargs)
+            else:
+                raise
+
         content = []
         for block in response.content:
             if block.type == "text":
@@ -288,6 +330,13 @@ class ClaudeClient(LLMClient):
                     "name": block.name,
                     "input": block.input,
                 })
+            elif block.type == "thinking":
+                # Preserve thinking blocks so the orchestrator can log or
+                # surface them to the UI reasoning timeline.
+                content.append({
+                    "type": "thinking",
+                    "thinking": getattr(block, "thinking", ""),
+                })
         return {
             "content": content,
             "stop_reason": response.stop_reason,
@@ -297,7 +346,7 @@ class ClaudeClient(LLMClient):
             },
         }
 
-    # ── File upload ──────────────────────────────────────────────────────────────
+    # ── File upload ─────────────────────────────────────────────────────────────────────────────
 
     def upload_file(self, file_path: Path, mime_type: str) -> str:
         """
@@ -315,7 +364,7 @@ class ClaudeClient(LLMClient):
         self._file_cache[key] = file_id
         return file_id
 
-    # ── Chat with uploaded file ──────────────────────────────────────────────────
+    # ── Chat with uploaded file ────────────────────────────────────────────────────────────────────
 
     def chat_with_file(self, system: str, file_id: str, user_message: str) -> str:
         """
@@ -336,7 +385,7 @@ class ClaudeClient(LLMClient):
         )
         return response.content[0].text
 
-    # ── Extended thinking ────────────────────────────────────────────────────────
+    # ── Extended thinking ────────────────────────────────────────────────────────────────────────
 
     def extended_thinking_chat(
         self,
@@ -344,15 +393,22 @@ class ClaudeClient(LLMClient):
         user_message: str,
         budget_tokens: int = 10000,
         model: str | None = None,
+        max_tokens: int | None = None,
     ) -> dict:
         """
         Run a chat with extended thinking enabled.
         Returns a dict with keys "thinking" and "answer".
+
+        max_tokens: when None, auto-sized to max(16000, budget_tokens + 4096).
+        This prevents the answer from being truncated when a large thinking
+        budget is used — e.g. budget_tokens=14000 previously left only 2000
+        tokens for the actual response.
         """
         thinking_model = model or self._model
+        _max_tokens = max_tokens if max_tokens is not None else max(16000, budget_tokens + 4096)
         response = self._client.messages.create(
             model=thinking_model,
-            max_tokens=16000,
+            max_tokens=_max_tokens,
             system=system,
             thinking={
                 "type": "enabled",
@@ -369,7 +425,7 @@ class ClaudeClient(LLMClient):
                 answer_text = block.text
         return {"thinking": thinking_text, "answer": answer_text}
 
-    # ── Streaming extended thinking ──────────────────────────────────────────────
+    # ── Streaming extended thinking ──────────────────────────────────────────────────────────────────
 
     def stream_extended_thinking_chat(
         self,
@@ -379,6 +435,7 @@ class ClaudeClient(LLMClient):
         model: str | None = None,
         on_thinking_token: Callable[[str], None] | None = None,
         on_text_token: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
     ) -> dict:
         """
         Stream an extended-thinking chat, dispatching reasoning and answer
@@ -398,6 +455,9 @@ class ClaudeClient(LLMClient):
             result dict but no per-chunk dispatch happens.
         on_text_token
             Optional callback invoked with each answer-text-delta string.
+        max_tokens
+            When None, auto-sized to max(16000, budget_tokens + 4096) so
+            the answer is never truncated by a large thinking budget.
 
         Returns
         -------
@@ -411,13 +471,14 @@ class ClaudeClient(LLMClient):
         gracefully rather than hard-fail.
         """
         thinking_model = model or self._model
+        _max_tokens = max_tokens if max_tokens is not None else max(16000, budget_tokens + 4096)
 
         try:
             thinking_text = ""
             answer_text = ""
             with self._client.messages.stream(
                 model=thinking_model,
-                max_tokens=16000,
+                max_tokens=_max_tokens,
                 system=system,
                 thinking={
                     "type": "enabled",
@@ -454,4 +515,5 @@ class ClaudeClient(LLMClient):
                 user_message=user_message,
                 budget_tokens=budget_tokens,
                 model=model,
+                max_tokens=max_tokens,
             )
