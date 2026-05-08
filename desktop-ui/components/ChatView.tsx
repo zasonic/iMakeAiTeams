@@ -13,6 +13,7 @@ import {
 
 import { Chat, Docker, Settings } from "@/api/client";
 import { ExecutionCard } from "@/components/ExecutionCard";
+import { MessageRenderer } from "@/components/MessageRenderer";
 import { useAppStore, type PowerModeRun } from "@/stores/appStore";
 
 interface ConversationRow {
@@ -517,9 +518,9 @@ function ChatListRow({ index, style, data }: ListChildComponentProps<ChatRowData
           <div
             aria-live="polite"
             aria-atomic="false"
-            className="max-w-[80%] rounded-xl px-4 py-2 text-sm whitespace-pre-wrap bg-bg-2 text-ink border border-line"
+            className="max-w-[80%] rounded-xl px-4 py-2 text-sm bg-bg-2 text-ink border border-line"
           >
-            {item.buffer}
+            <MessageRenderer content={item.buffer} role="assistant" />
             <span
               role="status"
               aria-label="Assistant is thinking"
@@ -532,62 +533,16 @@ function ChatListRow({ index, style, data }: ListChildComponentProps<ChatRowData
   );
 }
 
-// Regex to find markdown images: ![alt](url) where url is a data URI or http(s)
-const MD_IMAGE_RE = /!\[([^\]]*)\]\((data:image\/[^)]+|https?:\/\/[^)]+)\)/g;
-
-function MessageContent({ text }: { text: string }) {
-  // Fast path: no images detected, render plain text (preserves existing behavior)
-  if (!MD_IMAGE_RE.test(text)) {
-    return <>{text}</>;
-  }
-
-  // Reset regex state after .test()
-  MD_IMAGE_RE.lastIndex = 0;
-
-  const parts: (string | { alt: string; src: string })[] = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = MD_IMAGE_RE.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push(text.slice(lastIndex, match.index));
-    }
-    parts.push({ alt: match[1], src: match[2] });
-    lastIndex = MD_IMAGE_RE.lastIndex;
-  }
-  if (lastIndex < text.length) {
-    parts.push(text.slice(lastIndex));
-  }
-
-  return (
-    <>
-      {parts.map((part, i) =>
-        typeof part === "string" ? (
-          <span key={i}>{part}</span>
-        ) : (
-          <img
-            key={i}
-            src={part.src}
-            alt={part.alt || "Generated visualization"}
-            className="max-w-full rounded-md border border-line my-2"
-            loading="lazy"
-          />
-        )
-      )}
-    </>
-  );
-}
-
 function MessageBubble({ msg }: { msg: MessageRow }) {
   return (
     <div
-      className={`max-w-[80%] rounded-xl px-4 py-2 text-sm whitespace-pre-wrap ${
+      className={`max-w-[80%] rounded-xl px-4 py-2 text-sm ${
         msg.role === "user"
           ? "ml-auto bg-accent/15 text-ink border border-accent/20"
           : "bg-bg-2 text-ink border border-line"
       }`}
     >
-      <MessageContent text={msg.content} />
+      <MessageRenderer content={msg.content} role={msg.role} />
       {msg.model_used && (
         <div className="text-[11px] text-ink-faint mt-2">
           {msg.model_used}
