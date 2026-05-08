@@ -2,6 +2,7 @@ import { useEffect } from "react";
 
 import { Escalation, Memory, Settings, System, resetSidecarInfo } from "@/api/client";
 import { subscribeEvents } from "@/api/sse";
+import { t } from "@/i18n";
 import { AgentPanel } from "@/components/AgentPanel";
 import { CanaryAlertModal } from "@/components/CanaryAlertModal";
 import { ChatView } from "@/components/ChatView";
@@ -146,7 +147,7 @@ export function App() {
             const svc = (data as { service?: string }).service ?? "service";
             pushToast({
               kind: "warn",
-              text: `${svc} is unavailable. Some features may be disabled.`,
+              text: `${t(svc)} is unavailable. Some features may be disabled.`,
             });
           },
           diagnostics_ready: (data) => {
