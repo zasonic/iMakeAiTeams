@@ -10,6 +10,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { id: "chat", label: "Chat", hint: "Talk to your team" },
   { id: "agents", label: "Agents", hint: "Define agents and teams" },
+  { id: "models", label: "Models", hint: "Browse and switch local models" },
   { id: "rag", label: "Documents", hint: "Index files and folders" },
   { id: "memory", label: "Memory", hint: "Search session facts" },
   { id: "memory_review", label: "Memory Review", hint: "Approve memory writes" },

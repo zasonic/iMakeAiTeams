@@ -296,10 +296,30 @@ export const Prompts = {
   }) => api.post<unknown>("/api/prompts/create", input),
 };
 
+export interface LocalModelRow {
+  id: string;
+  size_bytes: number | null;
+  context_length: number | null;
+  quantization: string | null;
+  backend: "ollama" | "lm_studio";
+  loaded: boolean;
+}
+
+export interface LocalModelsResponse {
+  models: LocalModelRow[];
+  current: string;
+}
+
 export const System = {
   serviceStatus: () => api.get<Record<string, { ok: boolean; error?: string | null }>>(
     "/api/system/service_status",
   ),
+  listLocalModels: () => api.get<LocalModelsResponse>("/api/system/local_models"),
+  setActiveLocalModel: (model_id: string) =>
+    api.post<{ current: string; ok: boolean }>(
+      "/api/system/local_model/active",
+      { model_id },
+    ),
   probeHardware: () => api.post<{ ok: true }>("/api/system/probe_hardware"),
   testConnection: (backend: "ollama" | "lmstudio") =>
     api.post<{ ok: true }>("/api/system/test_connection", { backend }),

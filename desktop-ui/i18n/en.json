@@ -13,5 +13,7 @@
   "embedder": "Embedder",
   "rag_load": "Document Index Loading",
   "semantic_search": "Semantic Search",
-  "semantic_search_indexer": "Semantic Search Indexer"
+  "semantic_search_indexer": "Semantic Search Indexer",
+  "ollama": "Ollama",
+  "lm_studio": "LM Studio"
 }
