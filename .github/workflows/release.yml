@@ -30,6 +30,17 @@ jobs:
           python -m venv .venv
           .venv\Scripts\pip install -r requirements.txt
 
+      - name: Frontend typecheck
+        run: npm run typecheck
+
+      - name: Frontend tests
+        run: npm run test:frontend
+
+      - name: Backend tests
+        run: |
+          cd backend
+          .venv\Scripts\python -m pytest tests/ -q
+
       - name: Build sidecar and renderer
         run: npm run build:sidecar && npm run build
 
