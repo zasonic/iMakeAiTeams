@@ -26,6 +26,23 @@ log = logging.getLogger("iMakeAiTeams.local")
 _FALLBACK = "[Local model unavailable — no response]"
 
 
+class LocalVisionUnavailable(RuntimeError):
+    """Raised when the active local model can't see images.
+
+    The orchestrator catches this and surfaces a friendly error to the
+    user that names a vision-capable model they could switch to. The
+    family list comes from the ``vision_local_models`` setting.
+    """
+
+    def __init__(self, active_model: str, families: list[str]):
+        self.active_model = active_model
+        self.families = list(families)
+        super().__init__(
+            f"Local model '{active_model or '(none)'}' can't see images. "
+            f"Switch to one of: {', '.join(self.families) or '(no families configured)'}"
+        )
+
+
 class LocalClient(LLMClient):
     def __init__(self, settings: Settings):
         self._settings = settings
@@ -239,6 +256,93 @@ class LocalClient(LLMClient):
                 "Qwen3-30B-A3B GGUF in LM Studio for the recommended setup."
             ),
         }
+
+    def is_vision_model(self, model_id: str) -> bool:
+        """Return True when ``model_id`` matches a vision-capable family.
+
+        Compares the id against the ``vision_local_models`` setting using
+        a case-insensitive prefix match. Empty ids and empty family lists
+        return False.
+        """
+        if not model_id:
+            return False
+        families = self._settings.get("vision_local_models", []) or []
+        if not isinstance(families, list):
+            return False
+        mid = str(model_id).strip().lower()
+        for fam in families:
+            if not fam:
+                continue
+            if mid.startswith(str(fam).strip().lower()):
+                return True
+        return False
+
+    def chat_with_images(
+        self,
+        system: str,
+        messages: list,
+        images_b64: list[str],
+        model: str | None = None,
+        max_tokens: int = 2048,
+    ) -> str:
+        """Single-shot chat that attaches base64 images to the last user turn.
+
+        Uses Ollama's ``/api/chat`` ``images`` field (a list of base64
+        strings on the user message). Raises ``LocalVisionUnavailable``
+        when the active model isn't vision-capable.
+
+        ``messages`` is a list of {"role", "content"} dicts in the same
+        shape as ``chat_multi_turn``. The images are attached to the last
+        user message; if the list is empty or has no user message, this
+        falls through to a plain text chat.
+        """
+        active = model or self._settings.get("default_local_model", "")
+        families = self._settings.get("vision_local_models", []) or []
+        if not self.is_vision_model(active):
+            raise LocalVisionUnavailable(active, list(families))
+
+        b = self._backend()
+        url = self._url(b)
+        msgs: list[dict] = []
+        if system:
+            msgs.append({"role": "system", "content": system})
+        msgs.extend(messages)
+
+        # Attach images to the last user message. Ollama's /api/chat
+        # accepts ``images: [<base64>, ...]`` on a message.
+        if images_b64 and msgs:
+            for i in range(len(msgs) - 1, -1, -1):
+                if msgs[i].get("role") == "user":
+                    # Strip data-uri prefixes if present.
+                    cleaned = [
+                        s.split(",", 1)[1] if isinstance(s, str) and s.startswith("data:")
+                        else s
+                        for s in images_b64
+                    ]
+                    msgs[i] = {**msgs[i], "images": cleaned}
+                    break
+
+        payload = {
+            "model": active, "messages": msgs,
+            "max_tokens": max_tokens, "stream": False,
+        }
+        try:
+            if b == "ollama":
+                r = requests.post(url + "/api/chat", json=payload, timeout=120)
+                r.raise_for_status()
+                return r.json().get("message", {}).get("content", _FALLBACK)
+            # LM Studio / bundled don't speak Ollama's image protocol.
+            # Fall back to a plain chat so the user gets *something*.
+            log.warning(
+                "chat_with_images: backend %s does not support images; "
+                "falling back to text-only.", b,
+            )
+            r = requests.post(url + "/v1/chat/completions", json=payload, timeout=120)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
+        except Exception as exc:
+            log.warning("LocalClient.chat_with_images failed: %s", exc)
+            return _FALLBACK
 
     def signal_model_loaded(self, model_id: str) -> None:
         """Notify the behavior-drift canary that ``model_id`` has been loaded.
