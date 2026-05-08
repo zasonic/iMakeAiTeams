@@ -26,6 +26,7 @@ import {
   Settings,
   type Attachment,
   type ConversationExportFormat,
+  type SearchResult,
 } from "@/api/client";
 import { ExecutionCard } from "@/components/ExecutionCard";
 import { MessageRenderer } from "@/components/MessageRenderer";
@@ -119,6 +120,15 @@ export function ChatView() {
   const [activeTaskId, setActiveTaskId] = useState<string>("");
   const [loadError, setLoadError] = useState<string>("");
 
+  // PR 13: cross-conversation FTS5 search. ``searchQuery`` is the raw
+  // input value; ``searchResults`` is the latest server response.
+  // Searching never blocks the conversation list — when the query is
+  // empty the standard list renders below the search input.
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState<boolean>(false);
+  const [searchError, setSearchError] = useState<string>("");
+
   const busy = sendPhase !== "idle";
 
   const responseRef = useRef<HTMLDivElement | null>(null);
@@ -181,6 +191,42 @@ export function ChatView() {
       alive = false;
     };
   }, [ready, activeId]);
+
+  // PR 13: debounce the search input by 200ms so typing doesn't hammer
+  // the FTS5 endpoint. An empty (whitespace-only) query short-circuits
+  // to clearing results without firing a request.
+  useEffect(() => {
+    const trimmed = searchQuery.trim();
+    if (!trimmed) {
+      setSearchResults([]);
+      setSearchError("");
+      setSearchLoading(false);
+      return;
+    }
+    if (!ready) return;
+    let alive = true;
+    const handle = window.setTimeout(async () => {
+      setSearchLoading(true);
+      try {
+        const rows = await Chat.searchConversations(trimmed);
+        if (alive) {
+          setSearchResults(rows);
+          setSearchError("");
+        }
+      } catch (err) {
+        if (alive) {
+          setSearchResults([]);
+          setSearchError(err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        if (alive) setSearchLoading(false);
+      }
+    }, 200);
+    return () => {
+      alive = false;
+      window.clearTimeout(handle);
+    };
+  }, [searchQuery, ready]);
 
   // PR 8: hydrate the chip strip when the conversation changes. Reset
   // local drag counters at the same time so a hung enter/leave pair from
@@ -631,32 +677,62 @@ export function ChatView() {
   return (
     <div className="flex h-full">
       <div className="w-64 border-r border-line bg-bg-1 flex flex-col">
-        <div className="p-3 border-b border-line">
+        <div className="p-3 border-b border-line space-y-2">
           <button className="btn-primary w-full" onClick={newConversation}>
             + New conversation
           </button>
+          <input
+            type="text"
+            data-testid="chat-search-input"
+            className="input w-full text-sm"
+            placeholder="Search conversations…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setSearchQuery("");
+              }
+            }}
+            aria-label="Search conversations"
+          />
         </div>
         <div className="flex-1 overflow-y-auto">
-          {conversations.map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              onClick={() => setActiveId(c.id)}
-              className={`w-full text-left px-4 py-2 text-sm border-b border-line/30 ${
-                c.id === activeId
-                  ? "bg-accent/10 text-ink"
-                  : "text-ink-dim hover:bg-bg-2"
-              }`}
-            >
-              <div className="truncate font-medium">{c.title || "Untitled"}</div>
-              <div className="text-[11px] text-ink-faint">{c.updated_at?.slice(0, 16)}</div>
-            </button>
-          ))}
-          {!conversations.length && !loadError && (
-            <div className="p-4 text-sm text-ink-faint">No conversations yet.</div>
-          )}
-          {loadError && (
-            <div className="p-4 text-sm text-err">{loadError}</div>
+          {searchQuery.trim() ? (
+            <SearchResultsPanel
+              query={searchQuery.trim()}
+              results={searchResults}
+              loading={searchLoading}
+              error={searchError}
+              onSelect={(r) => {
+                setActiveId(r.conversation_id);
+                setSearchQuery("");
+              }}
+            />
+          ) : (
+            <>
+              {conversations.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => setActiveId(c.id)}
+                  className={`w-full text-left px-4 py-2 text-sm border-b border-line/30 ${
+                    c.id === activeId
+                      ? "bg-accent/10 text-ink"
+                      : "text-ink-dim hover:bg-bg-2"
+                  }`}
+                >
+                  <div className="truncate font-medium">{c.title || "Untitled"}</div>
+                  <div className="text-[11px] text-ink-faint">{c.updated_at?.slice(0, 16)}</div>
+                </button>
+              ))}
+              {!conversations.length && !loadError && (
+                <div className="p-4 text-sm text-ink-faint">No conversations yet.</div>
+              )}
+              {loadError && (
+                <div className="p-4 text-sm text-err">{loadError}</div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -818,6 +894,132 @@ export function ChatView() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Cross-conversation FTS5 search results (PR 13) ──────────────────────────
+
+interface SearchResultsPanelProps {
+  query: string;
+  results: SearchResult[];
+  loading: boolean;
+  error: string;
+  onSelect: (r: SearchResult) => void;
+}
+
+function _formatTimestamp(iso: string): string {
+  // ISO timestamps are sortable as-is and the "minute" prefix is enough
+  // context for the result row's secondary text.
+  return iso ? iso.slice(0, 16).replace("T", " ") : "";
+}
+
+// Renders a snippet that may contain <mark>…</mark> tags emitted by FTS5
+// as alternating <span> and <mark> elements. Splits the string ourselves
+// instead of using dangerouslySetInnerHTML so that any HTML the backend
+// might leak through stays inert.
+function _renderSnippet(snippet: string): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  let rest = snippet;
+  let key = 0;
+  while (rest.length > 0) {
+    const open = rest.indexOf("<mark>");
+    if (open < 0) {
+      parts.push(<span key={key++}>{rest}</span>);
+      break;
+    }
+    if (open > 0) {
+      parts.push(<span key={key++}>{rest.slice(0, open)}</span>);
+    }
+    const after = rest.slice(open + "<mark>".length);
+    const close = after.indexOf("</mark>");
+    if (close < 0) {
+      // Unbalanced — render the tail as plain text and stop.
+      parts.push(<span key={key++}>{after}</span>);
+      break;
+    }
+    parts.push(
+      <mark
+        key={key++}
+        className="bg-yellow-200/30 text-ink rounded px-0.5"
+      >
+        {after.slice(0, close)}
+      </mark>,
+    );
+    rest = after.slice(close + "</mark>".length);
+  }
+  return parts;
+}
+
+function SearchResultsPanel({
+  query,
+  results,
+  loading,
+  error,
+  onSelect,
+}: SearchResultsPanelProps) {
+  if (error) {
+    return (
+      <div
+        data-testid="chat-search-error"
+        className="p-4 text-sm text-err"
+      >
+        {error}
+      </div>
+    );
+  }
+  if (!results.length) {
+    if (loading) {
+      return (
+        <div
+          data-testid="chat-search-loading"
+          className="p-4 text-sm text-ink-faint"
+        >
+          Searching…
+        </div>
+      );
+    }
+    return (
+      <div
+        data-testid="chat-search-empty"
+        className="p-4 text-sm text-ink-faint"
+      >
+        No matches for &ldquo;{query}&rdquo;.
+      </div>
+    );
+  }
+  return (
+    <div data-testid="chat-search-results">
+      {results.map((r) => (
+        <button
+          key={r.message_id}
+          type="button"
+          data-testid={`chat-search-result-${r.message_id}`}
+          onClick={() => onSelect(r)}
+          className="w-full text-left px-4 py-2 text-sm border-b border-line/30 text-ink-dim hover:bg-bg-2"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate text-[11px] uppercase tracking-wide text-ink-faint">
+              {r.conversation_title || "Untitled"}
+            </span>
+            <span
+              className={`inline-flex items-center justify-center px-1.5 h-[16px] text-[10px] rounded-full ${
+                r.role === "user"
+                  ? "bg-accent/15 text-accent"
+                  : "bg-bg-3 text-ink-dim"
+              }`}
+            >
+              {r.role}
+            </span>
+          </div>
+          <div className="mt-0.5 text-ink line-clamp-2 break-words">
+            {_renderSnippet(r.snippet)}
+          </div>
+          <div className="text-[11px] text-ink-faint mt-0.5">
+            {_formatTimestamp(r.created_at)}
+          </div>
+        </button>
+      ))}
     </div>
   );
 }

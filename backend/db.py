@@ -762,6 +762,39 @@ _MIGRATIONS = [
         )""",
         "CREATE INDEX IF NOT EXISTS idx_attachments_conv ON attachments(conversation_id)",
     ]),
+
+    # ── Phase 11: Cross-conversation message search via FTS5 ─────────────────
+    # All statements in this migration share the same connection-level
+    # transaction; _run_migrations only commits after the loop completes, so
+    # the CREATE / backfill / triggers either all land or all roll back. The
+    # backfill uses INSERT OR IGNORE for defense-in-depth on partial reruns.
+    ("phase11.message_fts", [
+        """CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            message_id UNINDEXED,
+            conversation_id UNINDEXED,
+            role UNINDEXED,
+            content,
+            created_at UNINDEXED,
+            tokenize = 'porter unicode61 remove_diacritics 2'
+        )""",
+        "INSERT OR IGNORE INTO messages_fts(message_id, conversation_id, role, content, created_at) "
+        "SELECT id, conversation_id, role, content, created_at FROM messages",
+        """CREATE TRIGGER IF NOT EXISTS messages_fts_insert
+            AFTER INSERT ON messages BEGIN
+              INSERT INTO messages_fts(message_id, conversation_id, role, content, created_at)
+              VALUES (new.id, new.conversation_id, new.role, new.content, new.created_at);
+            END""",
+        """CREATE TRIGGER IF NOT EXISTS messages_fts_delete
+            AFTER DELETE ON messages BEGIN
+              DELETE FROM messages_fts WHERE message_id = old.id;
+            END""",
+        """CREATE TRIGGER IF NOT EXISTS messages_fts_update
+            AFTER UPDATE ON messages BEGIN
+              DELETE FROM messages_fts WHERE message_id = old.id;
+              INSERT INTO messages_fts(message_id, conversation_id, role, content, created_at)
+              VALUES (new.id, new.conversation_id, new.role, new.content, new.created_at);
+            END""",
+    ]),
 ]
 
 
