@@ -13,6 +13,7 @@ import { FirstRunWizard } from "@/components/FirstRunWizard";
 import { McpPanel } from "@/components/McpPanel";
 import { MemoryPanel } from "@/components/MemoryPanel";
 import { MemoryReviewPanel } from "@/components/MemoryReviewPanel";
+import { ModelBrowser } from "@/components/ModelBrowser";
 import { PromptPanel } from "@/components/PromptPanel";
 import { RagPanel } from "@/components/RagPanel";
 import { SecurityPanel } from "@/components/SecurityPanel";
@@ -405,6 +406,7 @@ export function App() {
           {view === "rag" && <RagPanel />}
           {view === "memory" && <MemoryPanel />}
           {view === "memory_review" && <MemoryReviewPanel />}
+          {view === "models" && <ModelBrowser />}
           {view === "prompts" && <PromptPanel />}
           {view === "mcp" && <McpPanel />}
           {view === "security" && <SecurityPanel />}

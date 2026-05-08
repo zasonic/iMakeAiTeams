@@ -15,6 +15,7 @@ export type ActiveView =
   | "rag"
   | "memory"
   | "memory_review"
+  | "models"
   | "prompts"
   | "mcp"
   | "security"

@@ -35,6 +35,10 @@ class OpenUrlIn(BaseModel):
     url: str
 
 
+class ActiveLocalModelIn(BaseModel):
+    model_id: str
+
+
 @router.get("/service_status")
 async def service_status(request: Request) -> dict:
     return get_api(request).service_status()
@@ -116,3 +120,19 @@ async def open_url(body: OpenUrlIn, request: Request) -> dict:
 @router.post("/canary/reset/{model_id:path}")
 async def canary_reset(model_id: str, request: Request) -> dict:
     return get_api(request).canary_reset(model_id)
+
+
+@router.get("/local_models")
+async def local_models(request: Request) -> dict:
+    api = get_api(request)
+    client = api.local_client
+    models = client.list_local_models() if client is not None else []
+    current = api._settings.get("default_local_model", "") or ""
+    return {"models": models, "current": current}
+
+
+@router.post("/local_model/active")
+async def set_active_local_model(body: ActiveLocalModelIn, request: Request) -> dict:
+    api = get_api(request)
+    api._settings.set("default_local_model", body.model_id)
+    return {"current": api._settings.get("default_local_model", "") or "", "ok": True}

@@ -66,6 +66,58 @@ class LocalClient(LLMClient):
             log.warning(f"list_models failed for backend '{b}': {exc}")
             return []
 
+    def list_local_models(self) -> list[dict]:
+        """Return installed local models across both Ollama and LM Studio.
+
+        Each row carries enough info for a model browser UI:
+            {"id": str, "size_bytes": int|None, "context_length": int|None,
+             "quantization": str|None, "backend": "ollama"|"lm_studio",
+             "loaded": bool}
+
+        Backends that are unreachable contribute zero rows; failures are
+        logged at warning level and never raise.
+        """
+        active = self._settings.get("default_local_model", "") or ""
+        out: list[dict] = []
+
+        ollama_url = self._settings.get("ollama_url", "http://localhost:11434")
+        try:
+            r = requests.get(ollama_url + "/api/tags", timeout=5)
+            r.raise_for_status()
+            for m in r.json().get("models", []) or []:
+                details = m.get("details") or {}
+                mid = m.get("name", "")
+                out.append({
+                    "id":             mid,
+                    "size_bytes":     m.get("size"),
+                    "context_length": None,
+                    "quantization":   details.get("quantization_level") or None,
+                    "backend":        "ollama",
+                    "loaded":         bool(mid) and mid == active,
+                })
+        except Exception as exc:
+            log.warning("list_local_models: ollama probe failed: %s", exc)
+
+        lm_url = self._settings.get("lm_studio_url", "http://localhost:1234")
+        try:
+            r = requests.get(lm_url + "/v1/models", timeout=5)
+            r.raise_for_status()
+            for m in r.json().get("data", []) or []:
+                mid = m.get("id", "")
+                ctx = m.get("context_length") or m.get("max_context_length")
+                out.append({
+                    "id":             mid,
+                    "size_bytes":     m.get("size") if isinstance(m.get("size"), int) else None,
+                    "context_length": ctx if isinstance(ctx, int) else None,
+                    "quantization":   m.get("quantization") or None,
+                    "backend":        "lm_studio",
+                    "loaded":         bool(mid) and mid == active,
+                })
+        except Exception as exc:
+            log.warning("list_local_models: lm_studio probe failed: %s", exc)
+
+        return out
+
     def list_models_detailed(self, backend: str | None = None) -> list[dict]:
         """Return available models as list of {id, raw} dicts.
 
