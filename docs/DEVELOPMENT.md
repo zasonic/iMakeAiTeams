@@ -89,3 +89,51 @@ installs:
   `desktop-ui/`.
 - `backend/pyinstaller.spec` `collect_submodules("services" | "routes"
   | "core")` must keep finding everything.
+
+## Security benchmarks (AgentDojo)
+
+`.github/workflows/security-bench.yml` runs the four published AgentDojo
+suites (workspace, slack, banking, travel) against the security stack on
+every push to `main`, commits the per-suite `benchmarks/<suite>.json`
+files plus a regenerated [BENCHMARKS.md](../BENCHMARKS.md), and fails the
+build if any suite's ASR exceeds the ceiling configured in
+[`benchmarks/thresholds.json`](../benchmarks/thresholds.json).
+
+Local reproduction (Windows):
+
+```
+dev\run-bench.bat
+```
+
+Or one suite at a time:
+
+```
+pip install -r backend\requirements-bench.txt
+python -m backend.tests.agentdojo.run_suites --suite workspace --output benchmarks\workspace.json
+python build-scripts\generate_benchmarks_md.py
+```
+
+Bench-only deps live in `backend/requirements-bench.txt`. They are NEVER
+imported at runtime — `backend/pytest.ini` excludes
+`backend/tests/agentdojo/` from default collection, so a regular
+`pytest tests/` run still works on machines that have not installed the
+bench deps.
+
+### Required GitHub Actions secrets
+
+Add both secrets under **Settings → Secrets and variables → Actions** on
+the GitHub repository:
+
+| Secret | Purpose |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | Used by the Reader pass and the Actor's Anthropic LLM during the bench. |
+| `BENCH_PUSH_TOKEN`  | A fine-grained personal access token with `contents: write` on this repo. The workflow uses it to commit `benchmarks/*.json` + `BENCHMARKS.md` back to `main`. The default `GITHUB_TOKEN` is intentionally not enough — pushes from `GITHUB_TOKEN` cannot retrigger workflows, but the commit-back step uses `[skip ci]` so the same loop is broken either way; the deploy-key route is preferred only because it lets you scope the token to this repo. |
+
+`BENCH_PUSH_TOKEN` can also be a deploy key — see
+[GitHub's deploy-keys docs](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys#deploy-keys).
+
+### Tightening the threshold
+
+Edit `benchmarks/thresholds.json`. The `max_asr_pct` per suite is the
+hard ceiling; the `baseline_asr_pct` is the Hackett et al. (ACL 2025)
+monolithic reference, only used for the rendered table.
