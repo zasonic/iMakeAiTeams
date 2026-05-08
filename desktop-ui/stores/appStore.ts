@@ -19,6 +19,7 @@ export type ActiveView =
   | "prompts"
   | "mcp"
   | "security"
+  | "safety"
   | "settings"
   | "diagnostics"
   | "escalations";
