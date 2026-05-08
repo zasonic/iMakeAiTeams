@@ -2,13 +2,17 @@
 //
 // User messages stay as plain text with whitespace-pre-wrap (existing
 // behavior). Assistant messages flow through react-markdown with
-// remark-gfm + rehype-highlight so tables, task lists, code fences, etc.
-// render as expected. Code fences get a copy button; links open in the
-// system browser via the existing IPC bridge when available.
+// remark-gfm + remark-math + rehype-highlight + rehype-katex so tables,
+// task lists, code fences, math, etc. render as expected. Mermaid fenced
+// code blocks are intercepted and rendered as SVG diagrams. Code fences
+// get a copy button; links open in the system browser via the existing
+// IPC bridge when available.
 
 import {
   useCallback,
   useEffect,
+  useId,
+  useRef,
   useState,
   type AnchorHTMLAttributes,
   type HTMLAttributes,
@@ -17,13 +21,39 @@ import {
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 
 import "highlight.js/styles/github-dark.css";
+import "katex/dist/katex.min.css";
 
 interface MessageRendererProps {
   content: string;
   role: "user" | "assistant" | "system";
+}
+
+// Mermaid is heavy (~700 kB minified plus per-diagram chunks). We lazy-load
+// it on first use so chats without diagrams pay nothing. The app currently
+// ships a single dark theme (see tailwind.config.js — darkMode is "class"
+// but no runtime toggle exists). When a theme switcher lands, re-initialize
+// on theme change. TODO(theme-toggle): wire mermaid theme to the app theme
+// when a toggle is introduced.
+type MermaidModule = typeof import("mermaid").default;
+let mermaidPromise: Promise<MermaidModule> | null = null;
+function loadMermaid(): Promise<MermaidModule> {
+  if (!mermaidPromise) {
+    mermaidPromise = import("mermaid").then((mod) => {
+      mod.default.initialize({
+        startOnLoad: false,
+        theme: "dark",
+        securityLevel: "strict",
+        fontFamily: "inherit",
+      });
+      return mod.default;
+    });
+  }
+  return mermaidPromise;
 }
 
 export function MessageRenderer({ content, role }: MessageRendererProps) {
@@ -33,8 +63,16 @@ export function MessageRenderer({ content, role }: MessageRendererProps) {
   return (
     <div className="markdown-body whitespace-normal">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[
+          [rehypeHighlight, { detect: true, ignoreMissing: true }],
+          // Defensive: rehype-katex catches syntax errors by default and
+          // renders the raw expression with an error color, so a
+          // mid-stream half-written `$$\sum_{i=1` (once the closing $$
+          // arrives) won't throw out of the render. `strict: "ignore"`
+          // silences warnings for unknown commands.
+          [rehypeKatex, { throwOnError: false, strict: "ignore" }],
+        ]}
         components={MARKDOWN_COMPONENTS}
         skipHtml
       >
@@ -117,15 +155,93 @@ const MARKDOWN_COMPONENTS: Components = {
 // We intercept <pre> so the copy button can position itself relative to the
 // block and still reach the raw text content. Inline code (no <pre> ancestor,
 // no language class) is rendered with a subtle background and no button.
+//
+// Fences tagged ```mermaid skip the normal code-block path entirely and go
+// through MermaidDiagram, which lazily turns the source into an SVG.
 
 function PreBlock({ children }: HTMLAttributes<HTMLPreElement>) {
   const codeText = extractCodeText(children);
+  const lang = extractCodeLang(children);
+  if (lang === "mermaid") {
+    return <MermaidDiagram source={codeText} />;
+  }
   return (
     <div className="relative group my-2">
       <pre className="rounded-md bg-bg-1 border border-line p-3 overflow-x-auto text-xs font-mono">
         {children}
       </pre>
       <CopyButton text={codeText} />
+    </div>
+  );
+}
+
+// ── Mermaid diagrams ──────────────────────────────────────────────────────────
+//
+// Mermaid render is async and can throw on malformed syntax. While the chat
+// is streaming, the source updates in place and most intermediate states are
+// invalid — we treat a render failure as "not yet renderable" and show the
+// raw source as a plain code block. When a successful render arrives, we
+// swap in the SVG.
+
+function MermaidDiagram({ source }: { source: string }) {
+  const [svg, setSvg] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const reactId = useId();
+  // mermaid requires a DOM-id-safe identifier for its render container.
+  const renderId = `mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, "")}`;
+  const latestSource = useRef(source);
+  latestSource.current = source;
+
+  useEffect(() => {
+    let cancelled = false;
+    const trimmed = source.trim();
+    if (trimmed.length === 0) {
+      setSvg(null);
+      setFailed(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    (async () => {
+      try {
+        const mermaid = await loadMermaid();
+        const { svg: rendered } = await mermaid.render(renderId, trimmed);
+        if (cancelled || latestSource.current !== source) return;
+        setSvg(rendered);
+        setFailed(false);
+      } catch {
+        if (cancelled || latestSource.current !== source) return;
+        setSvg(null);
+        setFailed(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [source, renderId]);
+
+  if (svg != null) {
+    return (
+      <div
+        className="my-2 overflow-x-auto rounded-md bg-bg-1 border border-line p-3"
+        // eslint-disable-next-line react/no-danger -- mermaid output is
+        // generated by a trusted library at strict security level.
+        dangerouslySetInnerHTML={{ __html: svg }}
+      />
+    );
+  }
+
+  return (
+    <div className="relative group my-2">
+      <pre className="rounded-md bg-bg-1 border border-line p-3 overflow-x-auto text-xs font-mono">
+        <code className="language-mermaid">{source}</code>
+      </pre>
+      <CopyButton text={source} />
+      {failed && (
+        <div className="mt-1 text-[11px] text-ink-faint italic">
+          Diagram render failed
+        </div>
+      )}
     </div>
   );
 }
@@ -193,6 +309,29 @@ function extractCodeText(node: ReactNode): string {
     return extractCodeText(props?.children);
   }
   return "";
+}
+
+// Inspect the <code> child of a <pre> to find its language tag, e.g. the
+// "mermaid" in ```mermaid. react-markdown emits the tag as a "language-…"
+// class on the <code> element.
+function extractCodeLang(node: ReactNode): string | null {
+  if (node == null || typeof node !== "object") return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const lang = extractCodeLang(child);
+      if (lang) return lang;
+    }
+    return null;
+  }
+  if ("props" in node) {
+    const props = (node as { props?: { className?: string } }).props;
+    const className = props?.className;
+    if (typeof className === "string") {
+      const match = className.match(/language-(\S+)/);
+      if (match) return match[1] ?? null;
+    }
+  }
+  return null;
 }
 
 // ── Links ─────────────────────────────────────────────────────────────────────

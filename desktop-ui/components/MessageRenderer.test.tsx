@@ -1,8 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { MessageRenderer } from "./MessageRenderer";
+
+// Mermaid (and its d3 dependency) reach for browser APIs that jsdom doesn't
+// implement (XMLSerializer behaviors, getBBox, etc.). Mock the module so the
+// component-side contract — call render(id, src), inject the returned
+// SVG; on rejection show the fallback caption — is what we exercise.
+vi.mock("mermaid", () => ({
+  default: {
+    initialize: vi.fn(),
+    render: vi.fn(async (_id: string, src: string) => {
+      if (src.includes("__BAD__")) {
+        throw new Error("parse error");
+      }
+      return { svg: `<svg data-testid="mermaid-svg"><text>${src}</text></svg>` };
+    }),
+  },
+}));
 
 // jsdom doesn't ship navigator.clipboard. Stub it before each test so the
 // CopyButton's writeText call succeeds and we can assert on the args.
@@ -116,5 +132,96 @@ describe("MessageRenderer", () => {
       />,
     );
     expect(screen.queryByRole("button", { name: /copy/i })).toBeNull();
+  });
+
+  it("renders inline math via KaTeX", () => {
+    const { container } = render(
+      <MessageRenderer content={"$E = mc^2$"} role="assistant" />,
+    );
+    // rehype-katex emits a span.katex wrapping span.katex-html for
+    // browser rendering and span.katex-mathml for accessibility.
+    const katex = container.querySelector(".katex");
+    expect(katex).not.toBeNull();
+    expect(container.querySelector(".katex-html")).not.toBeNull();
+  });
+
+  it("renders display math via KaTeX with the display class", () => {
+    // remark-math: a `$$..$$` block needs to stand on its own (no
+    // surrounding inline text on the same paragraph) to be treated as a
+    // display block rather than inline math.
+    const { container } = render(
+      <MessageRenderer
+        content={"before\n\n$$\n\\sum_{i=1}^n i\n$$\n\nafter"}
+        role="assistant"
+      />,
+    );
+    expect(container.querySelector(".katex-display")).not.toBeNull();
+  });
+
+  it("does not throw on incomplete inline math mid-stream", () => {
+    expect(() =>
+      render(
+        <MessageRenderer
+          content={"here is math: $E = mc"}
+          role="assistant"
+        />,
+      ),
+    ).not.toThrow();
+  });
+
+  it("renders a mermaid fenced block as an SVG", async () => {
+    const { container } = render(
+      <MessageRenderer
+        content={"```mermaid\ngraph TD; A-->B;\n```"}
+        role="assistant"
+      />,
+    );
+    await waitFor(() => {
+      expect(container.querySelector("svg")).not.toBeNull();
+    });
+  });
+
+  it("falls back to a code block with caption when mermaid render fails", async () => {
+    const { container } = render(
+      <MessageRenderer
+        content={"```mermaid\n__BAD__ syntax\n```"}
+        role="assistant"
+      />,
+    );
+    await waitFor(() => {
+      expect(container.textContent).toContain("Diagram render failed");
+    });
+    // Fallback: SVG should NOT be present, but the source should be
+    // visible inside a <pre><code>.
+    expect(container.querySelector("svg")).toBeNull();
+    expect(container.querySelector("pre code")?.textContent).toContain(
+      "__BAD__",
+    );
+  });
+
+  it("renders an unclosed mermaid fence as a plain code block (no throw)", () => {
+    expect(() =>
+      render(
+        <MessageRenderer
+          content={"```mermaid\ngraph TD; A--"}
+          role="assistant"
+        />,
+      ),
+    ).not.toThrow();
+    // Whether the parser closes or not, we never blow up; the source is
+    // visible to the user.
+    expect(screen.getByText(/graph TD/)).toBeTruthy();
+  });
+
+  it("still highlights non-mermaid fenced code (PR 4 regression)", () => {
+    const { container } = render(
+      <MessageRenderer
+        content={"```js\nconst x = 1;\n```"}
+        role="assistant"
+      />,
+    );
+    // rehype-highlight stamps `hljs language-…` on the <code> element.
+    const code = container.querySelector("pre code");
+    expect(code?.className).toMatch(/hljs|language-js/);
   });
 });

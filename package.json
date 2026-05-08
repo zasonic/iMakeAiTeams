@@ -21,12 +21,16 @@
     "@electron-toolkit/utils": "^3.0.0",
     "electron-updater": "^6.3.9",
     "highlight.js": "^11.11.1",
+    "katex": "^0.16.45",
+    "mermaid": "^11.14.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
     "react-window": "^1.8.11",
     "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "zustand": "^5.0.2"
   },
   "devDependencies": {
