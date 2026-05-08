@@ -57,3 +57,8 @@ publish:
   provider: github
   owner: zasonic
   repo: iMakeAiTeams
+  # Emit latest.yml alongside the NSIS installer so electron-updater can
+  # discover the new version. Defaults to true for the github provider, but
+  # making it explicit guards against a future electron-builder release
+  # silently flipping the default.
+  publishAutoUpdate: true

@@ -255,26 +255,15 @@ function wireIpc(): void {
   ipcMain.handle("app:user-data-path", () => app.getPath("userData"));
 
   ipcMain.handle(
-    "updater:install",
-    rateLimit("updater:install", 1, async () => {
-      // Always confirm with the user before restarting + reinstalling.
-      // Without this, a compromised renderer could call window.electronAPI
-      // and force-quit the app on demand.
-      if (!mainWindow) return { ok: false, error: "no window" };
-      const choice = await dialog.showMessageBox(mainWindow, {
-        type: "question",
-        buttons: ["Restart and install", "Later"],
-        defaultId: 0,
-        cancelId: 1,
-        title: "Install update",
-        message: "Restart iMakeAiTeams to install the downloaded update?",
-        detail: "Any unsaved work will be lost.",
-      });
-      if (choice.response !== 0) return { ok: false, cancelled: true };
-      // Stop the sidecar BEFORE quitAndInstall. NSIS on Windows can't replace
-      // files that are still open (e.g. server.exe), so an active sidecar
-      // turns the install into a "file in use" failure. before-quit will see
-      // sidecar=null and skip its own teardown.
+    "update:install-now",
+    rateLimit("update:install-now", 1, async () => {
+      // The user already confirmed by clicking "Restart now" in the
+      // UpdateBanner — no native dialog here, just shut down cleanly
+      // and let electron-updater swap the binaries. Stop the sidecar
+      // BEFORE quitAndInstall: NSIS on Windows can't replace files that
+      // are still open (server.exe), so an active sidecar turns the
+      // install into a "file in use" failure. before-quit sees
+      // sidecar=null afterwards and skips its own teardown.
       if (sidecar) {
         try {
           await sidecar.stop();
@@ -289,21 +278,69 @@ function wireIpc(): void {
   );
 }
 
-function wireAutoUpdater(): void {
+interface SidecarHttpInfo {
+  port: number;
+  token: string;
+}
+
+async function fetchAutoUpdateEnabled(info: SidecarHttpInfo): Promise<boolean> {
+  // Pulled in main rather than via wireSidecarAuthHeader: that hook only
+  // augments the renderer session, not main-process fetch. Keep this
+  // best-effort — a hung sidecar must not block update polling forever,
+  // so a 2s timeout returns the spec-mandated `true` fallback instead.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2_000);
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:${info.port}/api/settings/get?key=auto_update_enabled`,
+      {
+        headers: { Authorization: `Bearer ${info.token}` },
+        signal: controller.signal,
+      },
+    );
+    if (!res.ok) return true;
+    const body = (await res.json()) as { value?: unknown };
+    return body.value !== false;
+  } catch {
+    return true;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Constructed once and reused for every "update-available" payload. The
+// publish target in electron-builder.yml is the source of truth; this
+// constant must mirror it. Keep in sync if the publish section ever moves.
+const RELEASE_NOTES_BASE = "https://github.com/zasonic/iMakeAiTeams/releases/tag";
+
+async function wireAutoUpdater(): Promise<void> {
   if (!app.isPackaged) return;
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on("update-available", (info) => {
-    mainWindow?.webContents.send("updater:available", { version: info.version });
+    mainWindow?.webContents.send("update:available", {
+      version: info.version,
+      notesUrl: `${RELEASE_NOTES_BASE}/v${info.version}`,
+    });
   });
   autoUpdater.on("update-downloaded", (info) => {
-    mainWindow?.webContents.send("updater:downloaded", { version: info.version });
+    mainWindow?.webContents.send("update:downloaded", { version: info.version });
   });
   autoUpdater.on("error", (err) => {
+    // Log only — surfacing this via a dialog would break the
+    // non-blocking guarantee. The user simply doesn't see a banner
+    // when the check fails, and the next 6h tick retries.
     logToFile(`autoUpdater error: ${err.message}\n`);
   });
+
+  // Honour the user's auto_update_enabled toggle. The fetch is best-effort:
+  // if the sidecar isn't responding yet (cold start, crash) we fall back to
+  // enabled=true and let the renderer flip the toggle off on next launch.
+  const info = sidecar?.getInfo();
+  const enabled = info ? await fetchAutoUpdateEnabled(info) : true;
+  if (!enabled) return;
 
   // Check on launch and every 6 hours. Hold the interval handle so we can
   // clear it on quit (otherwise it keeps a reference to autoUpdater alive
@@ -354,7 +391,7 @@ app.whenReady().then(async () => {
   wireIpc();
   await createWindow();
   await bootSidecar(userDataDir);
-  wireAutoUpdater();
+  await wireAutoUpdater();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -387,7 +424,7 @@ app.on("before-quit", async (event) => {
     app.exit(0);
     return;
   }
-  // Sidecar already torn down (e.g. via updater:install). Still flush
+  // Sidecar already torn down (e.g. via update:install-now). Still flush
   // the main log so the final lines from this session aren't truncated.
   mainLogStream?.end();
   mainLogStream = null;

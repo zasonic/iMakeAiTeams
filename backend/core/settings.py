@@ -129,6 +129,13 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     "onboarding_step":             (int,   0),
     "last_seen_version":           (str,   ""),
 
+    # Phase 10: silent auto-update (electron-updater). When True, the Electron
+    # main process polls the GitHub publish target every 6h and downloads new
+    # releases in the background. The user is never force-restarted — the
+    # downloaded update only applies after they click "Restart now" in the
+    # UpdateBanner.
+    "auto_update_enabled":         (bool,  True),
+
     # Token budget (Stage 5)
     "max_conversation_budget_usd":  (float, 5.0),    # stop sending if cumulative cost exceeds this
     "budget_warning_threshold_pct": (float, 80.0),    # warn frontend at this % of budget

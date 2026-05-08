@@ -204,3 +204,17 @@ class TestPersistence:
         s.set_raw("_internal_runtime_key", "runtime_value")
         data = json.loads(path.read_text())
         assert data["_internal_runtime_key"] == "runtime_value"
+
+
+# ── Phase 10: silent auto-update toggle ───────────────────────────────────────
+
+class TestAutoUpdateEnabled:
+    def test_auto_update_enabled_defaults_to_true(self, tmp_path):
+        """New installs opt into background update checks by default."""
+        s, _ = make_settings(tmp_path)
+        assert s.get("auto_update_enabled") is True
+
+    def test_auto_update_enabled_persists_when_disabled(self, tmp_path):
+        s, _ = make_settings(tmp_path)
+        s.set("auto_update_enabled", False)
+        assert s.get("auto_update_enabled") is False
