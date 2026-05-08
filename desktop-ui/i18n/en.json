@@ -67,5 +67,9 @@
   "governance.rate_limit_exceeded": "Rate limit exceeded",
   "governance.token_budget_exceeded": "Token budget exceeded",
   "governance.tool_quota_exceeded": "Tool quota exceeded",
-  "governance.disabled_by_policy": "Disabled by policy"
+  "governance.disabled_by_policy": "Disabled by policy",
+  "vision.unavailable_local": "Your active local model can't see images. Switch to one of: {models}",
+  "vision.image_chip_persist_note": "Images are always ephemeral",
+  "vision.too_large": "Image too large. Maximum 20 MB.",
+  "vision.unsupported_format": "Unsupported image format. Use PNG, JPEG, GIF, or WebP."
 }

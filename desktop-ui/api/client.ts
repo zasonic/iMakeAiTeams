@@ -325,6 +325,29 @@ export interface AttachmentUploadResult {
   extract_chars: number;
 }
 
+async function fetchBlob(path: string): Promise<Blob> {
+  const info = await getSidecarInfo();
+  const url = `${baseUrl(info)}${path}`;
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${info.token}` },
+    });
+  } catch (err) {
+    const e: ApiError = new Error(
+      err instanceof Error ? err.message : "Network request failed",
+    );
+    throw e;
+  }
+  if (!resp.ok) {
+    const e: ApiError = new Error(`Request failed with ${resp.status}`);
+    e.status = resp.status;
+    throw e;
+  }
+  return resp.blob();
+}
+
 export const Attachments = {
   upload: (
     conversationId: string,
@@ -347,6 +370,12 @@ export const Attachments = {
     api.delete<{ ok: boolean }>(
       `/api/chat/attachments/${encodeURIComponent(id)}`,
     ),
+  // PR 11: image chip rehydration after conversation reload. The raw
+  // File object only exists at upload time; subsequent renders fetch
+  // the bytes back through the bearer-authenticated endpoint and wrap
+  // them in an object URL.
+  fetchBlob: (id: string): Promise<Blob> =>
+    fetchBlob(`/api/chat/attachments/${encodeURIComponent(id)}/blob`),
 };
 
 export const Rag = {

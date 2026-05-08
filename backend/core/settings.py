@@ -176,6 +176,15 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     # cumulative risk_score > 0.7) AND the resolved target is Claude.
     "high_stakes_voting_enabled":    (bool,  True),
 
+    # Phase 11: image input. Claude has built-in vision; local routes need
+    # a vision-capable model. ``vision_local_models`` is a prefix-match
+    # family list — any local model id that starts with one of these
+    # strings (case-insensitive) is treated as vision-capable.
+    "vision_enabled":                (bool,  True),
+    "vision_local_models":           (list,  [
+        "qwen2.5-vl", "llava", "minicpm-v", "moondream",
+    ]),
+
     # Agent / project
     "agent_project_root":            (str,   ""),
 

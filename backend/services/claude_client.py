@@ -167,6 +167,9 @@ class ClaudeClient(LLMClient):
     def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096) -> dict:
         """
         Send a multi-turn conversation. messages = [{"role":..., "content":...}]
+        ``content`` may be a plain string or a list of Anthropic content
+        blocks (e.g. ``[{"type": "image", "source": {...}}, {"type": "text", ...}]``).
+        Both shapes are passed through to the SDK unchanged.
         Returns dict with "text", "input_tokens", "output_tokens".
 
         The system prompt is routed through _build_system_with_cache() so that
@@ -196,6 +199,8 @@ class ClaudeClient(LLMClient):
     ) -> tuple[str, object]:
         """
         Stream a multi-turn conversation with per-token callback.
+        ``messages[*].content`` may be a string or a list of Anthropic
+        content blocks (text + image), both passed through unchanged.
         Returns (full_response_text, usage) where usage has .input_tokens
         and .output_tokens attributes (or None if unavailable).
 

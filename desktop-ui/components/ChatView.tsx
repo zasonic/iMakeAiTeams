@@ -11,6 +11,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
 } from "react";
 import {
@@ -56,6 +57,27 @@ interface ChatRowData {
   cancelRun: (taskId: string) => void;
 }
 
+// PR 11: image input. Browser MIME types we accept for vision blocks.
+// The backend mirrors this list — keep them in sync.
+const IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/webp";
+const IMAGE_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/gif",
+  "image/webp",
+]);
+
+function _isImageMime(t: string | undefined | null): boolean {
+  if (!t) return false;
+  const lc = t.toLowerCase();
+  return IMAGE_MIMES.has(lc) || lc.startsWith("image/");
+}
+
+function _isImageAttachment(a: Attachment): boolean {
+  return _isImageMime(a.mime_type);
+}
+
 export function ChatView() {
   const status = useAppStore((s) => s.sidecarStatus);
   const activeChat = useAppStore((s) => s.activeChat);
@@ -80,7 +102,13 @@ export function ChatView() {
   // can show the "permanent" hint. The drop event itself reads e.shiftKey
   // for the actual decision so a stale dragover doesn't lie.
   const [dragShift, setDragShift] = useState(false);
+  // PR 11: images are always ephemeral. When the dragged payload is an
+  // image, the overlay swaps the persistence hint for an inline note
+  // saying so. dataTransfer.items is the only place this is visible
+  // during dragover (files isn't populated until drop on most browsers).
+  const [dragHasImage, setDragHasImage] = useState(false);
   const dragCounterRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Send phase explicitly drives the Send button's disabled state and the
   // cleanup effects below. "classifying" covers the (potentially LLM-backed)
   // classify round-trip; while in that state, neither the chat-stream nor
@@ -260,12 +288,28 @@ export function ChatView() {
     [activeId, removePendingAttachment, pushToast],
   );
 
+  // PR 11: detect images during the drag phase. ``dataTransfer.items`` is
+  // available on dragenter/dragover (``files`` only populates after drop),
+  // so this is the only place we can tell during the drag whether the
+  // payload is an image and surface the "always ephemeral" inline note.
+  const _dragHasImage = (dt: DataTransfer): boolean => {
+    const items = dt.items;
+    if (!items) return false;
+    for (let i = 0; i < items.length; i += 1) {
+      const it = items[i];
+      if (it.kind === "file" && _isImageMime(it.type)) return true;
+    }
+    return false;
+  };
+
   const onDragEnter = useCallback((e: ReactDragEvent<HTMLDivElement>) => {
     if (!e.dataTransfer.types.includes("Files")) return;
     e.preventDefault();
     dragCounterRef.current += 1;
     setDragActive(true);
-    setDragShift(e.shiftKey);
+    const hasImage = _dragHasImage(e.dataTransfer);
+    setDragHasImage(hasImage);
+    setDragShift(hasImage ? false : e.shiftKey);
   }, []);
 
   const onDragLeave = useCallback((e: ReactDragEvent<HTMLDivElement>) => {
@@ -275,6 +319,7 @@ export function ChatView() {
     if (dragCounterRef.current === 0) {
       setDragActive(false);
       setDragShift(false);
+      setDragHasImage(false);
     }
   }, []);
 
@@ -282,21 +327,71 @@ export function ChatView() {
     if (!e.dataTransfer.types.includes("Files")) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
-    setDragShift(e.shiftKey);
+    const hasImage = _dragHasImage(e.dataTransfer);
+    setDragHasImage(hasImage);
+    setDragShift(hasImage ? false : e.shiftKey);
   }, []);
 
   const onDrop = useCallback(
     (e: ReactDragEvent<HTMLDivElement>) => {
       if (!e.dataTransfer.types.includes("Files")) return;
       e.preventDefault();
-      const persist = e.shiftKey;
       const files = e.dataTransfer.files;
       dragCounterRef.current = 0;
       setDragActive(false);
       setDragShift(false);
-      if (files && files.length > 0 && activeId) {
-        void uploadFiles(files, persist);
+      setDragHasImage(false);
+      if (!files || !files.length || !activeId) return;
+      // PR 11: split images out of the drop payload — they're always
+      // ephemeral regardless of Shift, while text/pdf/etc. honor the
+      // PR 8 Shift-to-persist convention.
+      const arr = Array.from(files);
+      const images = arr.filter((f) => _isImageMime(f.type));
+      const others = arr.filter((f) => !_isImageMime(f.type));
+      const persist = e.shiftKey;
+      if (images.length > 0) void uploadFiles(images, false);
+      if (others.length > 0) void uploadFiles(others, persist);
+    },
+    [activeId, uploadFiles],
+  );
+
+  // PR 11: paste a screenshot (or any clipboard image) directly into the
+  // input. ClipboardEvent.clipboardData.items holds the file blobs.
+  const onPaste = useCallback(
+    (e: ReactClipboardEvent<HTMLTextAreaElement>) => {
+      if (!activeId) return;
+      const data = e.clipboardData;
+      if (!data || !data.items || data.items.length === 0) return;
+      const images: File[] = [];
+      for (let i = 0; i < data.items.length; i += 1) {
+        const it = data.items[i];
+        if (it.kind !== "file") continue;
+        if (!_isImageMime(it.type)) continue;
+        const f = it.getAsFile();
+        if (f) images.push(f);
       }
+      if (images.length === 0) return;
+      // Prevent the bitmap from also landing as text in the textarea
+      // (Chromium would otherwise paste the image's filename as a string
+      // alongside the file).
+      e.preventDefault();
+      void uploadFiles(images, false);
+    },
+    [activeId, uploadFiles],
+  );
+
+  const onPickImages = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const onImagesPicked = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (files && files.length && activeId) {
+        void uploadFiles(files, false);
+      }
+      // Reset so picking the same file twice in a row still fires change.
+      if (e.target) e.target.value = "";
     },
     [activeId, uploadFiles],
   );
@@ -617,7 +712,44 @@ export function ChatView() {
             onRemove={removeAttachment}
           />
           <div className="flex gap-2 items-end">
+            <button
+              type="button"
+              data-testid="chat-image-picker"
+              className="btn-ghost px-2 py-1 text-base leading-none"
+              onClick={onPickImages}
+              disabled={!ready || !activeId || busy}
+              title="Attach an image"
+              aria-label="Attach an image"
+            >
+              {/* Inline SVG keeps the icon-only button accessible without
+                  pulling in a new icon library. */}
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <polyline points="21 15 16 10 5 21" />
+              </svg>
+            </button>
+            <input
+              ref={fileInputRef}
+              data-testid="chat-image-input"
+              type="file"
+              accept={IMAGE_ACCEPT}
+              multiple
+              className="hidden"
+              onChange={onImagesPicked}
+            />
             <textarea
+              data-testid="chat-input"
               className="input flex-1 min-h-[44px] max-h-40 resize-none"
               placeholder={
                 ready
@@ -628,6 +760,7 @@ export function ChatView() {
               }
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onPaste={onPaste}
               onCompositionStart={() => {
                 composingRef.current = true;
               }}
@@ -667,11 +800,19 @@ export function ChatView() {
           >
             <div className="rounded-md border border-line bg-bg-2 px-6 py-4 text-center text-sm text-ink shadow-lg">
               <div className="font-semibold">
-                {dragShift ? "Drop to add to your knowledge base" : "Drop to attach"}
+                {dragHasImage
+                  ? "Drop image to attach"
+                  : dragShift
+                    ? "Drop to add to your knowledge base"
+                    : "Drop to attach"}
               </div>
-              <div className="text-ink-dim text-xs mt-1">
-                Drop to attach. Hold Shift to add to your knowledge base
-                permanently.
+              <div
+                data-testid="chat-drop-overlay-hint"
+                className="text-ink-dim text-xs mt-1"
+              >
+                {dragHasImage
+                  ? "Images are always ephemeral"
+                  : "Drop to attach. Hold Shift to add to your knowledge base permanently."}
               </div>
             </div>
           </div>
@@ -701,40 +842,111 @@ function AttachmentChips({ attachments, onRemove }: AttachmentChipsProps) {
       data-testid="chat-attachment-chips"
       className="flex flex-wrap gap-1.5 mb-2"
     >
-      {attachments.map((a) => (
-        <span
-          key={a.id}
-          data-testid={`chat-attachment-chip-${a.id}`}
-          className={`inline-flex items-center gap-2 rounded-md border px-2 py-1 text-xs ${
-            a.persist
-              ? "border-accent/40 bg-accent/10 text-ink"
-              : "border-line bg-bg-2 text-ink"
-          }`}
-          title={
-            a.persist
-              ? `${a.filename} — saved to knowledge base`
-              : `${a.filename} — ephemeral (next send only)`
-          }
-        >
-          <span className="truncate max-w-[14rem]">{a.filename}</span>
-          <span className="text-ink-faint">{_formatBytes(a.size_bytes)}</span>
-          {a.persist && (
-            <span className="text-[10px] uppercase tracking-wide text-accent">
-              Saved
-            </span>
-          )}
-          <button
-            type="button"
-            data-testid={`chat-attachment-remove-${a.id}`}
-            aria-label={`Remove ${a.filename}`}
-            onClick={() => onRemove(a.id)}
-            className="text-ink-dim hover:text-ink"
+      {attachments.map((a) =>
+        _isImageAttachment(a) ? (
+          <ImageAttachmentChip key={a.id} attachment={a} onRemove={onRemove} />
+        ) : (
+          <span
+            key={a.id}
+            data-testid={`chat-attachment-chip-${a.id}`}
+            className={`inline-flex items-center gap-2 rounded-md border px-2 py-1 text-xs ${
+              a.persist
+                ? "border-accent/40 bg-accent/10 text-ink"
+                : "border-line bg-bg-2 text-ink"
+            }`}
+            title={
+              a.persist
+                ? `${a.filename} — saved to knowledge base`
+                : `${a.filename} — ephemeral (next send only)`
+            }
           >
-            ×
-          </button>
-        </span>
-      ))}
+            <span className="truncate max-w-[14rem]">{a.filename}</span>
+            <span className="text-ink-faint">{_formatBytes(a.size_bytes)}</span>
+            {a.persist && (
+              <span className="text-[10px] uppercase tracking-wide text-accent">
+                Saved
+              </span>
+            )}
+            <button
+              type="button"
+              data-testid={`chat-attachment-remove-${a.id}`}
+              aria-label={`Remove ${a.filename}`}
+              onClick={() => onRemove(a.id)}
+              className="text-ink-dim hover:text-ink"
+            >
+              ×
+            </button>
+          </span>
+        ),
+      )}
     </div>
+  );
+}
+
+// PR 11: image chip with a thumbnail. The thumbnail is fetched from the
+// attachment endpoint so the chip rehydrates correctly after reload (the
+// raw File object only exists in memory at upload time). Falls back to a
+// generic icon if the network fetch fails.
+interface ImageAttachmentChipProps {
+  attachment: Attachment;
+  onRemove: (id: string) => void;
+}
+
+function ImageAttachmentChip({ attachment, onRemove }: ImageAttachmentChipProps) {
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    let revoke: string | null = null;
+    let alive = true;
+    Attachments.fetchBlob(attachment.id)
+      .then((blob) => {
+        if (!alive) return;
+        const url = URL.createObjectURL(blob);
+        revoke = url;
+        setSrc(url);
+      })
+      .catch(() => {
+        /* leave src null — fallback marker shows */
+      });
+    return () => {
+      alive = false;
+      if (revoke) URL.revokeObjectURL(revoke);
+    };
+  }, [attachment.id]);
+
+  return (
+    <span
+      data-testid={`chat-attachment-chip-${attachment.id}`}
+      data-image="true"
+      className="inline-flex items-center gap-2 rounded-md border border-line bg-bg-2 px-2 py-1 text-xs text-ink"
+      title={`${attachment.filename} — image (ephemeral)`}
+    >
+      <span
+        className="block h-7 w-7 rounded border border-line bg-bg-1 overflow-hidden flex items-center justify-center"
+      >
+        {src ? (
+          <img
+            data-testid={`chat-attachment-thumb-${attachment.id}`}
+            src={src}
+            alt=""
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <span aria-hidden="true" className="text-ink-faint">🖼️</span>
+        )}
+      </span>
+      <span className="truncate max-w-[10rem]">{attachment.filename}</span>
+      <span className="text-ink-faint">{_formatBytes(attachment.size_bytes)}</span>
+      <button
+        type="button"
+        data-testid={`chat-attachment-remove-${attachment.id}`}
+        aria-label={`Remove ${attachment.filename}`}
+        onClick={() => onRemove(attachment.id)}
+        className="text-ink-dim hover:text-ink"
+      >
+        ×
+      </button>
+    </span>
   );
 }
 

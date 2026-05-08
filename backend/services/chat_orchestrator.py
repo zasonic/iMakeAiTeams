@@ -27,6 +27,7 @@ through SecurityAssessment when the cumulative risk score exceeds the
 configured threshold.
 """
 
+import base64
 import concurrent.futures
 import difflib
 import json
@@ -43,6 +44,7 @@ from models import (
 )
 from services.governance import GovernanceEngine, is_high_stakes_message
 from services.hub_router import HubRouter
+from services.local_client import LocalVisionUnavailable
 from services import qwen_thinking
 from services.redact import redact
 from services.security_engine import (
@@ -451,20 +453,114 @@ class ChatOrchestrator:
         """Return the ``content_extract`` of every ephemeral attachment for
         this conversation, in upload order. Persistent attachments live in
         RAG and are reached via the normal ``mem.rag_chunks`` path.
+
+        Skips image rows — images are fed to the model via vision blocks,
+        not as quarantined text context.
         """
         rows = _db.fetchall(
-            "SELECT filename, content_extract FROM attachments "
+            "SELECT filename, mime_type, content_extract FROM attachments "
             "WHERE conversation_id = ? AND persist = 0 "
             "ORDER BY created_at ASC",
             (conversation_id,),
         )
         chunks: list[str] = []
         for r in rows:
+            mime = (r["mime_type"] or "").lower()
+            if mime.startswith("image/"):
+                continue
             extract = r["content_extract"] or ""
             if not extract.strip():
                 continue
             chunks.append(f"[{r['filename']}]\n{extract}")
         return chunks
+
+    @staticmethod
+    def _fetch_image_attachments(conversation_id: str) -> list[dict]:
+        """Return image attachments for this conversation as a list of
+        ``{"id", "filename", "mime_type", "data": <base64 str>}`` dicts.
+
+        Reads each image file from ``userData/attachments/`` and base64-
+        encodes it. Files that fail to read are skipped and logged at
+        warning level so a single bad row doesn't poison the turn.
+        """
+        rows = _db.fetchall(
+            "SELECT id, filename, mime_type FROM attachments "
+            "WHERE conversation_id = ? AND mime_type LIKE 'image/%' "
+            "ORDER BY created_at ASC",
+            (conversation_id,),
+        )
+        if not rows:
+            return []
+        from core import paths as _paths
+        adir = _paths.attachments_dir()
+        out: list[dict] = []
+        for r in rows:
+            name = r["filename"] or ""
+            ext = ""
+            dot = name.rfind(".")
+            if dot >= 0:
+                ext = name[dot:].lower()
+            disk_path = adir / f"{r['id']}{ext}"
+            try:
+                raw = disk_path.read_bytes()
+            except OSError as exc:
+                log.warning(
+                    "image attachment %s missing on disk: %s", r["id"], exc,
+                )
+                continue
+            try:
+                data = base64.b64encode(raw).decode("ascii")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("image attachment %s encode failed: %s", r["id"], exc)
+                continue
+            out.append({
+                "id": r["id"],
+                "filename": name,
+                "mime_type": (r["mime_type"] or "image/png").lower(),
+                "data": data,
+            })
+        return out
+
+    @staticmethod
+    def _attach_images_to_messages(
+        messages: list, images: list[dict],
+    ) -> list:
+        """Return a copy of ``messages`` with Anthropic image blocks
+        prepended to the last user message's content.
+
+        The shape matches Anthropic's spec:
+          {"type": "image", "source": {"type": "base64",
+            "media_type": "image/png", "data": "<base64>"}}
+
+        When the last user message has string content, it's converted to
+        a content-block list with the original text as a trailing text
+        block. When already a list, image blocks are prepended verbatim.
+        """
+        if not images:
+            return messages
+        out = list(messages)
+        for i in range(len(out) - 1, -1, -1):
+            if out[i].get("role") != "user":
+                continue
+            content = out[i].get("content")
+            blocks: list[dict] = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img["mime_type"],
+                        "data": img["data"],
+                    },
+                }
+                for img in images
+            ]
+            if isinstance(content, list):
+                blocks.extend(content)
+            else:
+                blocks.append({"type": "text", "text": str(content or "")})
+            out[i] = {**out[i], "content": blocks}
+            break
+        return out
 
     @staticmethod
     def _purge_ephemeral_attachments(conversation_id: str) -> None:
@@ -1053,6 +1149,18 @@ class ChatOrchestrator:
                         attachment_block + "\n\n" + last.get("content", "")
                     )
 
+        # ── PR 11: image attachments (vision input) ──────────────────────────
+        # Images are fetched separately from text — they don't go through the
+        # quarantine envelope (binary, not data-as-text), they ride as
+        # provider-specific blocks instead. When the vision_enabled setting
+        # is off, images are silently ignored to preserve existing behavior.
+        image_attachments: list[dict] = []
+        if self._settings.get("vision_enabled", True):
+            try:
+                image_attachments = self._fetch_image_attachments(conversation_id)
+            except Exception as exc:
+                log.debug("image attachment fetch failed: %s", exc)
+
         # Recall memory and build system context
         mem = self.memory.get_context(conversation_id, user_message)
         mem_suffix = mem.to_system_suffix()
@@ -1191,6 +1299,46 @@ class ChatOrchestrator:
 
         # ── Improvement 6: Resolve execution target ──────────────────────────
         target = self._resolve_target(decision.backend, agent)
+
+        # ── PR 11: vision dispatch decision ──────────────────────────────────
+        # Decide once, here, whether image attachments will ride along on
+        # this turn. For Claude, we splice image blocks into the messages
+        # list so any downstream path (voting, monolithic, reader/actor)
+        # passes them through transparently. For local, we need a
+        # vision-capable model — otherwise raise LocalVisionUnavailable now
+        # so the user sees a friendly hint instead of a silent text-only
+        # response. The list is reused below.
+        if image_attachments and target.backend == "local":
+            local_model = self._settings.get("default_local_model", "")
+            if not (
+                hasattr(self.local, "is_vision_model")
+                and self.local.is_vision_model(local_model)
+            ):
+                families = self._settings.get("vision_local_models", []) or []
+                fams = ", ".join(str(f) for f in families) or "(none configured)"
+                msg = (
+                    f"🖼️ Your active local model ({local_model or 'none'}) "
+                    f"can't see images. Switch to a vision-capable model "
+                    f"such as: {fams}, then resend."
+                )
+                _emit_event("vision_unavailable", {
+                    "active_model": local_model,
+                    "families": list(families),
+                })
+                # Drop the ephemeral image rows so they don't linger to the
+                # next send and trigger the same error again.
+                try:
+                    self._purge_ephemeral_attachments(conversation_id)
+                except Exception:
+                    pass
+                return ChatResult(
+                    text=msg, model=local_model,
+                    route_reason="vision_unavailable_local",
+                    tokens_in=0, tokens_out=0, cost_usd=0.0,
+                    message_id=str(uuid.uuid4()),
+                )
+        if image_attachments and target.backend == "claude":
+            messages = self._attach_images_to_messages(messages, image_attachments)
 
         # ══════════════════════════════════════════════════════════════════════
         # SECURITY ENGINE: Structural enforcement before model inference
@@ -1511,6 +1659,9 @@ class ChatOrchestrator:
             and target.backend == "claude"
             and complexity == "complex"
             and not on_token  # only in non-streaming path (thinking is blocking)
+            and not image_attachments  # extended-thinking takes a str user
+                                       # message; falling through to the
+                                       # standard path keeps image blocks
         ):
             try:
                 _emit_event("reasoning_started", {
@@ -1543,16 +1694,44 @@ class ChatOrchestrator:
         # Phase 6: when the split ran, do NOT fall back to a monolithic
         # invocation even if the Actor produced an empty reply — that would
         # leak the user's raw message + retrieved data past the wall.
+        # Phase 11: when the route is local + the user attached images,
+        # bypass hub_router and call chat_with_images so the images ride
+        # via Ollama's payload field instead of being ignored.
         if not response_text and not split_enabled:
-            worker_result = self.hub_router.invoke(
-                decision, full_system, messages,
-                max_tokens=target.max_tokens, on_token=on_token,
-            )
-            response_text = worker_result.text
-            tokens_in = worker_result.input_tokens
-            tokens_out = worker_result.output_tokens
-            if worker_result.had_error:
-                had_error = True
+            if image_attachments and target.backend == "local":
+                try:
+                    text = self.local.chat_with_images(
+                        full_system, messages,
+                        [img["data"] for img in image_attachments],
+                        max_tokens=target.max_tokens,
+                    )
+                    response_text = text or ""
+                    tokens_in = 0
+                    tokens_out = 0
+                    if on_token and response_text:
+                        try:
+                            on_token(response_text)
+                        except Exception:
+                            pass
+                except LocalVisionUnavailable as exc:
+                    response_text = (
+                        f"🖼️ {exc}. Switch to a vision-capable model and resend."
+                    )
+                    had_error = True
+                except Exception as exc:
+                    log.warning("local vision invocation failed: %s", exc)
+                    response_text = f"[Error: {exc}]"
+                    had_error = True
+            else:
+                worker_result = self.hub_router.invoke(
+                    decision, full_system, messages,
+                    max_tokens=target.max_tokens, on_token=on_token,
+                )
+                response_text = worker_result.text
+                tokens_in = worker_result.input_tokens
+                tokens_out = worker_result.output_tokens
+                if worker_result.had_error:
+                    had_error = True
 
         # ── Post-assembly alignment check (informational) ───────────────────
         # When an agent was involved, ask the local model whether the worker's

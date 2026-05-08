@@ -33,6 +33,7 @@ vi.mock("@/api/client", () => ({
     list: vi.fn(),
     upload: vi.fn(),
     delete: vi.fn(),
+    fetchBlob: vi.fn(),
   },
 }));
 
@@ -92,6 +93,28 @@ beforeEach(() => {
   vi.mocked(Attachments.list).mockResolvedValue([]);
   vi.mocked(Attachments.upload).mockReset();
   vi.mocked(Attachments.delete).mockReset();
+  // Default: image chips get a tiny opaque blob so the thumbnail effect
+  // doesn't crash on a `.then` of undefined. Tests that assert on the
+  // thumbnail override this with a richer blob.
+  vi.mocked(Attachments.fetchBlob).mockReset();
+  vi.mocked(Attachments.fetchBlob).mockResolvedValue(
+    new Blob([new Uint8Array([0])], { type: "image/png" }),
+  );
+  // jsdom doesn't ship URL.createObjectURL — the image chip renders a
+  // <img src=…> from one. Stub it (and the matching revoke) so the chip
+  // mounts cleanly under test.
+  if (typeof URL.createObjectURL !== "function") {
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: vi.fn(() => "blob:fake-thumb"),
+    });
+  }
+  if (typeof URL.revokeObjectURL !== "function") {
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: vi.fn(),
+    });
+  }
 });
 
 afterEach(() => {
@@ -303,5 +326,179 @@ describe("ChatView attachments", () => {
   it("renders no chip strip when pendingAttachments is empty", async () => {
     await renderWithLoadedConversation();
     expect(screen.queryByTestId("chat-attachment-chips")).toBeNull();
+  });
+});
+
+// ── PR 11: image input ──────────────────────────────────────────────────────
+
+function _makeImageFile(name = "shot.png", type = "image/png"): File {
+  return new File([new Uint8Array([137, 80, 78, 71])], name, { type });
+}
+
+function _imageDataTransfer(files: File[], shiftKey: boolean) {
+  const fileList: Record<string, unknown> = {
+    length: files.length,
+    item: (i: number) => files[i] ?? null,
+  };
+  files.forEach((f, i) => {
+    fileList[i] = f;
+  });
+  return {
+    types: ["Files"],
+    files: fileList,
+    items: files.map((f) => ({
+      kind: "file",
+      type: f.type,
+      getAsFile: () => f,
+    })),
+    dropEffect: "",
+    effectAllowed: "all",
+    getData: () => "",
+    setData: () => {},
+    shiftKey,
+  };
+}
+
+function _fireImageDragEvent(
+  target: Element,
+  type: string,
+  files: File[],
+  shiftKey: boolean,
+) {
+  const dt = _imageDataTransfer(files, shiftKey);
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", { value: dt });
+  Object.defineProperty(event, "shiftKey", { value: shiftKey });
+  target.dispatchEvent(event);
+}
+
+describe("ChatView image attachments (PR 11)", () => {
+  it("paste of an image triggers uploadAttachment with persist=false", async () => {
+    vi.mocked(Attachments.upload).mockResolvedValue({
+      id: "img-1",
+      filename: "Image.png",
+      size_bytes: 4,
+      persist: false,
+      extract_chars: 0,
+    });
+    await renderWithLoadedConversation();
+
+    const textarea = screen.getByTestId("chat-input") as HTMLTextAreaElement;
+    const img = _makeImageFile("Image.png");
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: {
+        items: [
+          { kind: "file", type: img.type, getAsFile: () => img },
+        ],
+      },
+    });
+    textarea.dispatchEvent(pasteEvent);
+
+    await waitFor(() => {
+      expect(Attachments.upload).toHaveBeenCalledTimes(1);
+    });
+    const call = vi.mocked(Attachments.upload).mock.calls[0];
+    expect(call[0]).toBe("conv-A");
+    expect((call[1] as File).name).toBe("Image.png");
+    expect(call[2]).toBe(false);
+  });
+
+  it("drop of an image with Shift held still uses persist=false", async () => {
+    vi.mocked(Attachments.upload).mockResolvedValue({
+      id: "img-2",
+      filename: "snap.png",
+      size_bytes: 4,
+      persist: false,
+      extract_chars: 0,
+    });
+    await renderWithLoadedConversation();
+
+    const target = screen.getByTestId("chat-drop-target");
+    const img = _makeImageFile("snap.png");
+    _fireImageDragEvent(target, "dragenter", [img], true);
+    _fireImageDragEvent(target, "drop", [img], true);
+
+    await waitFor(() => {
+      expect(Attachments.upload).toHaveBeenCalledTimes(1);
+    });
+    // Shift is ignored for images — the override forces persist=false.
+    expect(vi.mocked(Attachments.upload).mock.calls[0][2]).toBe(false);
+  });
+
+  it("dragging an image shows the 'always ephemeral' note in the overlay", async () => {
+    await renderWithLoadedConversation();
+
+    const target = screen.getByTestId("chat-drop-target");
+    _fireImageDragEvent(target, "dragenter", [_makeImageFile()], false);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-drop-overlay")).toBeTruthy();
+    });
+    const hint = screen.getByTestId("chat-drop-overlay-hint");
+    expect(hint.textContent).toMatch(/ephemeral/i);
+  });
+
+  it("file picker opens with accept=image/* and uploads with persist=false", async () => {
+    vi.mocked(Attachments.upload).mockResolvedValue({
+      id: "img-3",
+      filename: "pick.png",
+      size_bytes: 4,
+      persist: false,
+      extract_chars: 0,
+    });
+    await renderWithLoadedConversation();
+
+    const picker = screen.getByTestId("chat-image-input") as HTMLInputElement;
+    expect(picker.accept).toContain("image/");
+
+    // Simulate the file picker selecting an image.
+    const img = _makeImageFile("pick.png");
+    Object.defineProperty(picker, "files", {
+      value: {
+        length: 1,
+        0: img,
+        item: (i: number) => (i === 0 ? img : null),
+      },
+      configurable: true,
+    });
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await waitFor(() => {
+      expect(Attachments.upload).toHaveBeenCalledTimes(1);
+    });
+    expect(vi.mocked(Attachments.upload).mock.calls[0][2]).toBe(false);
+  });
+
+  it("renders an image chip with a thumbnail and X to remove", async () => {
+    const seeded = {
+      id: "img-4",
+      conversation_id: "conv-A",
+      filename: "thumb.png",
+      mime_type: "image/png",
+      size_bytes: 12,
+      persist: false,
+      rag_doc_id: null,
+      created_at: "2026-05-01T10:00:00Z",
+    };
+    vi.mocked(Attachments.list).mockResolvedValue([seeded]);
+    vi.mocked(Attachments.fetchBlob).mockResolvedValue(
+      new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }),
+    );
+    vi.mocked(Attachments.delete).mockResolvedValue({ ok: true });
+    await renderWithLoadedConversation();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-attachment-chip-img-4")).toBeTruthy();
+    });
+    // Wait for the async blob fetch + thumbnail render.
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-attachment-thumb-img-4")).toBeTruthy();
+    });
+
+    await userEvent.click(screen.getByTestId("chat-attachment-remove-img-4"));
+    await waitFor(() => {
+      expect(Attachments.delete).toHaveBeenCalledWith("img-4");
+    });
   });
 });
