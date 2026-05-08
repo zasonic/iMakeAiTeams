@@ -8,6 +8,7 @@
 
 import type { SidecarInfo } from "@/env";
 import type { SafetySummary } from "@/types/safety";
+import type { UsageGroupBy, UsageSummary } from "@/types/usage";
 
 let cached: SidecarInfo | null = null;
 let inflight: Promise<SidecarInfo> | null = null;
@@ -566,6 +567,11 @@ export const Echo = {
 export const Safety = {
   getSafetySummary: (days: number = 30) =>
     api.get<SafetySummary>("/api/safety/summary", { days }),
+};
+
+export const Usage = {
+  getUsageSummary: (days: number = 30, groupBy: UsageGroupBy = "day") =>
+    api.get<UsageSummary>("/api/usage/summary", { days, group_by: groupBy }),
 };
 
 // ── Power Mode (v3) — Docker / OpenClaw delegation ────────────────────────

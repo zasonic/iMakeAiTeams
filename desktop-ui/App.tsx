@@ -22,6 +22,7 @@ import { SettingsPanel } from "@/components/SettingsPanel";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBar } from "@/components/StatusBar";
 import { UpdateBanner } from "@/components/UpdateBanner";
+import { UsagePanel } from "@/components/UsagePanel";
 import {
   useAppStore,
   type CanaryAlert,
@@ -455,6 +456,7 @@ export function App() {
           {view === "mcp" && <McpPanel />}
           {view === "security" && <SecurityPanel />}
           {view === "safety" && <SafetyPanel />}
+          {view === "usage" && <UsagePanel />}
           {view === "settings" && <SettingsPanel />}
           {view === "diagnostics" && <DiagnosticsPanel />}
           {view === "escalations" && <EscalationPanel />}

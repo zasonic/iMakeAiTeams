@@ -21,6 +21,7 @@ export type ActiveView =
   | "mcp"
   | "security"
   | "safety"
+  | "usage"
   | "settings"
   | "diagnostics"
   | "escalations";

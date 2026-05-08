@@ -19,6 +19,7 @@ const NAV: NavItem[] = [
   { id: "mcp", label: "MCP", hint: "Tool servers", studioOnly: true },
   { id: "security", label: "Security", hint: "Firewall + scan log", studioOnly: true },
   { id: "safety", label: "Safety", hint: "Escalations, gate, canary, voting" },
+  { id: "usage", label: "Usage", hint: "Token consumption and cost" },
   { id: "settings", label: "Settings", hint: "API keys, models, routing" },
   { id: "diagnostics", label: "Diagnostics", hint: "Health + error logs", studioOnly: true },
 ];
