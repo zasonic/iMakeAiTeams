@@ -286,6 +286,25 @@ export function SettingsPanel() {
       </section>
 
       <section className="card">
+        <h3 className="font-semibold mb-2">Updates</h3>
+        <label className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={!!config.auto_update_enabled}
+            onChange={(e) => save("auto_update_enabled", e.target.checked)}
+          />
+          <span className="text-sm">
+            <div>Automatic updates</div>
+            <div className="text-xs text-ink-dim">
+              Check for new versions in the background. Never restarts without
+              your permission.
+            </div>
+          </span>
+        </label>
+      </section>
+
+      <section className="card">
         <h3 className="font-semibold mb-2">System prompt</h3>
         <textarea
           className="input min-h-[120px] font-mono text-xs"

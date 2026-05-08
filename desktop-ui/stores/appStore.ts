@@ -179,6 +179,14 @@ export interface AppState {
   // so the wizard can survive a re-mount without losing progress state.
   bundledDownload: BundledDownloadState;
 
+  // Phase 10: silent auto-update banner state. `updateReady` is set when
+  // electron-updater fires "update-downloaded" via IPC; the UpdateBanner
+  // shows until the user clicks "Restart now" or "Later". Dismissal is
+  // session-scoped — never persisted — so the banner reappears on the next
+  // launch if the update is still pending.
+  updateReady: { version: string } | null;
+  updateBannerDismissed: boolean;
+
   // Actions
   setActiveView: (v: ActiveView) => void;
   setStudioMode: (on: boolean) => void;
@@ -223,6 +231,10 @@ export interface AppState {
   // Bundled-download actions (Phase 9)
   setBundledDownload: (s: BundledDownloadState) => void;
   patchBundledDownload: (patch: Partial<BundledDownloadState>) => void;
+
+  // Auto-update banner actions (Phase 10)
+  setUpdateReady: (v: { version: string } | null) => void;
+  setUpdateBannerDismissed: (b: boolean) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -251,6 +263,8 @@ export const useAppStore = create<AppState>()(
         bytesTotal: 0,
         error: "",
       },
+      updateReady: null,
+      updateBannerDismissed: false,
 
       setActiveView: (v) => set({ activeView: v }),
       setStudioMode: (on) => set({ studioMode: on }),
@@ -431,6 +445,17 @@ export const useAppStore = create<AppState>()(
       setBundledDownload: (s) => set({ bundledDownload: s }),
       patchBundledDownload: (patch) =>
         set((state) => ({ bundledDownload: { ...state.bundledDownload, ...patch } })),
+
+      // ── Auto-update banner (Phase 10) ────────────────────────────────
+      // Setting a fresh updateReady payload also resets the dismissed flag so
+      // a brand-new download surfaces the banner even if the user dismissed
+      // an earlier one in the same session.
+      setUpdateReady: (v) =>
+        set((state) => ({
+          updateReady: v,
+          updateBannerDismissed: v ? false : state.updateBannerDismissed,
+        })),
+      setUpdateBannerDismissed: (b) => set({ updateBannerDismissed: b }),
 
       endPowerModeRun: (taskId) => {
         set((state) => {

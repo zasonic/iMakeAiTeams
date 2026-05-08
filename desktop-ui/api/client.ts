@@ -141,6 +141,7 @@ export interface SettingsPayload {
   power_mode_api_key_set: boolean;
   power_mode_autostart: boolean;
   power_mode_gateway_port: number;
+  auto_update_enabled: boolean;
 }
 
 export const Settings = {

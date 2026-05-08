@@ -69,6 +69,8 @@ class SettingsAPI(BaseAPI):
             "power_mode_api_key_set":     bool(raw_pm_key),
             "power_mode_autostart":       bool(self._settings.get("power_mode_autostart")),
             "power_mode_gateway_port":    int(self._settings.get("power_mode_gateway_port") or 18789),
+            # Phase 10: silent auto-update toggle.
+            "auto_update_enabled":        bool(self._settings.get("auto_update_enabled")),
         }
 
     def save_setting(self, key: str, value: Any) -> None:

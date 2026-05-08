@@ -21,7 +21,9 @@ export interface ElectronAPI {
   getAppVersion: () => Promise<string>;
   getUserDataPath: () => Promise<string>;
   onSidecarStatus: (handler: (status: SidecarStatus) => void) => () => void;
-  onUpdateAvailable: (handler: (info: { version: string }) => void) => () => void;
+  onUpdateAvailable: (
+    handler: (info: { version: string; notesUrl?: string }) => void,
+  ) => () => void;
   onUpdateDownloaded: (handler: (info: { version: string }) => void) => () => void;
   installUpdate: () => Promise<void>;
 }

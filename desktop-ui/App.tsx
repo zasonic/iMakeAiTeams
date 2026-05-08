@@ -21,6 +21,7 @@ import { SecurityPanel } from "@/components/SecurityPanel";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBar } from "@/components/StatusBar";
+import { UpdateBanner } from "@/components/UpdateBanner";
 import {
   useAppStore,
   type CanaryAlert,
@@ -440,6 +441,7 @@ export function App() {
   return (
     <div className="flex flex-col h-screen">
       <StatusBar />
+      <UpdateBanner />
       <div className="flex flex-1 min-h-0">
         <Sidebar />
         <main className="flex-1 min-w-0 overflow-hidden">

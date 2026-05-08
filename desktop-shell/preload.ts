@@ -47,7 +47,9 @@ export interface ElectronAPI {
   /** Subscribe to sidecar lifecycle changes; returns an unsubscribe fn. */
   onSidecarStatus: (handler: (status: SidecarStatus) => void) => () => void;
   /** Subscribe to "update available" notifications from electron-updater. */
-  onUpdateAvailable: (handler: (info: { version: string }) => void) => () => void;
+  onUpdateAvailable: (
+    handler: (info: { version: string; notesUrl?: string }) => void,
+  ) => () => void;
   /** Subscribe to "update downloaded" notifications. */
   onUpdateDownloaded: (handler: (info: { version: string }) => void) => () => void;
   /** Restart and apply a downloaded update. */
@@ -74,16 +76,19 @@ const api: ElectronAPI = {
     return () => ipcRenderer.removeListener("sidecar:status", wrapped);
   },
   onUpdateAvailable: (handler) => {
-    const wrapped = (_e: Electron.IpcRendererEvent, info: { version: string }) => handler(info);
-    ipcRenderer.on("updater:available", wrapped);
-    return () => ipcRenderer.removeListener("updater:available", wrapped);
+    const wrapped = (
+      _e: Electron.IpcRendererEvent,
+      info: { version: string; notesUrl?: string },
+    ) => handler(info);
+    ipcRenderer.on("update:available", wrapped);
+    return () => ipcRenderer.removeListener("update:available", wrapped);
   },
   onUpdateDownloaded: (handler) => {
     const wrapped = (_e: Electron.IpcRendererEvent, info: { version: string }) => handler(info);
-    ipcRenderer.on("updater:downloaded", wrapped);
-    return () => ipcRenderer.removeListener("updater:downloaded", wrapped);
+    ipcRenderer.on("update:downloaded", wrapped);
+    return () => ipcRenderer.removeListener("update:downloaded", wrapped);
   },
-  installUpdate: () => ipcRenderer.invoke("updater:install"),
+  installUpdate: () => ipcRenderer.invoke("update:install-now"),
 };
 
 contextBridge.exposeInMainWorld("electronAPI", api);
