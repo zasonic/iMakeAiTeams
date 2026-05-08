@@ -29,9 +29,14 @@ vi.mock("@/api/client", () => ({
   Settings: {
     get: vi.fn(),
   },
+  Attachments: {
+    list: vi.fn(),
+    upload: vi.fn(),
+    delete: vi.fn(),
+  },
 }));
 
-import { Chat, Settings } from "@/api/client";
+import { Attachments, Chat, Settings } from "@/api/client";
 
 // jsdom doesn't ship ResizeObserver but the virtualized message list
 // instantiates one. A no-op stand-in is enough — the export menu doesn't
@@ -62,7 +67,12 @@ const RESET_STATE = useAppStore.getState();
 beforeEach(() => {
   Object.assign(globalThis, { ResizeObserver: _RO });
   useAppStore.setState(
-    { sidecarStatus: READY_STATUS, toasts: [], powerModeRuns: {} },
+    {
+      sidecarStatus: READY_STATUS,
+      toasts: [],
+      powerModeRuns: {},
+      pendingAttachments: {},
+    },
     false,
   );
   Object.assign(window, {
@@ -79,6 +89,9 @@ beforeEach(() => {
   vi.mocked(Chat.messages).mockResolvedValue(FAKE_MESSAGES);
   vi.mocked(Chat.exportConversation).mockReset();
   vi.mocked(Settings.get).mockResolvedValue({ power_mode_enabled: false } as never);
+  vi.mocked(Attachments.list).mockResolvedValue([]);
+  vi.mocked(Attachments.upload).mockReset();
+  vi.mocked(Attachments.delete).mockReset();
 });
 
 afterEach(() => {
@@ -167,5 +180,128 @@ describe("ChatView export menu", () => {
     const [html, name] = vi.mocked(window.electronAPI.exportPdf).mock.calls[0];
     expect(html).toBe("<html><body>chat</body></html>");
     expect(name).toBe("Alpha chat.pdf");
+  });
+});
+
+// ── Attachments (PR 8) ─────────────────────────────────────────────────────
+
+function _makeFile(name: string, content = "hello"): File {
+  // jsdom's File constructor accepts (parts, name, options).
+  return new File([content], name, { type: "text/plain" });
+}
+
+function _dataTransfer(files: File[], shiftKey: boolean) {
+  // Build a FileList-shaped object: index access + length + item().
+  const fileList: Record<string, unknown> = {
+    length: files.length,
+    item: (i: number) => files[i] ?? null,
+  };
+  files.forEach((f, i) => {
+    fileList[i] = f;
+  });
+  return {
+    types: ["Files"],
+    files: fileList,
+    dropEffect: "",
+    effectAllowed: "all",
+    getData: () => "",
+    setData: () => {},
+    shiftKey,
+  };
+}
+
+function _fireDragEvent(target: Element, type: string, files: File[], shiftKey: boolean) {
+  const dt = _dataTransfer(files, shiftKey);
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", { value: dt });
+  Object.defineProperty(event, "shiftKey", { value: shiftKey });
+  target.dispatchEvent(event);
+}
+
+describe("ChatView attachments", () => {
+  it("dragover shows the drop overlay", async () => {
+    await renderWithLoadedConversation();
+    expect(screen.queryByTestId("chat-drop-overlay")).toBeNull();
+
+    const target = screen.getByTestId("chat-drop-target");
+    _fireDragEvent(target, "dragenter", [_makeFile("a.txt")], false);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-drop-overlay")).toBeTruthy();
+    });
+  });
+
+  it("drop without Shift uploads with persist=false", async () => {
+    vi.mocked(Attachments.upload).mockResolvedValue({
+      id: "att-1",
+      filename: "a.txt",
+      size_bytes: 5,
+      persist: false,
+      extract_chars: 5,
+    });
+    await renderWithLoadedConversation();
+
+    const target = screen.getByTestId("chat-drop-target");
+    _fireDragEvent(target, "dragenter", [_makeFile("a.txt")], false);
+    _fireDragEvent(target, "drop", [_makeFile("a.txt")], false);
+
+    await waitFor(() => {
+      expect(Attachments.upload).toHaveBeenCalledTimes(1);
+    });
+    const call = vi.mocked(Attachments.upload).mock.calls[0];
+    expect(call[0]).toBe("conv-A");
+    expect((call[1] as File).name).toBe("a.txt");
+    expect(call[2]).toBe(false);
+  });
+
+  it("drop with Shift uploads with persist=true", async () => {
+    vi.mocked(Attachments.upload).mockResolvedValue({
+      id: "att-2",
+      filename: "doc.md",
+      size_bytes: 9,
+      persist: true,
+      extract_chars: 9,
+    });
+    await renderWithLoadedConversation();
+
+    const target = screen.getByTestId("chat-drop-target");
+    _fireDragEvent(target, "dragenter", [_makeFile("doc.md")], true);
+    _fireDragEvent(target, "drop", [_makeFile("doc.md")], true);
+
+    await waitFor(() => {
+      expect(Attachments.upload).toHaveBeenCalledTimes(1);
+    });
+    expect(vi.mocked(Attachments.upload).mock.calls[0][2]).toBe(true);
+  });
+
+  it("clicking a chip's X calls Attachments.delete", async () => {
+    const seeded = {
+      id: "att-3",
+      conversation_id: "conv-A",
+      filename: "old.txt",
+      mime_type: "text/plain",
+      size_bytes: 12,
+      persist: false,
+      rag_doc_id: null,
+      created_at: "2026-05-01T10:00:00Z",
+    };
+    vi.mocked(Attachments.list).mockResolvedValue([seeded]);
+    vi.mocked(Attachments.delete).mockResolvedValue({ ok: true });
+    await renderWithLoadedConversation();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-attachment-chip-att-3")).toBeTruthy();
+    });
+
+    await userEvent.click(screen.getByTestId("chat-attachment-remove-att-3"));
+
+    await waitFor(() => {
+      expect(Attachments.delete).toHaveBeenCalledWith("att-3");
+    });
+  });
+
+  it("renders no chip strip when pendingAttachments is empty", async () => {
+    await renderWithLoadedConversation();
+    expect(screen.queryByTestId("chat-attachment-chips")).toBeNull();
   });
 });

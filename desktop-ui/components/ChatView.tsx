@@ -5,13 +5,27 @@
 // /api/docker/execute and stream OpenClaw step events via SSE. "Chat"-class
 // messages keep the v2 path intact.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+} from "react";
 import {
   VariableSizeList,
   type ListChildComponentProps,
 } from "react-window";
 
-import { Chat, Docker, Settings, type ConversationExportFormat } from "@/api/client";
+import {
+  Attachments,
+  Chat,
+  Docker,
+  Settings,
+  type Attachment,
+  type ConversationExportFormat,
+} from "@/api/client";
 import { ExecutionCard } from "@/components/ExecutionCard";
 import { MessageRenderer } from "@/components/MessageRenderer";
 import { useAppStore, type PowerModeRun } from "@/stores/appStore";
@@ -52,11 +66,21 @@ export function ChatView() {
   const resolvePowerModeApproval = useAppStore((s) => s.resolvePowerModeApproval);
   const powerModeEnabled = useAppStore((s) => s.powerModeEnabled);
   const setPowerModeEnabled = useAppStore((s) => s.setPowerModeEnabled);
+  const pendingAttachments = useAppStore((s) => s.pendingAttachments);
+  const setPendingAttachments = useAppStore((s) => s.setPendingAttachments);
+  const addPendingAttachment = useAppStore((s) => s.addPendingAttachment);
+  const removePendingAttachment = useAppStore((s) => s.removePendingAttachment);
 
   const [conversations, setConversations] = useState<ConversationRow[]>([]);
   const [activeId, setActiveId] = useState<string>("");
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [input, setInput] = useState<string>("");
+  const [dragActive, setDragActive] = useState(false);
+  // Tracks the in-flight Shift state on dragover so the overlay label
+  // can show the "permanent" hint. The drop event itself reads e.shiftKey
+  // for the actual decision so a stale dragover doesn't lie.
+  const [dragShift, setDragShift] = useState(false);
+  const dragCounterRef = useRef(0);
   // Send phase explicitly drives the Send button's disabled state and the
   // cleanup effects below. "classifying" covers the (potentially LLM-backed)
   // classify round-trip; while in that state, neither the chat-stream nor
@@ -130,6 +154,45 @@ export function ChatView() {
     };
   }, [ready, activeId]);
 
+  // PR 8: hydrate the chip strip when the conversation changes. Reset
+  // local drag counters at the same time so a hung enter/leave pair from
+  // the previous conversation doesn't carry state across.
+  useEffect(() => {
+    if (!ready || !activeId) return;
+    let alive = true;
+    setDragActive(false);
+    setDragShift(false);
+    dragCounterRef.current = 0;
+    Attachments.list(activeId)
+      .then((rows) => {
+        if (alive) setPendingAttachments(activeId, rows);
+      })
+      .catch(() => {
+        if (alive) setPendingAttachments(activeId, []);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [ready, activeId, setPendingAttachments]);
+
+  // Refresh the chip strip after a chat send completes so the cleared
+  // ephemeral rows disappear from the UI without a manual refresh.
+  useEffect(() => {
+    if (!ready || !activeId) return;
+    if (sendPhase !== "idle") return;
+    if (activeChat) return;
+    let alive = true;
+    Attachments.list(activeId)
+      .then((rows) => {
+        if (alive) setPendingAttachments(activeId, rows);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChat, sendPhase, ready, activeId]);
+
 
   const newConversation = async () => {
     try {
@@ -144,6 +207,99 @@ export function ChatView() {
       });
     }
   };
+
+  const uploadFiles = useCallback(
+    async (files: FileList | File[], persist: boolean) => {
+      if (!activeId) return;
+      const list = Array.from(files);
+      for (const f of list) {
+        try {
+          const result = await Attachments.upload(activeId, f, persist);
+          addPendingAttachment(activeId, {
+            id: result.id,
+            conversation_id: activeId,
+            filename: result.filename,
+            mime_type: f.type,
+            size_bytes: result.size_bytes,
+            persist: result.persist,
+            rag_doc_id: null,
+            created_at: new Date().toISOString(),
+          });
+          pushToast({
+            kind: "success",
+            text: persist
+              ? `Added ${result.filename} to your knowledge base`
+              : `Attached ${result.filename}`,
+          });
+        } catch (err) {
+          pushToast({
+            kind: "error",
+            text:
+              err instanceof Error
+                ? err.message
+                : `Failed to attach ${f.name}`,
+          });
+        }
+      }
+    },
+    [activeId, addPendingAttachment, pushToast],
+  );
+
+  const removeAttachment = useCallback(
+    async (id: string) => {
+      try {
+        await Attachments.delete(id);
+        if (activeId) removePendingAttachment(activeId, id);
+      } catch (err) {
+        pushToast({
+          kind: "error",
+          text: err instanceof Error ? err.message : "Failed to remove attachment",
+        });
+      }
+    },
+    [activeId, removePendingAttachment, pushToast],
+  );
+
+  const onDragEnter = useCallback((e: ReactDragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    dragCounterRef.current += 1;
+    setDragActive(true);
+    setDragShift(e.shiftKey);
+  }, []);
+
+  const onDragLeave = useCallback((e: ReactDragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+    if (dragCounterRef.current === 0) {
+      setDragActive(false);
+      setDragShift(false);
+    }
+  }, []);
+
+  const onDragOver = useCallback((e: ReactDragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    setDragShift(e.shiftKey);
+  }, []);
+
+  const onDrop = useCallback(
+    (e: ReactDragEvent<HTMLDivElement>) => {
+      if (!e.dataTransfer.types.includes("Files")) return;
+      e.preventDefault();
+      const persist = e.shiftKey;
+      const files = e.dataTransfer.files;
+      dragCounterRef.current = 0;
+      setDragActive(false);
+      setDragShift(false);
+      if (files && files.length > 0 && activeId) {
+        void uploadFiles(files, persist);
+      }
+    },
+    [activeId, uploadFiles],
+  );
 
   const send = async () => {
     if (!activeId || !input.trim() || busy) return;
@@ -410,7 +566,14 @@ export function ChatView() {
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col min-w-0">
+      <div
+        className="flex-1 flex flex-col min-w-0 relative"
+        onDragEnter={onDragEnter}
+        onDragLeave={onDragLeave}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
+        data-testid="chat-drop-target"
+      >
         {activeId && (
           <div className="flex items-center justify-between border-b border-line bg-bg-1 px-4 py-2">
             <div className="text-sm font-medium text-ink truncate">
@@ -449,6 +612,10 @@ export function ChatView() {
         </div>
 
         <div className="border-t border-line p-3">
+          <AttachmentChips
+            attachments={pendingAttachments[activeId] ?? []}
+            onRemove={removeAttachment}
+          />
           <div className="flex gap-2 items-end">
             <textarea
               className="input flex-1 min-h-[44px] max-h-40 resize-none"
@@ -493,7 +660,80 @@ export function ChatView() {
             )}
           </div>
         </div>
+        {dragActive && activeId && (
+          <div
+            data-testid="chat-drop-overlay"
+            className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none border-2 border-dashed border-accent bg-bg-1/80 backdrop-blur-sm"
+          >
+            <div className="rounded-md border border-line bg-bg-2 px-6 py-4 text-center text-sm text-ink shadow-lg">
+              <div className="font-semibold">
+                {dragShift ? "Drop to add to your knowledge base" : "Drop to attach"}
+              </div>
+              <div className="text-ink-dim text-xs mt-1">
+                Drop to attach. Hold Shift to add to your knowledge base
+                permanently.
+              </div>
+            </div>
+          </div>
+        )}
       </div>
+    </div>
+  );
+}
+
+// ── Attachment chip strip (PR 8) ────────────────────────────────────────────
+
+interface AttachmentChipsProps {
+  attachments: Attachment[];
+  onRemove: (id: string) => void;
+}
+
+function _formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function AttachmentChips({ attachments, onRemove }: AttachmentChipsProps) {
+  if (!attachments.length) return null;
+  return (
+    <div
+      data-testid="chat-attachment-chips"
+      className="flex flex-wrap gap-1.5 mb-2"
+    >
+      {attachments.map((a) => (
+        <span
+          key={a.id}
+          data-testid={`chat-attachment-chip-${a.id}`}
+          className={`inline-flex items-center gap-2 rounded-md border px-2 py-1 text-xs ${
+            a.persist
+              ? "border-accent/40 bg-accent/10 text-ink"
+              : "border-line bg-bg-2 text-ink"
+          }`}
+          title={
+            a.persist
+              ? `${a.filename} — saved to knowledge base`
+              : `${a.filename} — ephemeral (next send only)`
+          }
+        >
+          <span className="truncate max-w-[14rem]">{a.filename}</span>
+          <span className="text-ink-faint">{_formatBytes(a.size_bytes)}</span>
+          {a.persist && (
+            <span className="text-[10px] uppercase tracking-wide text-accent">
+              Saved
+            </span>
+          )}
+          <button
+            type="button"
+            data-testid={`chat-attachment-remove-${a.id}`}
+            aria-label={`Remove ${a.filename}`}
+            onClick={() => onRemove(a.id)}
+            className="text-ink-dim hover:text-ink"
+          >
+            ×
+          </button>
+        </span>
+      ))}
     </div>
   );
 }

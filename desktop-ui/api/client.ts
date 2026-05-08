@@ -50,7 +50,7 @@ export interface ApiError extends Error {
 }
 
 async function request<T>(
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "DELETE",
   path: string,
   body?: unknown,
   query?: Record<string, string | number | boolean | undefined>,
@@ -109,7 +109,47 @@ export const api = {
   get: <T>(path: string, query?: Record<string, string | number | boolean | undefined>) =>
     request<T>("GET", path, undefined, query),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
+  delete: <T>(path: string) => request<T>("DELETE", path),
 };
+
+// Multipart helper for the attachment upload endpoint. The standard
+// `request` wrapper sets Content-Type: application/json which would
+// confuse FastAPI's multipart parser; this version lets the browser
+// pick the boundary for us.
+async function postMultipart<T>(path: string, form: FormData): Promise<T> {
+  const info = await getSidecarInfo();
+  const url = `${baseUrl(info)}${path}`;
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${info.token}` },
+      body: form,
+    });
+  } catch (err) {
+    const e: ApiError = new Error(
+      err instanceof Error ? err.message : "Network request failed",
+    );
+    throw e;
+  }
+  if (!resp.ok) {
+    let parsed: unknown = null;
+    try {
+      parsed = await resp.json();
+    } catch {
+      /* not JSON */
+    }
+    const detail =
+      typeof parsed === "object" && parsed && "detail" in parsed
+        ? String((parsed as { detail: unknown }).detail)
+        : `Request failed with ${resp.status}`;
+    const e: ApiError = new Error(detail);
+    e.status = resp.status;
+    e.body = parsed;
+    throw e;
+  }
+  return (await resp.json()) as T;
+}
 
 // ── High-level helpers (one entry per route, typed for the renderer) ──────
 
@@ -263,6 +303,49 @@ export const Memory = {
   denyPending: (id: string) =>
     api.post<{ ok: boolean; decision?: string; error?: string }>(
       `/api/memory/pending/${encodeURIComponent(id)}/deny`,
+    ),
+};
+
+export interface Attachment {
+  id: string;
+  conversation_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  persist: boolean;
+  rag_doc_id: string | null;
+  created_at: string;
+}
+
+export interface AttachmentUploadResult {
+  id: string;
+  filename: string;
+  size_bytes: number;
+  persist: boolean;
+  extract_chars: number;
+}
+
+export const Attachments = {
+  upload: (
+    conversationId: string,
+    file: File,
+    persist: boolean,
+  ): Promise<AttachmentUploadResult> => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("persist", persist ? "true" : "false");
+    return postMultipart<AttachmentUploadResult>(
+      `/api/chat/${encodeURIComponent(conversationId)}/attach`,
+      form,
+    );
+  },
+  list: (conversationId: string): Promise<Attachment[]> =>
+    api.get<Attachment[]>(
+      `/api/chat/${encodeURIComponent(conversationId)}/attachments`,
+    ),
+  delete: (id: string): Promise<{ ok: boolean }> =>
+    api.delete<{ ok: boolean }>(
+      `/api/chat/attachments/${encodeURIComponent(id)}`,
     ),
 };
 

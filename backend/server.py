@@ -249,7 +249,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
             "http://127.0.0.1:5174",
         ],
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
     app.add_middleware(BearerAuthMiddleware, expected_token=token)
@@ -262,6 +262,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
     # Register routers
     from routes import (
         agents as agents_routes,
+        attachments as attachments_routes,
         chat as chat_routes,
         docker as docker_routes,
         echo as echo_routes,
@@ -282,6 +283,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
     app.include_router(echo_routes.router, prefix="/api")
     app.include_router(events_routes.router, prefix="/api")
     app.include_router(chat_routes.router, prefix="/api/chat")
+    app.include_router(attachments_routes.router, prefix="/api")
     app.include_router(agents_routes.router, prefix="/api/agents")
     app.include_router(memory_routes.router, prefix="/api/memory")
     app.include_router(rag_routes.router, prefix="/api/rag")

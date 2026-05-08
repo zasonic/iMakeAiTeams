@@ -160,6 +160,13 @@ def mcp_servers_dir() -> Path:
     return d
 
 
+def attachments_dir() -> Path:
+    """Per-user directory for chat-input file attachments (PR 8)."""
+    d = user_dir() / "attachments"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def bundled_models_dir() -> Path:
     """Per-user directory holding GGUF files downloaded by the BundledServer."""
     d = user_dir() / "models"
