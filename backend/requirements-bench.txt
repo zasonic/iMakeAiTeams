@@ -1,0 +1,29 @@
+# ── Bench-only dependencies — NEVER imported at runtime ─────────────────────
+#
+# These are pulled in by the `security-bench` GitHub Actions workflow
+# (.github/workflows/security-bench.yml) and by the local helper
+# `dev/run-bench.bat`. They are NOT shipped with the Electron installer
+# and NOT touched by `cd backend && pytest tests/` — backend/pytest.ini
+# excludes tests/agentdojo/ from default collection, and
+# backend/tests/agentdojo/__init__.py imports agentdojo lazily so a
+# missing package is reported with a friendly hint, not an ImportError.
+#
+# To run the bench locally: `dev\run-bench.bat`
+# To run a single suite:    `python -m backend.tests.agentdojo.run_suites \
+#                                 --suite workspace --output benchmarks/workspace.json`
+
+# AgentDojo (Debenedetti et al. 2024) — the four published suites
+# (workspace, slack, banking, travel) plus the importance-instructions
+# attacker. The version pin is shared by run_suites.py via
+# agentdojo.task_suite.load_suites.get_suites("v1.2.1").
+agentdojo>=0.1.27,<0.2.0
+
+# Pinned transitive deps that AgentDojo relies on. Listed explicitly so
+# `pip install -r requirements-bench.txt` is reproducible across CI runs
+# even when AgentDojo's own pins drift.
+pydantic>=2.7.0,<3.0.0
+anthropic>=0.50.0
+tenacity>=8.3.0
+PyYAML>=6.0
+deepdiff>=7.0.0
+rich>=13.0.0

@@ -47,5 +47,6 @@ Deeper docs:
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — common errors.
 - [docs/FAQ.md](docs/FAQ.md) — common questions.
 - [docs/legacy.md](docs/legacy.md) — pre-v6 code lives on the legacy/v5 branch.
+- [BENCHMARKS.md](BENCHMARKS.md) — AgentDojo ASR vs the published baseline, refreshed every push to `main`.
 
 MIT — see [LICENSE](LICENSE).
