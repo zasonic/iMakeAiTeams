@@ -17,6 +17,10 @@ export interface ElectronAPI {
     suggestedName: string,
     content: string,
   ) => Promise<{ ok: boolean; path?: string; cancelled?: boolean; error?: string }>;
+  exportPdf: (
+    html: string,
+    suggestedName: string,
+  ) => Promise<{ ok: boolean; path?: string; cancelled?: boolean; error?: string }>;
   openExternal: (url: string) => Promise<void>;
   getAppVersion: () => Promise<string>;
   getUserDataPath: () => Promise<string>;

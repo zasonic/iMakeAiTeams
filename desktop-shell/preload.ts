@@ -36,6 +36,18 @@ export interface ElectronAPI {
     cancelled?: boolean;
     error?: string;
   }>;
+  /**
+   * Render `html` to a PDF in a hidden BrowserWindow via Electron's
+   * webContents.printToPDF, then prompt the user with a native Save dialog
+   * pre-filled to `suggestedName`. Used by the conversation export menu —
+   * see backend route GET /api/chat/conversations/{id}/export.pdf-html.
+   */
+  exportPdf: (html: string, suggestedName: string) => Promise<{
+    ok: boolean;
+    path?: string;
+    cancelled?: boolean;
+    error?: string;
+  }>;
   /** Open a URL in the user's default browser. http(s) only. */
   openExternal: (url: string) => Promise<void>;
 
@@ -65,6 +77,8 @@ const api: ElectronAPI = {
   selectFiles: (filters) => ipcRenderer.invoke("dialog:select-files", filters),
   saveFileDialog: (suggestedName, content) =>
     ipcRenderer.invoke("dialog:save-file", { suggestedName, content }),
+  exportPdf: (html, suggestedName) =>
+    ipcRenderer.invoke("export:pdf", { html, suggestedName }),
   openExternal: (url) => ipcRenderer.invoke("shell:open-external", url),
 
   getAppVersion: () => ipcRenderer.invoke("app:version"),

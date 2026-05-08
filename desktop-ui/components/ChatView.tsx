@@ -11,7 +11,7 @@ import {
   type ListChildComponentProps,
 } from "react-window";
 
-import { Chat, Docker, Settings } from "@/api/client";
+import { Chat, Docker, Settings, type ConversationExportFormat } from "@/api/client";
 import { ExecutionCard } from "@/components/ExecutionCard";
 import { MessageRenderer } from "@/components/MessageRenderer";
 import { useAppStore, type PowerModeRun } from "@/stores/appStore";
@@ -292,6 +292,10 @@ export function ChatView() {
   };
 
   const streamingBuffer = activeChat?.conversationId === activeId ? activeChat.buffer : "";
+  const activeConversation = useMemo(
+    () => conversations.find((c) => c.id === activeId),
+    [conversations, activeId],
+  );
 
   // Power Mode runs scoped to the active conversation, in order.
   const conversationRuns = useMemo(() => {
@@ -407,6 +411,18 @@ export function ChatView() {
       </div>
 
       <div className="flex-1 flex flex-col min-w-0">
+        {activeId && (
+          <div className="flex items-center justify-between border-b border-line bg-bg-1 px-4 py-2">
+            <div className="text-sm font-medium text-ink truncate">
+              {activeConversation?.title || "Untitled"}
+            </div>
+            <ExportMenu
+              conversationId={activeId}
+              conversationTitle={activeConversation?.title || "conversation"}
+              disabled={messages.length === 0}
+            />
+          </div>
+        )}
         <div
           ref={(el) => {
             messageAreaRef.current = el;
@@ -677,6 +693,150 @@ function ApprovalCard({
           Deny
         </button>
       </div>
+    </div>
+  );
+}
+
+// ── Export menu (PR 7) ──────────────────────────────────────────────────────
+//
+// Three formats served off the backend export routes:
+//   - .md and .json land as text and are written via the existing
+//     saveFileDialog IPC (renderer never touches the filesystem).
+//   - .pdf-html lands as HTML and is handed to electronAPI.exportPdf, which
+//     spawns a hidden BrowserWindow in main and runs printToPDF.
+//
+// We don't preload the export content; nothing gets fetched until the user
+// picks a format from the dropdown. The button is `disabled` when the
+// conversation has no messages — exporting an empty file is just noise.
+
+interface ExportMenuProps {
+  conversationId: string;
+  conversationTitle: string;
+  disabled?: boolean;
+}
+
+function _safeFilename(title: string): string {
+  // Match the same character classes the backend orchestrator uses for
+  // export filenames. The Save dialog's default name is what the user sees,
+  // so a clean stem matters more than perfect parity with the backend.
+  const cleaned = (title || "conversation")
+    .replace(/[^A-Za-z0-9 _-]+/g, "_")
+    .trim()
+    .slice(0, 60);
+  return cleaned || "conversation";
+}
+
+function ExportMenu({
+  conversationId,
+  conversationTitle,
+  disabled,
+}: ExportMenuProps) {
+  const pushToast = useAppStore((s) => s.pushToast);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+
+  // Close the dropdown when the user clicks anywhere outside of it.
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!wrapperRef.current) return;
+      if (!wrapperRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [open]);
+
+  const stem = _safeFilename(conversationTitle);
+
+  const runExport = async (format: ConversationExportFormat) => {
+    setOpen(false);
+    setBusy(true);
+    try {
+      const body = await Chat.exportConversation(conversationId, format);
+      if (format === "pdf-html") {
+        const result = await window.electronAPI.exportPdf(body, `${stem}.pdf`);
+        if (result.ok) {
+          pushToast({ kind: "success", text: `Saved PDF to ${result.path}` });
+        } else if (!result.cancelled) {
+          pushToast({
+            kind: "error",
+            text: result.error || "PDF export failed",
+          });
+        }
+      } else {
+        const ext = format === "md" ? "md" : "json";
+        const result = await window.electronAPI.saveFileDialog(
+          `${stem}.${ext}`,
+          body,
+        );
+        if (result.ok) {
+          pushToast({ kind: "success", text: `Saved to ${result.path}` });
+        } else if (!result.cancelled) {
+          pushToast({
+            kind: "error",
+            text: result.error || "Export failed",
+          });
+        }
+      }
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: err instanceof Error ? err.message : "Export failed",
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div ref={wrapperRef} className="relative">
+      <button
+        type="button"
+        data-testid="chat-export-button"
+        className="btn-ghost text-xs"
+        onClick={() => setOpen((o) => !o)}
+        disabled={disabled || busy}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        Export {open ? "▴" : "▾"}
+      </button>
+      {open && (
+        <div
+          role="menu"
+          data-testid="chat-export-menu"
+          className="absolute right-0 mt-1 z-10 min-w-[12rem] rounded-md border border-line bg-bg-1 shadow-lg"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="chat-export-md"
+            className="block w-full text-left px-3 py-2 text-xs text-ink hover:bg-bg-2"
+            onClick={() => runExport("md")}
+          >
+            Markdown (.md)
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="chat-export-json"
+            className="block w-full text-left px-3 py-2 text-xs text-ink hover:bg-bg-2"
+            onClick={() => runExport("json")}
+          >
+            JSON (.json)
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="chat-export-pdf"
+            className="block w-full text-left px-3 py-2 text-xs text-ink hover:bg-bg-2"
+            onClick={() => runExport("pdf-html")}
+          >
+            PDF (.pdf)
+          </button>
+        </div>
+      )}
     </div>
   );
 }
