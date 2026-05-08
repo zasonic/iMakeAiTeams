@@ -278,6 +278,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
         safety as safety_routes,
         settings as settings_routes,
         system as system_routes,
+        usage as usage_routes,
     )
 
     app.include_router(health_routes.router)
@@ -296,6 +297,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
     app.include_router(prompts_routes.router, prefix="/api/prompts")
     app.include_router(safety_routes.router, prefix="/api/safety")
     app.include_router(system_routes.router, prefix="/api/system")
+    app.include_router(usage_routes.router, prefix="/api/usage")
     app.include_router(docker_routes.router, prefix="/api/docker")
 
     @app.post("/shutdown")
