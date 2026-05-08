@@ -29,15 +29,72 @@ _FALLBACK = "[Local model unavailable — no response]"
 class LocalClient(LLMClient):
     def __init__(self, settings: Settings):
         self._settings = settings
+        # Phase 9: BundledServer is wired in by core/api/__init__.py at startup.
+        # Without it set, bundled-mode requests still try the LM Studio shape
+        # at the persisted port (read from paths.bundled_server_port_file)
+        # so that a sidecar restart doesn't lose the connection.
+        self._bundled_server: object | None = None
+
+    def attach_bundled_server(self, bundled_server: object) -> None:
+        """Late-bind the BundledServer handle.
+
+        Called by the API container after both services are constructed; lets
+        bundled-mode requests resolve the live llama-server port without the
+        LocalClient holding a forward reference at import time.
+        """
+        self._bundled_server = bundled_server
+
+    def _bundled_port(self) -> int | None:
+        """Return the live bundled-server port, or None if not running."""
+        bs = self._bundled_server
+        if bs is not None:
+            try:
+                if bs.is_running():
+                    return bs.port()
+            except Exception:  # noqa: BLE001
+                pass
+        # Fallback: read the persisted port file. Used when the wizard
+        # started the server in a previous process and we just respawned.
+        try:
+            from core import paths as _paths  # noqa: PLC0415
+            port_file = _paths.bundled_server_port_file()
+            if port_file.exists():
+                txt = port_file.read_text(encoding="utf-8").strip()
+                if txt.isdigit():
+                    return int(txt)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     def _url(self, backend: str | None = None) -> str:
-        b = backend or self._settings.get("default_local_backend", "ollama")
+        b = backend or self._effective_backend()
         if b == "ollama":
             return self._settings.get("ollama_url", "http://localhost:11434")
+        if b == "bundled":
+            port = self._bundled_port()
+            if port is None:
+                # Force callers down their existing failure path; an
+                # unreachable URL surfaces the same way as a stopped backend.
+                return "http://127.0.0.1:0"
+            return f"http://127.0.0.1:{port}"
         return self._settings.get("lm_studio_url", "http://localhost:1234")
 
+    def _effective_backend(self) -> str:
+        """Resolve the active backend name from local_backend_mode + legacy
+        default_local_backend.
+
+        ``local_backend_mode == "auto"`` (or unset) preserves the historical
+        single-knob behaviour: read ``default_local_backend``. Any explicit
+        mode wins over auto so the user can pin a backend without touching
+        the legacy setting.
+        """
+        mode = (self._settings.get("local_backend_mode", "auto") or "auto").strip()
+        if mode in ("ollama", "lm_studio", "bundled"):
+            return mode
+        return self._settings.get("default_local_backend", "ollama") or "ollama"
+
     def _backend(self, backend: str | None = None) -> str:
-        return backend or self._settings.get("default_local_backend", "ollama")
+        return backend or self._effective_backend()
 
     def is_available(self, backend: str | None = None) -> bool:
         """Check if a local model backend is reachable."""

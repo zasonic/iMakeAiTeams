@@ -341,6 +341,27 @@ export const System = {
     api.post<{ ok: boolean; deleted?: number; error?: string }>(
       `/api/system/canary/reset/${encodeURIComponent(model_id)}`,
     ),
+
+  // ── Phase 9: Bundled llama.cpp server ──────────────────────────────────
+  bundledDownload: (model_id?: string) =>
+    api.post<{ ok: boolean; model_id?: string; error?: string }>(
+      "/api/system/bundled/download",
+      { model_id: model_id ?? "" },
+    ),
+  bundledStart: (model_id?: string) =>
+    api.post<{ ok: boolean; port?: number; model_id?: string; error?: string }>(
+      "/api/system/bundled/start",
+      { model_id: model_id ?? "" },
+    ),
+  bundledStop: () =>
+    api.post<{ ok: boolean; error?: string }>("/api/system/bundled/stop"),
+  bundledStatus: () =>
+    api.get<{
+      running: boolean;
+      port: number | null;
+      model_id: string | null;
+      available: boolean;
+    }>("/api/system/bundled/status"),
 };
 
 export const Lifecycle = {

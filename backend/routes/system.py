@@ -7,10 +7,18 @@ on the API facade.
 
 from __future__ import annotations
 
+import logging
+import threading
+
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
+import sse_events
+from services.bundled_server import BundledServerError, DEFAULT_MODEL_ID
+
 from ._helpers import get_api
+
+log = logging.getLogger("iMakeAiTeams.routes.system")
 
 router = APIRouter()
 
@@ -37,6 +45,15 @@ class OpenUrlIn(BaseModel):
 
 class ActiveLocalModelIn(BaseModel):
     model_id: str
+
+
+class BundledDownloadIn(BaseModel):
+    # Optional — defaults to the catalog's recommended Quick Start model.
+    model_id: str = ""
+
+
+class BundledStartIn(BaseModel):
+    model_id: str = ""
 
 
 @router.get("/service_status")
@@ -136,3 +153,146 @@ async def set_active_local_model(body: ActiveLocalModelIn, request: Request) -> 
     api = get_api(request)
     api._settings.set("default_local_model", body.model_id)
     return {"current": api._settings.get("default_local_model", "") or "", "ok": True}
+
+
+# ── Phase 9: Bundled llama.cpp server endpoints ──────────────────────────────
+
+
+_bundled_download_lock = threading.Lock()
+_bundled_download_running = False
+
+
+def _run_bundled_download(api, model_id: str) -> None:
+    """Background-thread worker for POST /bundled/download.
+
+    Streams progress to the renderer via SSE events:
+      - ``bundled_download_progress`` {bytes_done, bytes_total, model_id}
+      - ``bundled_download_complete`` {model_id, file_path}
+      - ``bundled_download_error``    {model_id, error}
+
+    On success, also persists ``local_backend_mode = "bundled"`` and
+    ``bundled_model_id`` so the next startup auto-rebinds the server.
+    """
+    global _bundled_download_running
+    bs = api.bundled_server
+    if bs is None:
+        sse_events.publish("bundled_download_error", {
+            "model_id": model_id,
+            "error": "bundled server is not initialised",
+        })
+        with _bundled_download_lock:
+            _bundled_download_running = False
+        return
+
+    def _on_progress(done: int, total: int) -> None:
+        sse_events.publish("bundled_download_progress", {
+            "model_id":   model_id,
+            "bytes_done": done,
+            "bytes_total": total,
+        })
+
+    try:
+        result = bs.download_model(model_id, on_progress=_on_progress)
+        api._settings.set("local_backend_mode", "bundled")
+        api._settings.set("bundled_model_id", model_id)
+        sse_events.publish("bundled_download_complete", {
+            "model_id":  model_id,
+            "file_path": result.get("file_path", ""),
+            "size_bytes": result.get("expected_size_bytes", 0),
+        })
+    except BundledServerError as exc:
+        sse_events.publish("bundled_download_error", {
+            "model_id": model_id,
+            "error":    str(exc),
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning("bundled download crashed: %s", exc, exc_info=True)
+        sse_events.publish("bundled_download_error", {
+            "model_id": model_id,
+            "error":    f"unexpected error: {exc}",
+        })
+    finally:
+        with _bundled_download_lock:
+            _bundled_download_running = False
+
+
+@router.post("/bundled/download")
+async def bundled_download(body: BundledDownloadIn, request: Request) -> dict:
+    """Kick off the bundled-model download in a background thread.
+
+    Returns immediately with ``{ok, model_id}`` — actual progress flows over
+    SSE. Concurrent calls are rejected so a refresh-happy user can't queue
+    five downloads of the same 2.5 GB file.
+    """
+    global _bundled_download_running
+    api = get_api(request)
+    model_id = body.model_id or DEFAULT_MODEL_ID
+
+    with _bundled_download_lock:
+        if _bundled_download_running:
+            return {"ok": False, "error": "download already in progress",
+                    "model_id": model_id}
+        _bundled_download_running = True
+
+    threading.Thread(
+        target=_run_bundled_download,
+        args=(api, model_id),
+        daemon=True,
+        name=f"bundled-download-{model_id}",
+    ).start()
+    return {"ok": True, "model_id": model_id}
+
+
+@router.post("/bundled/start")
+async def bundled_start(body: BundledStartIn, request: Request) -> dict:
+    """Start the bundled llama-server. Returns the bound port on success."""
+    api = get_api(request)
+    bs = api.bundled_server
+    if bs is None:
+        return {"ok": False, "error": "bundled server is not initialised"}
+
+    model_id = body.model_id or api._settings.get("bundled_model_id", "") or DEFAULT_MODEL_ID
+    try:
+        import db as _db_module
+        row = _db_module.get_db().execute(
+            "SELECT file_path FROM bundled_models WHERE model_id = ?",
+            (model_id,),
+        ).fetchone()
+        if not row:
+            return {"ok": False, "error": f"model {model_id} not downloaded"}
+        file_path = row["file_path"] if isinstance(row, dict) else row[0]
+        port = bs.start(file_path, model_id=model_id)
+    except BundledServerError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("bundled start crashed: %s", exc, exc_info=True)
+        return {"ok": False, "error": f"unexpected error: {exc}"}
+
+    api._settings.set("local_backend_mode", "bundled")
+    api._settings.set("bundled_model_id", model_id)
+    return {"ok": True, "port": port, "model_id": model_id}
+
+
+@router.post("/bundled/stop")
+async def bundled_stop(request: Request) -> dict:
+    api = get_api(request)
+    bs = api.bundled_server
+    if bs is None:
+        return {"ok": False, "error": "bundled server is not initialised"}
+    bs.stop()
+    return {"ok": True}
+
+
+@router.get("/bundled/status")
+async def bundled_status(request: Request) -> dict:
+    api = get_api(request)
+    bs = api.bundled_server
+    if bs is None:
+        return {"running": False, "port": None, "model_id": None,
+                "available": False}
+    return {
+        "running":   bs.is_running(),
+        "port":      bs.port(),
+        "model_id":  bs.model_id() or (api._settings.get("bundled_model_id", "") or None),
+        "available": True,
+    }

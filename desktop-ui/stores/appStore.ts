@@ -118,6 +118,14 @@ export interface CanaryAlert {
   drifted_prompts: string[];
 }
 
+export interface BundledDownloadState {
+  status: "idle" | "downloading" | "complete" | "error";
+  modelId: string;
+  bytesDone: number;
+  bytesTotal: number;
+  error: string;
+}
+
 export interface DockerStatusSnapshot {
   wsl_installed: boolean;
   docker_installed: boolean;
@@ -164,6 +172,12 @@ export interface AppState {
   // high_stakes_voting_complete; drives the StatusBar pill.
   votingActive: boolean;
 
+  // Phase 9: Bundled llama-server download progress, driven by the SSE
+  // bundled_download_progress / _complete / _error events emitted by the
+  // backend POST /api/system/bundled/download handler. Lives in the store
+  // so the wizard can survive a re-mount without losing progress state.
+  bundledDownload: BundledDownloadState;
+
   // Actions
   setActiveView: (v: ActiveView) => void;
   setStudioMode: (on: boolean) => void;
@@ -204,6 +218,10 @@ export interface AppState {
 
   // Voting indicator action (Phase 8)
   setVotingActive: (on: boolean) => void;
+
+  // Bundled-download actions (Phase 9)
+  setBundledDownload: (s: BundledDownloadState) => void;
+  patchBundledDownload: (patch: Partial<BundledDownloadState>) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -225,6 +243,13 @@ export const useAppStore = create<AppState>()(
       canaryAlert: null,
       canaryAlertOpen: false,
       votingActive: false,
+      bundledDownload: {
+        status: "idle",
+        modelId: "",
+        bytesDone: 0,
+        bytesTotal: 0,
+        error: "",
+      },
 
       setActiveView: (v) => set({ activeView: v }),
       setStudioMode: (on) => set({ studioMode: on }),
@@ -400,6 +425,11 @@ export const useAppStore = create<AppState>()(
 
       // ── Voting indicator action (Phase 8) ────────────────────────────
       setVotingActive: (on) => set({ votingActive: on }),
+
+      // ── Bundled download (Phase 9) ────────────────────────────────────
+      setBundledDownload: (s) => set({ bundledDownload: s }),
+      patchBundledDownload: (patch) =>
+        set((state) => ({ bundledDownload: { ...state.bundledDownload, ...patch } })),
 
       endPowerModeRun: (taskId) => {
         set((state) => {

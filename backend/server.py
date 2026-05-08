@@ -186,6 +186,18 @@ class _AppContainer:
         # in a background thread so /health responds quickly.
         self.api.start_deferred_init()
 
+        # Phase 9: rebound the bundled llama-server if the user previously
+        # picked bundled mode. Runs on a daemon thread so a missing/corrupt
+        # model file can't block sidecar boot — the wizard surfaces errors.
+        try:
+            threading.Thread(
+                target=self.api.maybe_autostart_bundled_server,
+                daemon=True,
+                name="bundled-autostart",
+            ).start()
+        except Exception as exc:
+            log.warning("bundled-autostart spawn failed: %s", exc, exc_info=True)
+
     def shutdown(self) -> None:
         try:
             self._docker_watch_stop.set()

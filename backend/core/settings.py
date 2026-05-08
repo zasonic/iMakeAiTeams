@@ -77,6 +77,18 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     "lm_studio_url":               (str,   "http://localhost:1234"),
     "default_local_backend":       (str,   "ollama"),
 
+    # Phase 9: Bundled llama.cpp server.
+    # local_backend_mode picks which local stack the LocalClient routes to:
+    #   "auto"      — preserve historical detection (Ollama → LM Studio fallback)
+    #   "ollama"    — force the Ollama URL
+    #   "lm_studio" — force the LM Studio URL
+    #   "bundled"   — use the bundled llama-server spawned from BundledServer
+    # Validation of the string values lives in the LocalClient routing layer;
+    # the schema is intentionally a plain str so legacy installs don't lose
+    # the field on a forward-incompatible enum check.
+    "local_backend_mode":          (str,   "auto"),
+    "bundled_model_id":            (str,   ""),
+
     # Routing
     "routing_enabled":             (bool,  True),
     "local_model_min_params":      (str,   "7B"),
