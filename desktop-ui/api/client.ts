@@ -230,6 +230,16 @@ async function fetchText(path: string): Promise<string> {
 
 export type ConversationExportFormat = "md" | "json" | "pdf-html";
 
+export interface SearchResult {
+  message_id: string;
+  conversation_id: string;
+  conversation_title: string;
+  role: "user" | "assistant" | "system";
+  snippet: string;
+  created_at: string;
+  rank: number;
+}
+
 export const Chat = {
   send: (conversation_id: string, user_message: string, agent_id = "") =>
     api.post<{ ok: true }>("/api/chat/send", { conversation_id, user_message, agent_id }),
@@ -251,6 +261,14 @@ export const Chat = {
     fetchText(
       `/api/chat/conversations/${encodeURIComponent(id)}/export.${format}`,
     ),
+  // PR 13: cross-conversation FTS5 search. Returns up to ``limit`` matches
+  // ordered by bm25 rank. ``days`` scopes results to the last N days.
+  searchConversations: (q: string, limit = 50, days?: number) =>
+    api.get<SearchResult[]>("/api/conversations/search", {
+      q,
+      limit,
+      ...(days != null ? { days } : {}),
+    }),
   tokenStats: () => api.get<unknown>("/api/chat/token_stats"),
   routerStats: () => api.get<unknown>("/api/chat/router_stats"),
 };

@@ -15,6 +15,7 @@ vi.mock("@/api/client", () => ({
     list: vi.fn(),
     messages: vi.fn(),
     exportConversation: vi.fn(),
+    searchConversations: vi.fn(),
     send: vi.fn(),
     stop: vi.fn(),
     newConversation: vi.fn(),
@@ -89,6 +90,8 @@ beforeEach(() => {
   vi.mocked(Chat.list).mockResolvedValue(FAKE_CONVERSATIONS);
   vi.mocked(Chat.messages).mockResolvedValue(FAKE_MESSAGES);
   vi.mocked(Chat.exportConversation).mockReset();
+  vi.mocked(Chat.searchConversations).mockReset();
+  vi.mocked(Chat.searchConversations).mockResolvedValue([]);
   vi.mocked(Settings.get).mockResolvedValue({ power_mode_enabled: false } as never);
   vi.mocked(Attachments.list).mockResolvedValue([]);
   vi.mocked(Attachments.upload).mockReset();
@@ -500,5 +503,122 @@ describe("ChatView image attachments (PR 11)", () => {
     await waitFor(() => {
       expect(Attachments.delete).toHaveBeenCalledWith("img-4");
     });
+  });
+});
+
+// ── Cross-conversation search (PR 13) ───────────────────────────────────────
+
+describe("ChatView conversation search", () => {
+  const FAKE_RESULTS = [
+    {
+      message_id: "msg-A",
+      conversation_id: "conv-A",
+      conversation_title: "Alpha chat",
+      role: "user" as const,
+      snippet: "How do I make <mark>fluffy</mark> pancakes?",
+      created_at: "2026-05-01T10:00:00Z",
+      rank: -2.5,
+    },
+    {
+      message_id: "msg-B",
+      conversation_id: "conv-B",
+      conversation_title: "Beta chat",
+      role: "assistant" as const,
+      snippet: "<mark>Fluffy</mark> means light and airy.",
+      created_at: "2026-05-02T10:00:00Z",
+      rank: -1.0,
+    },
+  ];
+
+  it("empty search input renders the conversation list", async () => {
+    await renderWithLoadedConversation();
+    // The conversation title appears in both the list and the header,
+    // so just assert the search panel is absent and no fetch happened.
+    expect(screen.queryByTestId("chat-search-results")).toBeNull();
+    expect(screen.queryByTestId("chat-search-empty")).toBeNull();
+    expect(Chat.searchConversations).not.toHaveBeenCalled();
+  });
+
+  it("typing a query triggers searchConversations after debounce", async () => {
+    vi.mocked(Chat.searchConversations).mockResolvedValue(FAKE_RESULTS);
+    await renderWithLoadedConversation();
+
+    const search = screen.getByTestId("chat-search-input") as HTMLInputElement;
+    await userEvent.type(search, "fluffy");
+
+    await waitFor(() => {
+      expect(Chat.searchConversations).toHaveBeenCalled();
+    });
+    // userEvent.type fires per keystroke; debounce should collapse those
+    // to a single call with the full string.
+    const calls = vi.mocked(Chat.searchConversations).mock.calls;
+    expect(calls[calls.length - 1][0]).toBe("fluffy");
+  });
+
+  it("results render with snippet markup and replace the conversation list", async () => {
+    vi.mocked(Chat.searchConversations).mockResolvedValue(FAKE_RESULTS);
+    await renderWithLoadedConversation();
+
+    const search = screen.getByTestId("chat-search-input") as HTMLInputElement;
+    await userEvent.type(search, "fluffy");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-search-results")).toBeTruthy();
+    });
+    // The results panel replaces the conversation list inside the
+    // search-results container — grab it and confirm the list buttons
+    // (which would have data-testid undefined) are not children of it.
+    const panel = screen.getByTestId("chat-search-results");
+    // Both result rows render with their snippets inside the panel.
+    expect(panel.querySelector('[data-testid="chat-search-result-msg-A"]')).toBeTruthy();
+    expect(panel.querySelector('[data-testid="chat-search-result-msg-B"]')).toBeTruthy();
+
+    // The <mark> token is rendered as a real <mark> element, not as text.
+    const marks = panel.querySelectorAll("mark");
+    expect(marks.length).toBeGreaterThanOrEqual(2);
+    expect(marks[0].textContent).toBe("fluffy");
+  });
+
+  it("clicking a result switches activeConversationId and clears the input", async () => {
+    vi.mocked(Chat.searchConversations).mockResolvedValue(FAKE_RESULTS);
+    // After switching, ChatView re-fetches messages for the new id; let
+    // that resolve to an empty list so the test doesn't blow up.
+    vi.mocked(Chat.messages).mockImplementation(async (id: string) => {
+      if (id === "conv-B") return [];
+      return FAKE_MESSAGES;
+    });
+    await renderWithLoadedConversation();
+
+    const search = screen.getByTestId("chat-search-input") as HTMLInputElement;
+    await userEvent.type(search, "fluffy");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-search-result-msg-B")).toBeTruthy();
+    });
+
+    await userEvent.click(screen.getByTestId("chat-search-result-msg-B"));
+
+    // Switching activeId triggers a fresh Chat.messages call for the new id.
+    await waitFor(() => {
+      expect(Chat.messages).toHaveBeenCalledWith("conv-B");
+    });
+    // The input is cleared, results panel disappears.
+    expect(search.value).toBe("");
+    await waitFor(() => {
+      expect(screen.queryByTestId("chat-search-results")).toBeNull();
+    });
+  });
+
+  it("Esc clears the search input", async () => {
+    vi.mocked(Chat.searchConversations).mockResolvedValue(FAKE_RESULTS);
+    await renderWithLoadedConversation();
+
+    const search = screen.getByTestId("chat-search-input") as HTMLInputElement;
+    await userEvent.type(search, "fluffy");
+    expect(search.value).toBe("fluffy");
+
+    await userEvent.type(search, "{Escape}");
+
+    expect(search.value).toBe("");
   });
 });
