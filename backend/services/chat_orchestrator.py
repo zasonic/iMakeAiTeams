@@ -444,6 +444,59 @@ class ChatOrchestrator:
                  sum(len(m.get("content", "")) for m in trimmed), budget_chars)
         return trimmed
 
+    # ── PR 8: file attachments ───────────────────────────────────────────────
+
+    @staticmethod
+    def _fetch_ephemeral_attachment_chunks(conversation_id: str) -> list[str]:
+        """Return the ``content_extract`` of every ephemeral attachment for
+        this conversation, in upload order. Persistent attachments live in
+        RAG and are reached via the normal ``mem.rag_chunks`` path.
+        """
+        rows = _db.fetchall(
+            "SELECT filename, content_extract FROM attachments "
+            "WHERE conversation_id = ? AND persist = 0 "
+            "ORDER BY created_at ASC",
+            (conversation_id,),
+        )
+        chunks: list[str] = []
+        for r in rows:
+            extract = r["content_extract"] or ""
+            if not extract.strip():
+                continue
+            chunks.append(f"[{r['filename']}]\n{extract}")
+        return chunks
+
+    @staticmethod
+    def _purge_ephemeral_attachments(conversation_id: str) -> None:
+        """Delete ephemeral attachments + their on-disk files after a turn
+        completes. Persistent rows are left alone — they live in RAG.
+        """
+        rows = _db.fetchall(
+            "SELECT id, filename FROM attachments "
+            "WHERE conversation_id = ? AND persist = 0",
+            (conversation_id,),
+        )
+        if not rows:
+            return
+        from core import paths as _paths
+        adir = _paths.attachments_dir()
+        for r in rows:
+            ext = ""
+            name = r["filename"] or ""
+            dot = name.rfind(".")
+            if dot >= 0:
+                ext = name[dot:].lower()
+            disk_path = adir / f"{r['id']}{ext}"
+            try:
+                disk_path.unlink(missing_ok=True)
+            except OSError as exc:
+                log.debug("attachment unlink failed: %s", exc)
+        _db.execute(
+            "DELETE FROM attachments WHERE conversation_id = ? AND persist = 0",
+            (conversation_id,),
+        )
+        _db.commit()
+
     # ── Execution target resolution (Improvement 6) ──────────────────────────
 
     def _resolve_target(self, route_model: str, agent: dict | None) -> ExecutionTarget:
@@ -974,6 +1027,31 @@ class ChatOrchestrator:
 
         # ── Fix 7: Token-aware trimming ──────────────────────────────────────
         messages = self._trim_history_to_budget(messages)
+
+        # ── PR 8: ephemeral attachment context ───────────────────────────────
+        # Attachments dropped onto the chat input live in their own table —
+        # ephemeral rows (persist=0) are out-of-band context for the next
+        # send only. We splice their extracted text into the last user
+        # message inside the existing quarantine envelope so the model
+        # treats them as data, not instructions, and we never write the
+        # combined string back to ``messages`` table (the user's typed text
+        # is the persisted record). Persistent rows (persist=1) live in
+        # RAG already, so they flow through ``mem.rag_chunks`` like any
+        # other indexed document.
+        ephemeral_chunks = self._fetch_ephemeral_attachment_chunks(conversation_id)
+        if ephemeral_chunks and messages:
+            quarantined = quarantine_chunks(
+                ephemeral_chunks,
+                source_type="user_document",
+                source_id=f"attach:{conversation_id}",
+            )
+            attachment_block = render_quarantined_context(quarantined)
+            if attachment_block:
+                last = messages[-1]
+                if last.get("role") == "user":
+                    last["content"] = (
+                        attachment_block + "\n\n" + last.get("content", "")
+                    )
 
         # Recall memory and build system context
         mem = self.memory.get_context(conversation_id, user_message)
@@ -1726,6 +1804,13 @@ class ChatOrchestrator:
         self.memory.add_to_buffer(conversation_id, "assistant", response_text)
         self.memory.extract_facts(conversation_id, user_message, response_text)
 
+        # PR 8: drop ephemeral attachments — they only exist for one turn.
+        # Persistent (persist=1) rows stay because they're already in RAG.
+        try:
+            self._purge_ephemeral_attachments(conversation_id)
+        except Exception as exc:
+            log.debug("ephemeral attachment purge failed: %s", exc)
+
         return ChatResult(
             text=response_text,
             model=model_name,
@@ -1831,6 +1916,12 @@ class ChatOrchestrator:
             self.memory.extract_facts(conversation_id, user_message, synthesis)
         except Exception as exc:
             log.debug("Memory update after pipeline run failed: %s", exc)
+
+        # PR 8: drop ephemeral attachments — same lifecycle as single-agent.
+        try:
+            self._purge_ephemeral_attachments(conversation_id)
+        except Exception as exc:
+            log.debug("ephemeral attachment purge (pipeline) failed: %s", exc)
 
         budget_warning = ""
         if budget > 0:

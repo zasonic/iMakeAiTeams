@@ -7,6 +7,7 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 
+import type { Attachment } from "@/api/client";
 import type { SidecarStatus } from "../../desktop-shell/sidecar";
 
 export type ActiveView =
@@ -187,6 +188,13 @@ export interface AppState {
   updateReady: { version: string } | null;
   updateBannerDismissed: boolean;
 
+  // PR 8: per-conversation pending file attachments (ephemeral or
+  // persisted-to-RAG). Keyed by conversation id so the chip strip can
+  // re-render instantly on conversation switch without a network round
+  // trip. The backend is the source of truth; the renderer refetches
+  // on conversation switch via Attachments.list().
+  pendingAttachments: Record<string, Attachment[]>;
+
   // Actions
   setActiveView: (v: ActiveView) => void;
   setStudioMode: (on: boolean) => void;
@@ -235,6 +243,11 @@ export interface AppState {
   // Auto-update banner actions (Phase 10)
   setUpdateReady: (v: { version: string } | null) => void;
   setUpdateBannerDismissed: (b: boolean) => void;
+
+  // Pending attachment actions (PR 8)
+  setPendingAttachments: (conversationId: string, attachments: Attachment[]) => void;
+  addPendingAttachment: (conversationId: string, a: Attachment) => void;
+  removePendingAttachment: (conversationId: string, id: string) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -265,6 +278,7 @@ export const useAppStore = create<AppState>()(
       },
       updateReady: null,
       updateBannerDismissed: false,
+      pendingAttachments: {},
 
       setActiveView: (v) => set({ activeView: v }),
       setStudioMode: (on) => set({ studioMode: on }),
@@ -456,6 +470,37 @@ export const useAppStore = create<AppState>()(
           updateBannerDismissed: v ? false : state.updateBannerDismissed,
         })),
       setUpdateBannerDismissed: (b) => set({ updateBannerDismissed: b }),
+
+      // ── Pending attachments (PR 8) ───────────────────────────────────
+      setPendingAttachments: (conversationId, attachments) =>
+        set((state) => ({
+          pendingAttachments: {
+            ...state.pendingAttachments,
+            [conversationId]: attachments,
+          },
+        })),
+      addPendingAttachment: (conversationId, a) =>
+        set((state) => {
+          const existing = state.pendingAttachments[conversationId] ?? [];
+          if (existing.some((x) => x.id === a.id)) return state;
+          return {
+            pendingAttachments: {
+              ...state.pendingAttachments,
+              [conversationId]: [...existing, a],
+            },
+          };
+        }),
+      removePendingAttachment: (conversationId, id) =>
+        set((state) => {
+          const existing = state.pendingAttachments[conversationId];
+          if (!existing) return state;
+          return {
+            pendingAttachments: {
+              ...state.pendingAttachments,
+              [conversationId]: existing.filter((x) => x.id !== id),
+            },
+          };
+        }),
 
       endPowerModeRun: (taskId) => {
         set((state) => {

@@ -741,6 +741,27 @@ _MIGRATIONS = [
             last_loaded_at  TEXT
         )""",
     ]),
+
+    # ── Phase 10: Chat-input file attachments ────────────────────────────────
+    # Two flavors share the same row shape: ephemeral (persist=0) attachments
+    # are deleted after the next successful chat send; persistent (persist=1)
+    # ones are also indexed into the RAG store via rag_doc_id. content_extract
+    # is always populated so the orchestrator can prepend it as quarantined
+    # context regardless of the persist flag.
+    ("phase10.attachments", [
+        """CREATE TABLE IF NOT EXISTS attachments (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            filename        TEXT NOT NULL,
+            mime_type       TEXT,
+            size_bytes      INTEGER NOT NULL,
+            persist         INTEGER NOT NULL,
+            rag_doc_id      TEXT,
+            content_extract TEXT,
+            created_at      TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_attachments_conv ON attachments(conversation_id)",
+    ]),
 ]
 
 
