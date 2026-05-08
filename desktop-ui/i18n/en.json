@@ -1,0 +1,17 @@
+{
+  "claude_client": "Claude Client",
+  "local_client": "Local Model",
+  "rag_index": "Document Index",
+  "database": "Database",
+  "firewall": "Input Firewall",
+  "memory_manager": "Memory",
+  "router": "Router",
+  "mcp_registry": "Tool Connections",
+  "chat_orchestrator": "Conversation Engine",
+  "audit_log": "Audit Log",
+  "lifecycle": "Lifecycle Manager",
+  "embedder": "Embedder",
+  "rag_load": "Document Index Loading",
+  "semantic_search": "Semantic Search",
+  "semantic_search_indexer": "Semantic Search Indexer"
+}

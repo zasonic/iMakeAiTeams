@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { System } from "@/api/client";
+import { t } from "@/i18n";
 import { useAppStore } from "@/stores/appStore";
 
 interface ErrorRow {
@@ -79,7 +80,7 @@ export function DiagnosticsPanel() {
               <span
                 className={`h-2 w-2 rounded-full ${s.ok ? "bg-ok" : "bg-err"}`}
               />
-              <span className="font-mono text-xs">{name}</span>
+              <span className="text-xs">{t(name)}</span>
               {!s.ok && s.error && (
                 <span className="text-ink-faint text-xs truncate" title={s.error}>
                   {s.error}
