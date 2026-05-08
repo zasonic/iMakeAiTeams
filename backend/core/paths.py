@@ -160,6 +160,74 @@ def mcp_servers_dir() -> Path:
     return d
 
 
+def bundled_models_dir() -> Path:
+    """Per-user directory holding GGUF files downloaded by the BundledServer."""
+    d = user_dir() / "models"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def bundled_server_port_file() -> Path:
+    """Where BundledServer writes its bound port for crash-recovery probes."""
+    return user_dir() / "bundled_server.port"
+
+
+def bundled_server_binary() -> Path:
+    """
+    Resolve the llama.cpp server binary shipped alongside the sidecar.
+
+    Frozen builds place the binary tree at install_root()/llama-server/
+    (electron-builder extraResources copies branding/sidecar-bundle/llama-server/
+    there). Source checkouts fall back to branding/sidecar-bundle/llama-server/
+    so dev workflows can populate that directory by hand.
+
+    Windows uses llama-server.exe; everywhere else uses llama-server. The
+    returned path may not exist — callers are responsible for checking and
+    surfacing a helpful error to the wizard.
+    """
+    binary_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+
+    # Frozen onedir layout — electron-builder mirrors branding/sidecar-bundle
+    # into resources/backend/llama-server/. install_root() is resources/backend/
+    # in a packaged build, so checking ./llama-server/<bin> hits the right spot.
+    frozen = install_root() / "llama-server" / binary_name
+    if frozen.exists():
+        return frozen
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        mp = Path(meipass) / "llama-server" / binary_name
+        if mp.exists():
+            return mp
+
+    # Source checkout — the build pipeline drops binaries here for dev runs.
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    return repo_root / "branding" / "sidecar-bundle" / "llama-server" / binary_name
+
+
+def bundled_models_catalog_path() -> Path:
+    """
+    Location of the build-pipeline-generated catalog of downloadable models.
+
+    The build script writes ``branding/sidecar-bundle/bundled_models.json``
+    with one entry per supported model (sha256, size_bytes). electron-builder
+    mirrors the entire ``branding/sidecar-bundle`` tree into
+    ``resources/backend/`` for the installer, so the frozen path is just
+    ``install_root()/bundled_models.json``. A missing catalog is non-fatal
+    — BundledServer falls back to live HF metadata lookups.
+    """
+    frozen = install_root() / "bundled_models.json"
+    if frozen.exists():
+        return frozen
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        mp = Path(meipass) / "bundled_models.json"
+        if mp.exists():
+            return mp
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    return repo_root / "branding" / "sidecar-bundle" / "bundled_models.json"
+
+
 def bundled_model_dir(name: str = "all-MiniLM-L6-v2") -> Path:
     """
     Resolve the sentence-transformers model bundled with the installer.

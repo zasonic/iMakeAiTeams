@@ -61,6 +61,7 @@ export function App() {
   const setCanaryAlertOpen = useAppStore((s) => s.setCanaryAlertOpen);
   const canaryAlertOpen = useAppStore((s) => s.canaryAlertOpen);
   const setVotingActive = useAppStore((s) => s.setVotingActive);
+  const patchBundledDownload = useAppStore((s) => s.patchBundledDownload);
 
   // ── Sidecar status subscription ────────────────────────────────────────
   useEffect(() => {
@@ -277,6 +278,45 @@ export function App() {
               action: "open_canary_alert",
             });
           },
+          // ── Phase 9: Bundled llama-server download progress ─────────
+          bundled_download_progress: (data) => {
+            const evt = data as {
+              model_id?: string;
+              bytes_done?: number;
+              bytes_total?: number;
+            };
+            patchBundledDownload({
+              status:    "downloading",
+              modelId:   evt.model_id ?? "",
+              bytesDone: typeof evt.bytes_done === "number" ? evt.bytes_done : 0,
+              bytesTotal: typeof evt.bytes_total === "number" ? evt.bytes_total : 0,
+              error:     "",
+            });
+          },
+          bundled_download_complete: (data) => {
+            const evt = data as { model_id?: string };
+            patchBundledDownload({
+              status:  "complete",
+              modelId: evt.model_id ?? "",
+              error:   "",
+            });
+            pushToast({
+              kind: "success",
+              text: "Local model is ready.",
+            });
+          },
+          bundled_download_error: (data) => {
+            const evt = data as { model_id?: string; error?: string };
+            patchBundledDownload({
+              status: "error",
+              modelId: evt.model_id ?? "",
+              error: evt.error ?? "Download failed",
+            });
+            pushToast({
+              kind: "error",
+              text: evt.error ?? "Download failed",
+            });
+          },
           // ── Phase 5: MINJA-style memory write gate ───────────────────
           memory_review_required: (data) => {
             const evt = data as {
@@ -355,6 +395,7 @@ export function App() {
     setCanaryAlert,
     setSidecarStatus,
     setVotingActive,
+    patchBundledDownload,
   ]);
 
   // ── Pending escalations: hydrate on backend-ready ──────────────────────

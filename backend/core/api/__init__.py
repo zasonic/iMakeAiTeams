@@ -48,6 +48,7 @@ from core.events import EventBus
 
 from services.claude_client import ClaudeClient
 from services.local_client import LocalClient
+from services.bundled_server import BundledServer
 from services.rag_index import RAGIndex
 from services import semantic_search, error_classifier, health_monitor
 from services import prompt_library
@@ -123,6 +124,17 @@ class API:
             "local_client",
             lambda: LocalClient(self._settings),
         )
+
+        # ── Phase 9: Bundled llama.cpp server ─────────────────────────────────
+        # Construction is cheap (no subprocess yet). The wizard kicks off the
+        # download + first start; on subsequent launches the auto-start hook
+        # below picks it back up if the user previously chose bundled mode.
+        self._bundled_server = self._safe_init(
+            "bundled_server",
+            lambda: BundledServer(self._settings),
+        )
+        if self._local is not None and self._bundled_server is not None:
+            self._local.attach_bundled_server(self._bundled_server)
 
         # ── RAG index (fast — constructs empty, embedder attached later) ──────
         # SentenceTransformer load is deferred: see _run_deferred_init.
@@ -282,6 +294,45 @@ class API:
     def local_client(self):
         """The configured ``LocalClient``, or ``None`` if unavailable."""
         return self._local
+
+    @property
+    def bundled_server(self):
+        """The configured ``BundledServer``, or ``None`` if init failed."""
+        return self._bundled_server
+
+    def maybe_autostart_bundled_server(self) -> None:
+        """Auto-start the bundled llama-server if a previously-downloaded
+        model exists and the user has selected bundled mode.
+
+        Called once during sidecar startup (after DB init) so the user's
+        choice from a prior wizard run survives a sidecar restart. On first
+        run the wizard explicitly drives the download + start, so this is a
+        no-op for fresh installs.
+        """
+        bs = self._bundled_server
+        if bs is None:
+            return
+        mode = (self._settings.get("local_backend_mode", "auto") or "auto").strip()
+        if mode != "bundled":
+            return
+        model_id = self._settings.get("bundled_model_id", "") or ""
+        if not model_id:
+            return
+        try:
+            row = _db_module.get_db().execute(
+                "SELECT file_path FROM bundled_models WHERE model_id = ?",
+                (model_id,),
+            ).fetchone()
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("bundled autostart: db lookup failed: %s", exc)
+            return
+        if not row:
+            return
+        file_path = row["file_path"] if isinstance(row, dict) else row[0]
+        try:
+            bs.start(file_path, model_id=model_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("bundled autostart: start() failed: %s", exc)
 
     def _safe_init(self, name, factory, *, required=False, fallback=None):
         """Run ``factory()`` and record the outcome in self._status[name].
@@ -722,6 +773,11 @@ class API:
         with self._stop_signals_lock:
             for ev in self._stop_signals.values():
                 ev.set()
+        if self._bundled_server is not None:
+            try:
+                self._bundled_server.stop()
+            except Exception as exc:  # noqa: BLE001
+                self._log.warning("bundled_server.stop raised: %s", exc, exc_info=True)
         self._log.info("Shutdown complete.")
 
     # ── Domain sub-API delegators ─────────────────────────────────────────────

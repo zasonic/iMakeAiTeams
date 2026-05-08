@@ -727,6 +727,20 @@ _MIGRATIONS = [
     ("phase8.voting_samples", [
         "ALTER TABLE router_log ADD COLUMN voting_samples_json TEXT DEFAULT NULL",
     ]),
+
+    # ── Phase 9: Bundled llama.cpp server lifecycle bookkeeping ──────────────
+    # Each successful download writes one row. file_path is absolute and lives
+    # under userData/models/. sha256 lets the wizard re-validate on next start.
+    ("phase9.local_backend_mode", [
+        """CREATE TABLE IF NOT EXISTS bundled_models (
+            model_id        TEXT PRIMARY KEY,
+            file_path       TEXT NOT NULL,
+            size_bytes      INTEGER NOT NULL,
+            sha256          TEXT NOT NULL,
+            downloaded_at   TEXT NOT NULL,
+            last_loaded_at  TEXT
+        )""",
+    ]),
 ]
 
 

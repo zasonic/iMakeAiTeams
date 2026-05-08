@@ -4,8 +4,9 @@ REM
 REM 1. Activate backend venv
 REM 2. PyInstaller --onedir into backend\dist\server\
 REM 3. Mirror that to branding\sidecar-bundle\ for electron-builder extraResources
-REM 4. electron-vite production build
-REM 5. electron-builder --win  -> NSIS installer in dist\
+REM 4. Phase 9: fetch llama-server binaries + bundled_models.json catalog
+REM 5. electron-vite production build
+REM 6. electron-builder --win  -> NSIS installer in dist\
 
 setlocal
 set "SCRIPT_DIR=%~dp0"
@@ -22,7 +23,7 @@ if not exist "node_modules\electron-builder\package.json" (
     exit /b 1
 )
 
-echo ==^> [1/5] Building Python sidecar with PyInstaller (onedir)
+echo ==^> [1/6] Building Python sidecar with PyInstaller (onedir)
 REM Invoke the venv python directly — `call activate.bat` swallows errors and
 REM can leave PATH pointing at the system Python on some Windows configurations.
 pushd backend
@@ -40,7 +41,7 @@ if not exist "backend\dist\server\server.exe" (
     exit /b 1
 )
 
-echo ==^> [2/5] Mirroring sidecar to branding\sidecar-bundle\
+echo ==^> [2/6] Mirroring sidecar to branding\sidecar-bundle\
 if exist "branding\sidecar-bundle" (
     rmdir /s /q "branding\sidecar-bundle"
     if errorlevel 1 (
@@ -62,7 +63,25 @@ if not exist "branding\sidecar-bundle\server.exe" (
     exit /b 1
 )
 
-echo ==^> [3/5] electron-vite production build
+echo ==^> [3/6] Fetching llama-server binaries + bundled-models catalog
+"backend\.venv\Scripts\python.exe" "build-scripts\fetch_bundled_assets.py"
+if errorlevel 1 (
+    echo [error] fetch_bundled_assets.py failed
+    pause
+    exit /b 1
+)
+if not exist "branding\sidecar-bundle\llama-server\llama-server.exe" (
+    echo [error] llama-server.exe missing after fetch step
+    pause
+    exit /b 1
+)
+if not exist "branding\sidecar-bundle\bundled_models.json" (
+    echo [error] bundled_models.json missing after fetch step
+    pause
+    exit /b 1
+)
+
+echo ==^> [4/6] electron-vite production build
 call npm run build
 if errorlevel 1 (
     echo [error] electron-vite build failed
@@ -70,7 +89,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo ==^> [4/5] electron-builder NSIS installer
+echo ==^> [5/6] electron-builder NSIS installer
 call npx --no-install electron-builder --win
 if errorlevel 1 (
     echo [error] electron-builder failed
@@ -78,7 +97,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo ==^> [5/5] Done.
+echo ==^> [6/6] Done.
 echo.
 set "FOUND_INSTALLER="
 for %%f in (dist\*.exe) do (
