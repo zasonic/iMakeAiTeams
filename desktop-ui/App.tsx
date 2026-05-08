@@ -16,6 +16,7 @@ import { MemoryReviewPanel } from "@/components/MemoryReviewPanel";
 import { ModelBrowser } from "@/components/ModelBrowser";
 import { PromptPanel } from "@/components/PromptPanel";
 import { RagPanel } from "@/components/RagPanel";
+import { SafetyPanel } from "@/components/SafetyPanel";
 import { SecurityPanel } from "@/components/SecurityPanel";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { Sidebar } from "@/components/Sidebar";
@@ -451,6 +452,7 @@ export function App() {
           {view === "prompts" && <PromptPanel />}
           {view === "mcp" && <McpPanel />}
           {view === "security" && <SecurityPanel />}
+          {view === "safety" && <SafetyPanel />}
           {view === "settings" && <SettingsPanel />}
           {view === "diagnostics" && <DiagnosticsPanel />}
           {view === "escalations" && <EscalationPanel />}

@@ -7,6 +7,7 @@
 // All requests are http://127.0.0.1:<port> with a Bearer token.
 
 import type { SidecarInfo } from "@/env";
+import type { SafetySummary } from "@/types/safety";
 
 let cached: SidecarInfo | null = null;
 let inflight: Promise<SidecarInfo> | null = null;
@@ -397,6 +398,11 @@ export const Escalation = {
 
 export const Echo = {
   reverse: (text: string) => api.post<{ text: string; reversed: string }>("/api/echo", { text }),
+};
+
+export const Safety = {
+  getSafetySummary: (days: number = 30) =>
+    api.get<SafetySummary>("/api/safety/summary", { days }),
 };
 
 // ── Power Mode (v3) — Docker / OpenClaw delegation ────────────────────────

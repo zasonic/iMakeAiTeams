@@ -273,6 +273,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
         memory as memory_routes,
         prompts as prompts_routes,
         rag as rag_routes,
+        safety as safety_routes,
         settings as settings_routes,
         system as system_routes,
     )
@@ -289,6 +290,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
     app.include_router(lifecycle_routes.router, prefix="/api/lifecycle")
     app.include_router(escalation_routes.router, prefix="/api/escalation")
     app.include_router(prompts_routes.router, prefix="/api/prompts")
+    app.include_router(safety_routes.router, prefix="/api/safety")
     app.include_router(system_routes.router, prefix="/api/system")
     app.include_router(docker_routes.router, prefix="/api/docker")
 
