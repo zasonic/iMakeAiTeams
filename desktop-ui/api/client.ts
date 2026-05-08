@@ -162,6 +162,34 @@ export const Settings = {
     api.post<{ ok: true; prices: unknown }>("/api/settings/model_prices", { prices }),
 };
 
+// Plain-text GET helper. The export routes return raw markdown / JSON /
+// HTML — not the JSON envelope `request<T>()` parses — so this skips the
+// JSON.parse step and returns the response body verbatim.
+async function fetchText(path: string): Promise<string> {
+  const info = await getSidecarInfo();
+  const url = `${baseUrl(info)}${path}`;
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${info.token}` },
+    });
+  } catch (err) {
+    const e: ApiError = new Error(
+      err instanceof Error ? err.message : "Network request failed",
+    );
+    throw e;
+  }
+  if (!resp.ok) {
+    const e: ApiError = new Error(`Request failed with ${resp.status}`);
+    e.status = resp.status;
+    throw e;
+  }
+  return resp.text();
+}
+
+export type ConversationExportFormat = "md" | "json" | "pdf-html";
+
 export const Chat = {
   send: (conversation_id: string, user_message: string, agent_id = "") =>
     api.post<{ ok: true }>("/api/chat/send", { conversation_id, user_message, agent_id }),
@@ -179,6 +207,10 @@ export const Chat = {
     api.post<unknown>("/api/chat/branch_conversation", { conversation_id, from_message_id }),
   export: (conversation_id: string, fmt = "markdown") =>
     api.post<unknown>("/api/chat/export_conversation", { conversation_id, fmt }),
+  exportConversation: (id: string, format: ConversationExportFormat) =>
+    fetchText(
+      `/api/chat/conversations/${encodeURIComponent(id)}/export.${format}`,
+    ),
   tokenStats: () => api.get<unknown>("/api/chat/token_stats"),
   routerStats: () => api.get<unknown>("/api/chat/router_stats"),
 };

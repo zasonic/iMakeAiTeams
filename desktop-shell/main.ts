@@ -245,6 +245,72 @@ function wireIpc(): void {
     }) as (...args: unknown[]) => unknown),
   );
 
+  ipcMain.handle(
+    "export:pdf",
+    rateLimit("export:pdf", 4, (async (_e, payload: unknown) => {
+      // Render the renderer-supplied HTML in a hidden BrowserWindow, then
+      // hand the bytes off to a native Save dialog. printToPDF runs entirely
+      // in-process — no headless Chrome spawn, no third-party dependency.
+      if (!mainWindow) return { ok: false, error: "no window" };
+      const data = (payload ?? {}) as { html?: unknown; suggestedName?: unknown };
+      const html = typeof data.html === "string" ? data.html : "";
+      const rawName =
+        typeof data.suggestedName === "string" ? data.suggestedName : "";
+      // Same defensive cleanup as dialog:save-file — strip any path
+      // components and reject bare "."/".." so a compromised renderer can't
+      // pre-fill the dialog with /etc/anything.
+      const safeName = basename(rawName) || "conversation.pdf";
+      if (safeName === "." || safeName === "..") {
+        return { ok: false, error: "invalid name" };
+      }
+      // 25 MiB cap — a 25 MiB string is already an absurd HTML payload, and
+      // the cap stops a runaway renderer from feeding us multi-GB documents.
+      const HTML_MAX_BYTES = 25 * 1024 * 1024;
+      if (Buffer.byteLength(html, "utf-8") > HTML_MAX_BYTES) {
+        return { ok: false, error: "html too large" };
+      }
+      if (!html) return { ok: false, error: "empty html" };
+
+      const win = new BrowserWindow({
+        show: false,
+        webPreferences: {
+          // Hidden window only renders the HTML we just built — no preload,
+          // no Node integration, no remote loading. Sandbox keeps it safe
+          // even if the HTML contained a script tag.
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          javascript: false,
+        },
+      });
+      try {
+        await win.loadURL(
+          "data:text/html;charset=utf-8," + encodeURIComponent(html),
+        );
+        const pdfBytes = await win.webContents.printToPDF({
+          printBackground: true,
+          pageSize: "A4",
+        });
+        const result = await dialog.showSaveDialog(mainWindow, {
+          defaultPath: safeName,
+          filters: [{ name: "PDF", extensions: ["pdf"] }],
+        });
+        if (result.canceled || !result.filePath) {
+          return { ok: false, cancelled: true };
+        }
+        await writeFile(result.filePath, pdfBytes);
+        return { ok: true, path: result.filePath };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      } finally {
+        if (!win.isDestroyed()) win.destroy();
+      }
+    }) as (...args: unknown[]) => unknown),
+  );
+
   ipcMain.handle("shell:open-external", async (_e, url: string) => {
     if (typeof url !== "string") return;
     if (!/^https?:\/\//i.test(url)) return;
