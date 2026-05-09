@@ -580,10 +580,20 @@ _MIGRATIONS = [
     ]),
 
     # ── Priority 6: debate_log + debate settings ──────────────────────────────
+    # debate_enabled defaults OFF: the challenger fires per-step and adds
+    # latency to every team turn. Power users opt in. When they do,
+    # debate_only_high_stakes (added below) keeps it scoped to messages that
+    # warrant the cost.
     ("2.6.0", [
         # debate_log created by CREATE TABLE IF NOT EXISTS above
-        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('debate_enabled', '1', datetime('now'))",
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('debate_enabled', '0', datetime('now'))",
         "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('debate_tier_threshold', 'claude', datetime('now'))",
+    ]),
+
+    # When debate is enabled, scope it to high-stakes turns by default so
+    # the challenger doesn't tax every "what's 2+2" exchange.
+    ("2.6.1", [
+        "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('debate_only_high_stakes', '1', datetime('now'))",
     ]),
 
     # ── Priority 7: pending_review — created in _create_schema ───────────────

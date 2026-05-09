@@ -339,3 +339,269 @@ class TestSubtaskParsing:
         subs = executor._parse_subtasks(raw, members, coord)
         assert len(subs) == 1
         assert subs[0].description == "real"
+
+
+# ── Layer 2: workflow_checkpoints saga ───────────────────────────────────────
+
+
+class TestWorkflowCheckpoints:
+    """Verify the provisional → committed/rolled_back/abandoned transitions."""
+
+    def _run_one_step(self, in_memory_db, hub_mock, executor):
+        coord_id = _seed_agent(in_memory_db, "C", "coordinator")
+        spec_id = _seed_agent(in_memory_db, "S", "researcher")
+        team_id = _seed_team(in_memory_db, coord_id, [spec_id])
+
+        decomp = json.dumps([{
+            "agent_id": spec_id, "agent_name": "S",
+            "description": "do thing",
+        }])
+        hub_mock.invoke.side_effect = [
+            WorkerResult(text=decomp, backend="claude", model_name="t"),
+            WorkerResult(text="solid output", backend="claude", model_name="t"),
+            WorkerResult(text="Done.", backend="claude", model_name="t"),
+        ]
+        return executor.run(
+            team_id=team_id, user_message="x",
+            conversation_id="cid", history=[],
+        )
+
+    def test_committed_row_written_on_pass(self, in_memory_db, executor, hub_mock):
+        result = self._run_one_step(in_memory_db, hub_mock, executor)
+        rows = in_memory_db.fetchall(
+            "SELECT * FROM workflow_checkpoints WHERE workflow_id = ?",
+            (result.pipeline_id,),
+        )
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["state"] == "committed"
+        assert row["validation_passed"] == 1
+        assert row["committed_at"] is not None
+        assert row["rolled_back_at"] is None
+        assert row["failure_reason"] is None
+        assert row["success_criteria"] == "do thing"
+
+    def test_rolled_back_then_committed_on_retry(
+        self, in_memory_db, executor, hub_mock,
+    ):
+        coord_id = _seed_agent(in_memory_db, "C", "coordinator")
+        spec_id = _seed_agent(in_memory_db, "S", "researcher")
+        team_id = _seed_team(in_memory_db, coord_id, [spec_id])
+
+        decomp = json.dumps([{
+            "agent_id": spec_id, "agent_name": "S",
+            "description": "do thing",
+        }])
+        # First specialist call returns empty artifact → structural validation
+        # fails (artifact-empty). Retry returns a real answer → commit.
+        hub_mock.invoke.side_effect = [
+            WorkerResult(text=decomp, backend="claude", model_name="t"),
+            WorkerResult(text="", backend="claude", model_name="t"),
+            WorkerResult(text="actual content here", backend="claude", model_name="t"),
+            WorkerResult(text="Done.", backend="claude", model_name="t"),
+        ]
+        result = executor.run(
+            team_id=team_id, user_message="x",
+            conversation_id="cid", history=[],
+        )
+        rows = in_memory_db.fetchall(
+            "SELECT state, retry_count, failure_reason FROM workflow_checkpoints "
+            "WHERE workflow_id = ? ORDER BY created_at",
+            (result.pipeline_id,),
+        )
+        # One checkpoint per step. Final state should be 'committed' because
+        # the retry succeeded; the row records the prior failure.
+        assert len(rows) == 1
+        assert rows[0]["state"] == "committed"
+
+    def test_provisional_marked_abandoned_on_startup(self, in_memory_db):
+        from datetime import datetime, timezone
+        from services.pipeline import (
+            CHECKPOINT_PROVISIONAL,
+            mark_abandoned_provisional_checkpoints,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        in_memory_db.execute(
+            "INSERT INTO workflow_checkpoints "
+            "(checkpoint_id, workflow_id, step_index, task_id, agent_id, "
+            " agent_name, state, success_criteria, retry_count, max_retries, created_at) "
+            "VALUES ('cid1', 'wf1', 0, 'a', 'a', 'A', ?, '', 0, 3, ?)",
+            (CHECKPOINT_PROVISIONAL, now),
+        )
+        in_memory_db.execute(
+            "INSERT INTO workflow_checkpoints "
+            "(checkpoint_id, workflow_id, step_index, task_id, agent_id, "
+            " agent_name, state, success_criteria, retry_count, max_retries, created_at) "
+            "VALUES ('cid2', 'wf1', 1, 'a', 'a', 'A', 'committed', '', 0, 3, ?)",
+            (now,),
+        )
+        in_memory_db.commit()
+
+        n = mark_abandoned_provisional_checkpoints()
+        assert n == 1
+        rows = in_memory_db.fetchall(
+            "SELECT checkpoint_id, state FROM workflow_checkpoints ORDER BY checkpoint_id"
+        )
+        states = {r["checkpoint_id"]: r["state"] for r in rows}
+        assert states["cid1"] == "abandoned"
+        assert states["cid2"] == "committed"  # untouched
+
+    def test_checkpoint_state_event_emitted(self, in_memory_db, executor, hub_mock):
+        events = []
+        coord_id = _seed_agent(in_memory_db, "C", "coordinator")
+        spec_id = _seed_agent(in_memory_db, "S", "researcher")
+        team_id = _seed_team(in_memory_db, coord_id, [spec_id])
+        decomp = json.dumps([{
+            "agent_id": spec_id, "agent_name": "S", "description": "x",
+        }])
+        hub_mock.invoke.side_effect = [
+            WorkerResult(text=decomp, backend="claude", model_name="t"),
+            WorkerResult(text="something", backend="claude", model_name="t"),
+            WorkerResult(text="ok", backend="claude", model_name="t"),
+        ]
+        executor.run(
+            team_id=team_id, user_message="x",
+            conversation_id="cid", history=[],
+            on_event=lambda et, data: events.append((et, data)),
+        )
+        states = [
+            d.get("state") for et, d in events if et == "checkpoint_state"
+        ]
+        # Provisional opens, committed closes — both must fire for one step.
+        assert "provisional" in states
+        assert "committed" in states
+
+
+# ── Layer 2: debate_log challenger gating ────────────────────────────────────
+
+
+class TestDebateGating:
+    """Ensure the challenger only fires when both gates are open."""
+
+    def _build_executor_with_clients(self, hub_mock, settings):
+        """Create an executor with stub claude/local clients so debate can run."""
+        from unittest.mock import MagicMock
+        local = MagicMock()
+        local.is_available.return_value = True
+        local.client_name.return_value = "local"
+        # Even with a local client, debate routes through hub.invoke, not the
+        # client directly — so the challenger's WorkerResult is scripted via
+        # hub_mock.invoke.side_effect in each test.
+        return PipelineExecutor(hub_mock, settings, local_client=local)
+
+    def _seed_minimal_team(self, in_memory_db):
+        coord_id = _seed_agent(in_memory_db, "C", "coordinator")
+        spec_id = _seed_agent(in_memory_db, "S", "researcher")
+        team_id = _seed_team(in_memory_db, coord_id, [spec_id])
+        return coord_id, spec_id, team_id
+
+    def test_debate_disabled_skips_challenger(
+        self, in_memory_db, hub_mock, settings,
+    ):
+        settings.set("debate_enabled", "0")
+        executor = self._build_executor_with_clients(hub_mock, settings)
+        coord_id, spec_id, team_id = self._seed_minimal_team(in_memory_db)
+        decomp = json.dumps([{
+            "agent_id": spec_id, "agent_name": "S", "description": "x",
+        }])
+        # Only 3 invokes: decomp, specialist, synthesis. No challenger.
+        hub_mock.invoke.side_effect = [
+            WorkerResult(text=decomp, backend="claude", model_name="t"),
+            WorkerResult(text="answer", backend="claude", model_name="t"),
+            WorkerResult(text="ok", backend="claude", model_name="t"),
+        ]
+        result = executor.run(
+            team_id=team_id, user_message="trivial",
+            conversation_id="cid", history=[],
+        )
+        rows = in_memory_db.fetchall("SELECT * FROM debate_log")
+        assert rows == []
+        assert hub_mock.invoke.call_count == 3
+
+    def test_debate_high_stakes_only_skips_low_stakes(
+        self, in_memory_db, hub_mock, settings,
+    ):
+        settings.set("debate_enabled", "1")
+        settings.set("debate_only_high_stakes", "1")
+        executor = self._build_executor_with_clients(hub_mock, settings)
+        coord_id, spec_id, team_id = self._seed_minimal_team(in_memory_db)
+        decomp = json.dumps([{
+            "agent_id": spec_id, "agent_name": "S", "description": "x",
+        }])
+        hub_mock.invoke.side_effect = [
+            WorkerResult(text=decomp, backend="claude", model_name="t"),
+            WorkerResult(text="answer", backend="claude", model_name="t"),
+            WorkerResult(text="ok", backend="claude", model_name="t"),
+        ]
+        result = executor.run(
+            team_id=team_id, user_message="hello there",  # not high-stakes
+            conversation_id="cid", history=[],
+        )
+        assert in_memory_db.fetchall("SELECT * FROM debate_log") == []
+
+    def test_debate_fires_on_high_stakes(
+        self, in_memory_db, hub_mock, settings,
+    ):
+        settings.set("debate_enabled", "1")
+        settings.set("debate_only_high_stakes", "1")
+        executor = self._build_executor_with_clients(hub_mock, settings)
+        coord_id, spec_id, team_id = self._seed_minimal_team(in_memory_db)
+        decomp = json.dumps([{
+            "agent_id": spec_id, "agent_name": "S", "description": "x",
+        }])
+        challenger_json = json.dumps({
+            "assumption_diffs": ["assumed cost is fixed"],
+            "fact_conflicts": [],
+            "missing_analysis": ["did not consider rollback"],
+            "changed_position": False,
+            "revised_conclusion": "",
+            "overall_assessment": "Solid but incomplete.",
+        })
+        hub_mock.invoke.side_effect = [
+            WorkerResult(text=decomp, backend="claude", model_name="t"),
+            WorkerResult(text="answer", backend="claude", model_name="t"),
+            WorkerResult(text=challenger_json, backend="claude", model_name="t"),
+            WorkerResult(text="ok", backend="claude", model_name="t"),
+        ]
+        # "delete the production database" is high-stakes per governance regex
+        result = executor.run(
+            team_id=team_id,
+            user_message="please delete the production database for me",
+            conversation_id="cid", history=[],
+        )
+        rows = in_memory_db.fetchall(
+            "SELECT * FROM debate_log WHERE workflow_id = ?",
+            (result.pipeline_id,),
+        )
+        assert len(rows) == 1
+        assert rows[0]["overall_assessment"] == "Solid but incomplete."
+        assert rows[0]["parse_failed"] == 0
+        # changed_position stored as int
+        assert rows[0]["changed_position"] == 0
+
+    def test_debate_unparseable_marked_parse_failed(
+        self, in_memory_db, hub_mock, settings,
+    ):
+        settings.set("debate_enabled", "1")
+        settings.set("debate_only_high_stakes", "0")
+        executor = self._build_executor_with_clients(hub_mock, settings)
+        coord_id, spec_id, team_id = self._seed_minimal_team(in_memory_db)
+        decomp = json.dumps([{
+            "agent_id": spec_id, "agent_name": "S", "description": "x",
+        }])
+        hub_mock.invoke.side_effect = [
+            WorkerResult(text=decomp, backend="claude", model_name="t"),
+            WorkerResult(text="answer", backend="claude", model_name="t"),
+            WorkerResult(text="not json at all", backend="claude", model_name="t"),
+            WorkerResult(text="ok", backend="claude", model_name="t"),
+        ]
+        result = executor.run(
+            team_id=team_id, user_message="anything",
+            conversation_id="cid", history=[],
+        )
+        rows = in_memory_db.fetchall(
+            "SELECT * FROM debate_log WHERE workflow_id = ?",
+            (result.pipeline_id,),
+        )
+        assert len(rows) == 1
+        assert rows[0]["parse_failed"] == 1

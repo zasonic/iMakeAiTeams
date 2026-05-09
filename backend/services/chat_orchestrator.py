@@ -205,14 +205,31 @@ class ChatOrchestrator:
         self._settings = settings
         self._mcp_registry = mcp_registry
         self._governance = GovernanceEngine(settings)
-        # DiLoCo blast-radius containment: instead of a fresh-per-turn ledger
-        # (which forgets) or a perpetual ledger (which locks out after ~9
-        # messages), keep a sliding window of the last N turn-level risk
-        # scores. Sustained high risk trips the abort; transient spikes don't.
-        # An OrderedDict bounds the per-conversation dict so quiet-but-never-
-        # deleted conversations cannot accumulate entries forever.
-        self._risk_history: "OrderedDict[str, list[float]]" = OrderedDict()
-        self._risk_history_max_conversations = 256
+        # Layer 3 extraction: memory recall + system-prompt assembly. The
+        # RAG-trim path used to duplicate the assembly logic; now both the
+        # initial recall and the post-trim rebuild route through the same
+        # MemoryRecall._assemble() so the two can never drift apart.
+        from services.memory_recall import MemoryRecall
+        from services.turn_lifecycle import TurnLifecycle
+        from services.turn_router import TurnRouter
+        from services.security_gate import SecurityGate
+        from services.escalation_ladder import EscalationLadder
+        self._memory_recall = MemoryRecall(memory, settings, mcp_registry)
+        # TurnLifecycle owns the open/close transaction boundary that
+        # Layer 1's Bug 5 + Bug 6 fixes hardened. Auto-title uses the local
+        # client OUTSIDE the transaction (see TurnLifecycle.maybe_auto_title).
+        self._turn_lifecycle = TurnLifecycle(settings, local_client)
+        # TurnRouter wraps the agent.model_preference override around
+        # TaskRouter.classify(); see services/turn_router.py.
+        self._turn_router = TurnRouter(router)
+        # SecurityGate owns the quarantine + rule-engine + sliding-window
+        # risk ledger. Bug 7's LRU cap on the per-conversation history
+        # dict lives inside it; delete_conversation calls .forget() to
+        # evict on archival.
+        self._security_gate = SecurityGate()
+        # EscalationLadder is constructed below, after hub_router is wired.
+        self._EscalationLadder = EscalationLadder
+        self._local_client_ref = local_client
         # Single boundary for worker invocation (Phase 1) with Phase 3 LLM
         # fallback wired through Qwen3 /no_think for routing decisions that
         # have no deterministic skill match.
@@ -224,6 +241,10 @@ class ChatOrchestrator:
                 claude_client, local_client, settings, llm_fallback=fallback,
             )
         self.hub_router = hub_router
+        # Now that hub_router is wired, finish building EscalationLadder.
+        self._escalation_ladder = self._EscalationLadder(
+            self.hub_router, self._local_client_ref,
+        )
 
     # ── Conversation management ──────────────────────────────────────────────
 
@@ -290,7 +311,7 @@ class ChatOrchestrator:
         # Drop the in-memory per-conversation risk history too. Without
         # this, the dict accumulated entries forever — every send to a
         # new conversation_id added one and nothing ever removed them.
-        self._risk_history.pop(conversation_id, None)
+        self._security_gate.forget(conversation_id)
 
     def branch_conversation(self, conversation_id: str,
                             from_message_id: str) -> dict:
@@ -1024,33 +1045,24 @@ class ChatOrchestrator:
                 except Exception:
                     pass
 
-        now = datetime.now(timezone.utc).isoformat()
-
-        # ── Improvement 2: Token budget enforcement ──────────────────────────
-        # Hold the db lock across the SUM and the INSERT so two concurrent
-        # chat_send calls on the same conversation can't both pass the cap
-        # before either has recorded its user message.
-        budget = self._settings.get("max_conversation_budget_usd", 5.0)
-        warn_pct = self._settings.get("budget_warning_threshold_pct", 80.0)
-        user_msg_id = str(uuid.uuid4())
-        budget_exceeded = False
-        spent = 0.0
-        with _db._lock:
-            conn = _db.get_db()
-            row = conn.execute(
-                "SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage WHERE conversation_id = ?",
-                (conversation_id,),
-            ).fetchone()
-            spent = row["total"] if row else 0.0
-            if budget > 0 and spent >= budget:
-                budget_exceeded = True
-            else:
-                conn.execute(
-                    "INSERT INTO messages (id, conversation_id, role, content, created_at) "
-                    "VALUES (?, ?, 'user', ?, ?)",
-                    (user_msg_id, conversation_id, user_message, now),
-                )
-                conn.commit()
+        # Layer 3 extraction: TurnLifecycle owns the budget check + user
+        # message INSERT under the same db lock. Mutates ctx with budget,
+        # warn_pct, spent, budget_exceeded, user_msg_id; we keep local
+        # aliases to minimise downstream churn for the rest of send().
+        from services.turn_context import TurnContext
+        ctx = TurnContext(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            agent_id=agent_id,
+            on_event=on_event,
+            on_token=on_token,
+        )
+        budget_exceeded = not self._turn_lifecycle.open(ctx)
+        budget = ctx.budget
+        warn_pct = ctx.warn_pct
+        spent = ctx.spent
+        user_msg_id = ctx.user_msg_id
+        now = ctx.started_at
 
         if budget_exceeded:
             return ChatResult(
@@ -1161,60 +1173,39 @@ class ChatOrchestrator:
             except Exception as exc:
                 log.debug("image attachment fetch failed: %s", exc)
 
-        # Recall memory and build system context
-        mem = self.memory.get_context(conversation_id, user_message)
-        mem_suffix = mem.to_system_suffix()
+        # Recall memory + build system context. Layer 3: MemoryRecall
+        # owns the get_context call, the mem_suffix stitching, the tool
+        # restriction block, and the MCP tool description block. Both
+        # initial recall and the post-trim rebuild route through it, so
+        # the two paths can't drift the way they used to.
+        mem_result = self._memory_recall.recall(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            system_prompt=system_prompt,
+            allowed_tools=_allowed_tools,
+            agent=agent,
+        )
+        mem = mem_result.mem
+        mem_suffix = mem_result.mem_suffix
+        full_system = mem_result.full_system
 
-        full_system = system_prompt
-        if mem_suffix:
-            full_system = system_prompt + "\n\n" + mem_suffix
+        _emit_event("memory_recalled", self._memory_recall.memory_recalled_event(mem))
+        self._memory_recall.maybe_summarize(conversation_id)
 
-        # ── Fix 9: Inject tool restrictions into system prompt ───────────────
-        if _allowed_tools:
-            tool_names = ", ".join(_allowed_tools)
-            full_system += (
-                "\n\n## Tool Restrictions\n"
-                f"You may ONLY use these tools: {tool_names}. "
-                "Do not attempt to use any other tools or capabilities "
-                "outside this list."
-            )
-
-        # Emit structured event so the frontend can show memory indicator
-        _emit_event("memory_recalled", {
-            "facts_count": len(mem.session_facts),
-            "rag_chunks": len(mem.rag_chunks),
-            "memories": len(mem.memories),
-        })
-
-        if self.memory.should_summarize(conversation_id):
-            self.memory.summarize_buffer(conversation_id)
-
-        # Route: Claude or local?
-        model_pref = agent.get("model_preference", "auto") if agent else "auto"
-        complexity = "complex"
-        route_confidence = 1.0
-        route_needs_context = False
-        if model_pref == "claude":
-            route_model = "claude"
-            route_reason = "agent prefers claude"
-        elif model_pref == "local":
-            route_model = "local"
-            route_reason = "agent prefers local"
-        else:
-            route = self.router.classify(user_message, messages, mem)
-            route_model = route.model
-            route_reason = route.reasoning
-            complexity = route.complexity
-            route_confidence = route.confidence
-            route_needs_context = route.needs_context
-
-        # Emit structured event so the frontend can show which model is being used
-        _emit_event("route_decided", {
-            "model": route_model, "complexity": complexity,
-            "reasoning": route_reason,
-            "confidence": route_confidence,
-            "needs_context": route_needs_context,
-        })
+        # Layer 3 extraction: TurnRouter owns the agent.model_preference
+        # override + delegation to TaskRouter.classify(). The five fields
+        # downstream code uses (route_model, route_reason, complexity,
+        # route_confidence, route_needs_context) come back as one
+        # RouteOutcome and are unpacked into locals to keep the rest of
+        # send() touching as little as possible.
+        ctx.agent = agent
+        route_outcome = self._turn_router.decide(ctx, messages, mem)
+        route_model = route_outcome.model
+        route_reason = route_outcome.reasoning
+        complexity = route_outcome.complexity
+        route_confidence = route_outcome.confidence
+        route_needs_context = route_outcome.needs_context
+        self._turn_router.emit_decision(ctx, route_outcome)
 
         if _detect_compound(user_message):
             _emit_event("compound_query_detected", {
@@ -1222,56 +1213,17 @@ class ChatOrchestrator:
                 "suggestion": "Try selecting a team coordinator for complex multi-part requests.",
             })
 
-        # ── v4.1: Adaptive memory injection budget (Engram-inspired) ─────────
-        # The Engram U-shaped finding says ~25% memory, ~75% reasoning is
-        # optimal. For simple queries, we cap injected context aggressively
-        # to avoid RAG noise overwhelming the model. For complex queries,
-        # we allow more context. This prevents the common failure mode where
-        # irrelevant retrieved chunks confuse a simple Q&A response.
-        max_context_items = {"simple": 2, "medium": 4, "complex": 8}.get(
-            complexity, 4
+        # Adaptive RAG trim (Engram-inspired). MemoryRecall owns the
+        # complexity → max-items mapping and the system-prompt rebuild, so
+        # the trim and the initial assembly always produce identical
+        # prompts for the same inputs.
+        mem_result = self._memory_recall.trim_for_complexity(
+            mem_result, complexity, system_prompt,
+            allowed_tools=_allowed_tools, agent=agent,
         )
-        if len(mem.rag_chunks) > max_context_items:
-            log.debug("Memory budget: trimming RAG from %d to %d chunks (%s)",
-                      len(mem.rag_chunks), max_context_items, complexity)
-            mem.rag_chunks = mem.rag_chunks[:max_context_items]
-            # Rebuild system prompt with trimmed context
-            mem_suffix = mem.to_system_suffix()
-            full_system = system_prompt
-            if mem_suffix:
-                full_system = system_prompt + "\n\n" + mem_suffix
-            if _allowed_tools:
-                tool_names = ", ".join(_allowed_tools)
-                full_system += (
-                    "\n\n## Tool Restrictions\n"
-                    f"You may ONLY use these tools: {tool_names}. "
-                    "Do not attempt to use any other tools or capabilities "
-                    "outside this list."
-                )
-
-        # Inject MCP tool descriptions for this agent's skills
-        if agent and agent.get("skills") and self._mcp_registry:
-            try:
-                agent_skills = (
-                    json.loads(agent["skills"]) if isinstance(agent["skills"], str)
-                    else agent["skills"]
-                )
-                skill_names = [
-                    s.get("name", "") for s in agent_skills
-                    if isinstance(s, dict)
-                ]
-                mcp_tools = self._mcp_registry.get_tools_for_tags(skill_names)
-                if mcp_tools:
-                    tool_lines = "\n".join(
-                        f"- **{t['name']}**: {t['description']}" for t in mcp_tools[:10]
-                    )
-                    full_system += (
-                        "\n\n## Available External Tools\n"
-                        "(These tools are available via MCP. Mention them if relevant.)\n\n"
-                        + tool_lines
-                    )
-            except Exception:
-                pass  # MCP injection is best-effort
+        mem = mem_result.mem
+        mem_suffix = mem_result.mem_suffix
+        full_system = mem_result.full_system
 
         # ── Phase 1: Build routing decision through the HubRouter ────────────
         # The TaskRouter above decided which *backend* to use; the HubRouter
@@ -1345,100 +1297,25 @@ class ChatOrchestrator:
         # Runs AFTER context assembly, AFTER hooks, BEFORE any model call.
         # Uses deterministic rules (not classifiers) — can't be prompt-injected.
         # ══════════════════════════════════════════════════════════════════════
-        security = SecurityAssessment()
-        try:
-            # --- Context Quarantine: wrap RAG chunks with provenance tags ---
-            if mem.rag_chunks:
-                quarantined = quarantine_chunks(
-                    mem.rag_chunks,
-                    source_type="user_document",
-                    source_id=conversation_id,
-                )
-                security.quarantined_chunks = len(quarantined)
-                quarantined_section = render_quarantined_context(quarantined)
-                if quarantined_section:
-                    # Replace raw RAG injection in system prompt with
-                    # provenance-tagged, structurally isolated version
-                    raw_rag = mem.to_system_suffix()
-                    if raw_rag and "## Reference documents the user has provided" in full_system:
-                        # Swap the raw documents section for quarantined version
-                        full_system = full_system.replace(
-                            "## Reference documents the user has provided",
-                            "## Retrieved Context (Quarantined)",
-                        )
-
-            # --- Deterministic Rule Engine: strip structural attacks ---
-            full_system, violations = enforce_context_rules(
-                full_system, source_label=conversation_id[:8]
+        # Layer 3 extraction: SecurityGate owns quarantine + rule engine +
+        # sliding-window risk ledger (Bug 7 LRU lives inside it). Returns
+        # an updated full_system and a SecurityResult with the abort flag.
+        security_result = self._security_gate.evaluate(ctx, full_system, mem, target)
+        full_system = security_result.full_system
+        security = security_result.assessment
+        if security_result.blocked:
+            return ChatResult(
+                text=(
+                    f"\U0001f6e1️ This workflow has been paused because the cumulative "
+                    f"risk score ({security.risk_assessment.cumulative_score:.1f}) "
+                    f"exceeds the safety threshold. This happens when a conversation "
+                    f"involves many high-risk operations. Start a new conversation "
+                    f"or adjust the risk threshold in Settings."
+                ),
+                model="", route_reason="security_abort",
+                tokens_in=0, tokens_out=0, cost_usd=0.0,
+                message_id=str(uuid.uuid4()),
             )
-            security.context_violations = violations
-
-            # --- Risk Ledger: track cumulative risk for THIS turn only ---
-            # A fresh ledger is created each turn because DATA_READ +
-            # EXTERNAL_API accumulate to 0.35 per message; persisting across
-            # turns causes the conversation to hit the 3.0 abort threshold
-            # after ~9 messages.
-            #
-            # DiLoCo blast-radius containment: replace the per-turn amnesia
-            # with a sliding window of the last 5 turn-level cumulative
-            # scores. A sustained injection campaign (5+ turns averaging
-            # 0.6+) trips the abort; a single spike followed by normal
-            # turns does not.
-            ledger = RiskLedger()
-            ledger.record(
-                RiskCategory.DATA_READ,
-                f"Context assembled: {len(mem.rag_chunks)} RAG chunks, "
-                f"{len(mem.session_facts)} facts, {len(mem.memories)} memories",
-            )
-            if target.backend == "claude":
-                ledger.record(
-                    RiskCategory.EXTERNAL_API,
-                    f"Sending to external API: {target.model_name}",
-                    weight_override=0.15,  # low weight for standard chat
-                )
-            security.risk_assessment = ledger.assess()
-
-            history = self._risk_history.setdefault(conversation_id, [])
-            history.append(security.risk_assessment.cumulative_score)
-            if len(history) > 5:
-                del history[:-5]
-            # Mark this conversation as most-recently-used and evict the
-            # least-recently-used once we exceed the bound. Without this
-            # the dict accumulated one entry per conversation forever.
-            self._risk_history.move_to_end(conversation_id)
-            while len(self._risk_history) > self._risk_history_max_conversations:
-                self._risk_history.popitem(last=False)
-            if len(history) >= 5:
-                window_avg = sum(history) / len(history)
-                if window_avg > RISK_ABORT_THRESHOLD / 5:
-                    security.risk_assessment.should_abort = True
-
-            # --- Hard abort if risk threshold exceeded ---
-            if security.risk_assessment.should_abort:
-                security.blocked = True
-                security.block_reason = (
-                    f"Cumulative risk score {security.risk_assessment.cumulative_score:.1f} "
-                    f"exceeds threshold {3.0}. Requires human approval."
-                )
-                _emit_event("security_assessment", security.to_event())
-                return ChatResult(
-                    text=(
-                        f"🛡️ This workflow has been paused because the cumulative "
-                        f"risk score ({security.risk_assessment.cumulative_score:.1f}) "
-                        f"exceeds the safety threshold. This happens when a conversation "
-                        f"involves many high-risk operations. Start a new conversation "
-                        f"or adjust the risk threshold in Settings."
-                    ),
-                    model="", route_reason="security_abort",
-                    tokens_in=0, tokens_out=0, cost_usd=0.0,
-                    message_id=str(uuid.uuid4()),
-                )
-
-            # Emit security assessment to frontend thinking timeline
-            _emit_event("security_assessment", security.to_event())
-
-        except Exception as exc:
-            log.debug("Security engine non-fatal error: %s", exc)
 
         # ══════════════════════════════════════════════════════════════════════
 
@@ -1881,86 +1758,30 @@ class ChatOrchestrator:
             except Exception:
                 pass  # alignment check is best-effort, never block response
 
-        # ── Local response quality gate ─────────────────────────────────────
-        # If response came from local and looks weak, escalate to Claude.
-        # An empty local response is the strongest possible signal of failure,
-        # so it bypasses the quality scorer (which can't grade an empty input)
-        # and escalates directly.
-        response_empty = len((response_text or "").strip()) < 20
-
-        def _escalate_to_claude(reason: str) -> bool:
-            nonlocal response_text, tokens_in, tokens_out, route_model, model_name
-            try:
-                escalation = RoutingDecision(
-                    agent_id=decision.agent_id,
-                    backend="claude",
-                    score=decision.score,
-                    reasoning=reason,
-                    used_fallback=False,
-                    skill_matched=decision.skill_matched,
-                )
-                esc_result = self.hub_router.invoke(
-                    escalation, full_system, messages,
-                    max_tokens=target.max_tokens, on_token=on_token,
-                )
-                response_text = esc_result.text
-                tokens_in = esc_result.input_tokens
-                tokens_out = esc_result.output_tokens
-                route_model = "claude"
-                model_name = esc_result.model_name
-                return True
-            except Exception as esc_exc:
-                log.debug("Escalation to Claude failed: %s", esc_exc)
-                return False
-
-        if (
-            not had_error
-            and not split_enabled  # split owns its own escalation; the legacy
-                                   # gate would re-invoke with full_system,
-                                   # leaking RAG past the architectural wall
-            and target.backend == "local"
-            and self.local and self.local.is_available()
-            and len(user_message.split()) >= 5  # skip for trivial messages
-        ):
-            if response_empty:
-                log.info("Local response empty — escalating to Claude")
-                _escalate_to_claude("local response empty; escalated")
-            else:
-                try:
-                    from services.task_artifacts import local_first_call
-                    quality_raw = local_first_call(
-                        self.local, None,  # local only, no Claude fallback
-                        "Rate this response's relevance and completeness for the given question. "
-                        "Respond with ONLY a JSON: {\"score\": 0-10, \"reason\": \"...\"}",
-                        f"QUESTION: {user_message[:300]}\nRESPONSE: {(response_text or '')[:500]}",
-                        max_tokens=100,
-                    )
-                    if quality_raw:
-                        import json as _json
-                        _qstart = quality_raw.find("{")
-                        _qend = quality_raw.rfind("}")
-                        if _qstart != -1 and _qend != -1:
-                            try:
-                                quality = _json.loads(quality_raw[_qstart:_qend + 1])
-                            except (ValueError, TypeError):
-                                quality = {}
-                            # Coerce score to a number; a model emitting
-                            # {"score": "low"} would otherwise raise TypeError
-                            # on the comparison and silently disable escalation
-                            # via the outer `except Exception: pass` swallow.
-                            try:
-                                score = float(quality.get("score", 10))
-                            except (TypeError, ValueError):
-                                score = 10.0
-                            if score < 4:
-                                log.info("Local response scored %s — escalating to Claude", score)
-                                _escalate_to_claude("local response failed quality gate; escalated")
-                except Exception:
-                    pass  # quality check is best-effort, never block response
-
-        # Recompute after possible escalation so router_log records the
-        # post-escalation state, not the stale pre-escalation reading.
-        response_empty = len((response_text or "").strip()) < 20
+        # Layer 3 extraction: EscalationLadder owns the empty-response
+        # rung + quality-gate rung. Returns an EscalationOutcome whose
+        # response_empty already reflects the post-escalation state
+        # (Bug 4 fix), so the router_log write below sees the true value.
+        esc_outcome = self._escalation_ladder.maybe_escalate(
+            ctx=ctx,
+            decision=decision,
+            target=target,
+            full_system=full_system,
+            messages=messages,
+            response_text=response_text,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            route_model=route_model,
+            model_name=model_name,
+            had_error=had_error,
+            split_enabled=split_enabled,
+        )
+        response_text = esc_outcome.response_text
+        tokens_in = esc_outcome.tokens_in
+        tokens_out = esc_outcome.tokens_out
+        route_model = esc_outcome.route_model
+        model_name = esc_outcome.model_name
+        response_empty = esc_outcome.response_empty
 
         # Persist router feedback
         turn_failed = had_error or response_text.startswith("[Error")
@@ -1999,84 +1820,26 @@ class ChatOrchestrator:
                 ),
             )
 
-        # Save assistant message — redact the persisted copy so credentials
-        # never land on disk. The streaming UI already received the original
-        # text via on_token, and ChatResult.text below stays un-redacted for
-        # the in-flight return value.
+        # Layer 3 extraction: TurnLifecycle.close owns the three-INSERT-plus-
+        # UPDATE atomicity (Bug 6) and the in-transaction SUM that closes
+        # Bug 5's race on stale ``spent``. Auto-title fires post-commit so
+        # its blocking LLM call doesn't sit inside the db lock.
         # Phase 8: asst_msg_id was pre-allocated above so the
         # high_stakes_voting_complete event could carry it for the
         # frontend badge; reuse the same id when persisting.
         cost = _estimate_cost(model_name, tokens_in, tokens_out, self._settings)
-        reply_text_for_storage = redact(response_text)
-        resp_now = datetime.now(timezone.utc).isoformat()
-        # Persist assistant message + conversation update + token_usage as a
-        # single transaction. Splitting these used to leave the DB in a torn
-        # state on a crash (message saved but token_usage missing — budget
-        # under-counted). _db.transaction() rolls back on exception so a
-        # mid-write SQLite error leaves both rows absent, never just one.
-        # Re-reading the running total inside the same transaction also
-        # closes the race where two concurrent sends both used a stale
-        # ``spent`` and skipped the budget warning.
-        # Auto-title runs AFTER this transaction (not inside) to preserve
-        # current behavior — it makes a blocking LLM call we don't hold locks across.
-        budget_warning = ""
-        with _db.transaction() as conn:
-            conn.execute(
-                "INSERT INTO messages (id, conversation_id, role, content, model_used, "
-                "route_reason, tokens_in, tokens_out, cost_usd, created_at) "
-                "VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
-                (asst_msg_id, conversation_id, reply_text_for_storage, model_name,
-                 route_reason, tokens_in, tokens_out, cost, resp_now),
-            )
-            conn.execute(
-                "UPDATE conversations SET updated_at = ?, "
-                "title = CASE WHEN title = 'New conversation' THEN ? ELSE title END "
-                "WHERE id = ?",
-                (resp_now, user_message[:60], conversation_id),
-            )
-            conn.execute(
-                "INSERT INTO token_usage (id, conversation_id, model, tokens_in, "
-                "tokens_out, cost_usd, routed_reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), conversation_id, model_name,
-                 tokens_in, tokens_out, cost, route_reason, resp_now),
-            )
-            if budget > 0:
-                row = conn.execute(
-                    "SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage "
-                    "WHERE conversation_id = ?",
-                    (conversation_id,),
-                ).fetchone()
-                new_spent = row["total"] if row else (spent + cost)
-                pct = (new_spent / budget) * 100
-                if pct >= warn_pct:
-                    budget_warning = (
-                        f"⚠️ Approaching conversation budget limit "
-                        f"(${new_spent:.2f}/${budget:.2f})"
-                    )
-
-        # Auto-title: generate a concise title from the first exchange.
-        # Only fires once — when the title is still the raw truncation.
-        conv_row = _db.fetchone(
-            "SELECT title FROM conversations WHERE id = ?", (conversation_id,)
+        close_result = self._turn_lifecycle.close(
+            ctx,
+            asst_msg_id=asst_msg_id,
+            response_text=response_text,
+            route_reason=route_reason,
+            model_name=model_name,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost=cost,
         )
-        if conv_row and conv_row["title"] == user_message[:60]:
-            if self.local and self.local.is_available():
-                try:
-                    title_raw = self.local.chat(
-                        "Generate a 3-6 word title for this conversation. "
-                        "Return ONLY the title text, no quotes, no explanation.",
-                        f"User: {user_message[:200]}\nAssistant: {response_text[:200]}",
-                        max_tokens=20,
-                    )
-                    if title_raw and 2 < len(title_raw.strip()) <= 80:
-                        clean_title = title_raw.strip().strip('"\'').strip()
-                        _db.execute(
-                            "UPDATE conversations SET title = ? WHERE id = ?",
-                            (clean_title, conversation_id),
-                        )
-                        _db.commit()
-                except Exception:
-                    pass  # auto-title is best-effort, never block
+        budget_warning = close_result.budget_warning
+        self._turn_lifecycle.maybe_auto_title(ctx, response_text)
 
         # Update memory
         self.memory.add_to_buffer(conversation_id, "user", user_message)
@@ -2130,7 +1893,10 @@ class ChatOrchestrator:
         ]
         history = self._trim_history_to_budget(history)
 
-        executor = PipelineExecutor(self.hub_router, self._settings)
+        executor = PipelineExecutor(
+            self.hub_router, self._settings,
+            claude_client=self.claude, local_client=self.local,
+        )
         try:
             result = executor.run(
                 team_id=team_id,

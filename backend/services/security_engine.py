@@ -49,7 +49,6 @@ Defense 6 — CaMeL: Privileged-LLM / Quarantined-LLM split (arXiv 2503.18813)
 import hashlib
 import json
 import logging
-import math
 import re
 import time
 import uuid

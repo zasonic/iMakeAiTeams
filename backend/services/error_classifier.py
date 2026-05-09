@@ -86,7 +86,7 @@ def with_retry(component: str, workflow_id: str = "", task_id: str = ""):
     try:
         from tenacity import (
             retry, wait_exponential, stop_after_attempt,
-            retry_if_exception, before_sleep_log, RetryError,
+            retry_if_exception, before_sleep_log,
         )
         _tenacity_available = True
     except ImportError:
