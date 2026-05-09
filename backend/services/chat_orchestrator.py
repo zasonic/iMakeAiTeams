@@ -211,11 +211,15 @@ class ChatOrchestrator:
         # MemoryRecall._assemble() so the two can never drift apart.
         from services.memory_recall import MemoryRecall
         from services.turn_lifecycle import TurnLifecycle
+        from services.turn_router import TurnRouter
         self._memory_recall = MemoryRecall(memory, settings, mcp_registry)
         # TurnLifecycle owns the open/close transaction boundary that
         # Layer 1's Bug 5 + Bug 6 fixes hardened. Auto-title uses the local
         # client OUTSIDE the transaction (see TurnLifecycle.maybe_auto_title).
         self._turn_lifecycle = TurnLifecycle(settings, local_client)
+        # TurnRouter wraps the agent.model_preference override around
+        # TaskRouter.classify(); see services/turn_router.py.
+        self._turn_router = TurnRouter(router)
         # DiLoCo blast-radius containment: instead of a fresh-per-turn ledger
         # (which forgets) or a perpetual ledger (which locks out after ~9
         # messages), keep a sliding window of the last N turn-level risk
@@ -1182,32 +1186,20 @@ class ChatOrchestrator:
         _emit_event("memory_recalled", self._memory_recall.memory_recalled_event(mem))
         self._memory_recall.maybe_summarize(conversation_id)
 
-        # Route: Claude or local?
-        model_pref = agent.get("model_preference", "auto") if agent else "auto"
-        complexity = "complex"
-        route_confidence = 1.0
-        route_needs_context = False
-        if model_pref == "claude":
-            route_model = "claude"
-            route_reason = "agent prefers claude"
-        elif model_pref == "local":
-            route_model = "local"
-            route_reason = "agent prefers local"
-        else:
-            route = self.router.classify(user_message, messages, mem)
-            route_model = route.model
-            route_reason = route.reasoning
-            complexity = route.complexity
-            route_confidence = route.confidence
-            route_needs_context = route.needs_context
-
-        # Emit structured event so the frontend can show which model is being used
-        _emit_event("route_decided", {
-            "model": route_model, "complexity": complexity,
-            "reasoning": route_reason,
-            "confidence": route_confidence,
-            "needs_context": route_needs_context,
-        })
+        # Layer 3 extraction: TurnRouter owns the agent.model_preference
+        # override + delegation to TaskRouter.classify(). The five fields
+        # downstream code uses (route_model, route_reason, complexity,
+        # route_confidence, route_needs_context) come back as one
+        # RouteOutcome and are unpacked into locals to keep the rest of
+        # send() touching as little as possible.
+        ctx.agent = agent
+        route_outcome = self._turn_router.decide(ctx, messages, mem)
+        route_model = route_outcome.model
+        route_reason = route_outcome.reasoning
+        complexity = route_outcome.complexity
+        route_confidence = route_outcome.confidence
+        route_needs_context = route_outcome.needs_context
+        self._turn_router.emit_decision(ctx, route_outcome)
 
         if _detect_compound(user_message):
             _emit_event("compound_query_detected", {
