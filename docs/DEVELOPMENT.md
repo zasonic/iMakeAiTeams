@@ -93,10 +93,11 @@ installs:
 ## Security benchmarks (AgentDojo)
 
 `.github/workflows/security-bench.yml` runs the four published AgentDojo
-suites (workspace, slack, banking, travel) against the security stack on
-every push to `main`, commits the per-suite `benchmarks/<suite>.json`
-files plus a regenerated [BENCHMARKS.md](../BENCHMARKS.md), and fails the
-build if any suite's ASR exceeds the ceiling configured in
+suites (workspace, slack, banking, travel) against the security stack
+weekly (Mondays 06:00 UTC) and on manual `workflow_dispatch`. It commits
+the per-suite `benchmarks/<suite>.json` files plus a regenerated
+[BENCHMARKS.md](../BENCHMARKS.md) back to `main` with `[skip ci]`, and
+fails the build if any suite's ASR exceeds the ceiling configured in
 [`benchmarks/thresholds.json`](../benchmarks/thresholds.json).
 
 Local reproduction (Windows):
@@ -119,18 +120,23 @@ imported at runtime — `backend/pytest.ini` excludes
 `pytest tests/` run still works on machines that have not installed the
 bench deps.
 
-### Required GitHub Actions secrets
+### Required GitHub Actions secret
 
-Add both secrets under **Settings → Secrets and variables → Actions** on
+Add one secret under **Settings → Secrets and variables → Actions** on
 the GitHub repository:
 
 | Secret | Purpose |
 | --- | --- |
 | `ANTHROPIC_API_KEY` | Used by the Reader pass and the Actor's Anthropic LLM during the bench. |
-| `BENCH_PUSH_TOKEN`  | A fine-grained personal access token with `contents: write` on this repo. The workflow uses it to commit `benchmarks/*.json` + `BENCHMARKS.md` back to `main`. The default `GITHUB_TOKEN` is intentionally not enough — pushes from `GITHUB_TOKEN` cannot retrigger workflows, but the commit-back step uses `[skip ci]` so the same loop is broken either way; the deploy-key route is preferred only because it lets you scope the token to this repo. |
 
-`BENCH_PUSH_TOKEN` can also be a deploy key — see
-[GitHub's deploy-keys docs](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys#deploy-keys).
+That is the only external setup. The workflow commits results back via
+the default `GITHUB_TOKEN` that ships with every repository — the
+workflow grants it `contents: write`, and the `[skip ci]` marker on the
+commit message prevents retrigger loops. No personal access token, no
+deploy key, no fork required. If the repo owner declines to add
+`ANTHROPIC_API_KEY`, the workflow still runs but every suite step fails
+with a clear "ANTHROPIC_API_KEY env var is required" message; the local
+`dev\run-bench.bat` path is unaffected.
 
 ### Tightening the threshold
 
