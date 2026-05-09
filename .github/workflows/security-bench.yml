@@ -1,12 +1,18 @@
 name: security-bench
 
+# Manual trigger + weekly schedule. No `push:` — the bench takes ~30 min
+# of API time and is not meant to gate every commit. Flip to push when
+# the numbers stabilise.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays 06:00 UTC
 
 # The job commits back to main with [skip ci] so it does not retrigger
-# itself. ``contents: write`` is required for that push.
+# itself. ``contents: write`` upgrades the default GITHUB_TOKEN from
+# read-only to commit/push for this repo, removing the need for a PAT
+# or deploy key. ANTHROPIC_API_KEY is the only secret an operator has
+# to add by hand.
 permissions:
   contents: write
 
@@ -20,10 +26,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Need the full history so the commit-back step can fast-forward
-          # main without surprises.
+          # Full history so the commit-back step can fast-forward main
+          # cleanly. The default GITHUB_TOKEN ships with every repo and,
+          # combined with the workflow-level ``contents: write`` above,
+          # is enough to push back into the same repo — no PAT, no deploy
+          # key, no extra setup.
           fetch-depth: 0
-          token: ${{ secrets.BENCH_PUSH_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
