@@ -795,6 +795,26 @@ _MIGRATIONS = [
               VALUES (new.id, new.conversation_id, new.role, new.content, new.created_at);
             END""",
     ]),
+
+    # ── Phase 12: CaMeL (DeepMind/ETH arXiv 2503.18813) audit log ────────────
+    # Privileged-LLM / Quarantined-LLM split. Each turn that runs through
+    # the CaMeL pipeline writes one row capturing the plan source, how many
+    # AST steps executed before stop, capability violations, blocked tool
+    # calls, and the final output. Index on conversation_id matches the
+    # other per-turn audit tables for fast lookup in the UI.
+    ("phase12.camel_log", [
+        """CREATE TABLE IF NOT EXISTS camel_log (
+            id                    TEXT PRIMARY KEY,
+            conversation_id       TEXT,
+            plan_source           TEXT,
+            executed_steps        INTEGER,
+            capability_violations INTEGER,
+            blocked_calls         TEXT,
+            output_text           TEXT,
+            created_at            TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_camel_log_conv ON camel_log(conversation_id)",
+    ]),
 ]
 
 
