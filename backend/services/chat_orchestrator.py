@@ -212,6 +212,7 @@ class ChatOrchestrator:
         from services.memory_recall import MemoryRecall
         from services.turn_lifecycle import TurnLifecycle
         from services.turn_router import TurnRouter
+        from services.security_gate import SecurityGate
         self._memory_recall = MemoryRecall(memory, settings, mcp_registry)
         # TurnLifecycle owns the open/close transaction boundary that
         # Layer 1's Bug 5 + Bug 6 fixes hardened. Auto-title uses the local
@@ -220,14 +221,11 @@ class ChatOrchestrator:
         # TurnRouter wraps the agent.model_preference override around
         # TaskRouter.classify(); see services/turn_router.py.
         self._turn_router = TurnRouter(router)
-        # DiLoCo blast-radius containment: instead of a fresh-per-turn ledger
-        # (which forgets) or a perpetual ledger (which locks out after ~9
-        # messages), keep a sliding window of the last N turn-level risk
-        # scores. Sustained high risk trips the abort; transient spikes don't.
-        # An OrderedDict bounds the per-conversation dict so quiet-but-never-
-        # deleted conversations cannot accumulate entries forever.
-        self._risk_history: "OrderedDict[str, list[float]]" = OrderedDict()
-        self._risk_history_max_conversations = 256
+        # SecurityGate owns the quarantine + rule-engine + sliding-window
+        # risk ledger. Bug 7's LRU cap on the per-conversation history
+        # dict lives inside it; delete_conversation calls .forget() to
+        # evict on archival.
+        self._security_gate = SecurityGate()
         # Single boundary for worker invocation (Phase 1) with Phase 3 LLM
         # fallback wired through Qwen3 /no_think for routing decisions that
         # have no deterministic skill match.
@@ -305,7 +303,7 @@ class ChatOrchestrator:
         # Drop the in-memory per-conversation risk history too. Without
         # this, the dict accumulated entries forever — every send to a
         # new conversation_id added one and nothing ever removed them.
-        self._risk_history.pop(conversation_id, None)
+        self._security_gate.forget(conversation_id)
 
     def branch_conversation(self, conversation_id: str,
                             from_message_id: str) -> dict:
@@ -1291,100 +1289,25 @@ class ChatOrchestrator:
         # Runs AFTER context assembly, AFTER hooks, BEFORE any model call.
         # Uses deterministic rules (not classifiers) — can't be prompt-injected.
         # ══════════════════════════════════════════════════════════════════════
-        security = SecurityAssessment()
-        try:
-            # --- Context Quarantine: wrap RAG chunks with provenance tags ---
-            if mem.rag_chunks:
-                quarantined = quarantine_chunks(
-                    mem.rag_chunks,
-                    source_type="user_document",
-                    source_id=conversation_id,
-                )
-                security.quarantined_chunks = len(quarantined)
-                quarantined_section = render_quarantined_context(quarantined)
-                if quarantined_section:
-                    # Replace raw RAG injection in system prompt with
-                    # provenance-tagged, structurally isolated version
-                    raw_rag = mem.to_system_suffix()
-                    if raw_rag and "## Reference documents the user has provided" in full_system:
-                        # Swap the raw documents section for quarantined version
-                        full_system = full_system.replace(
-                            "## Reference documents the user has provided",
-                            "## Retrieved Context (Quarantined)",
-                        )
-
-            # --- Deterministic Rule Engine: strip structural attacks ---
-            full_system, violations = enforce_context_rules(
-                full_system, source_label=conversation_id[:8]
+        # Layer 3 extraction: SecurityGate owns quarantine + rule engine +
+        # sliding-window risk ledger (Bug 7 LRU lives inside it). Returns
+        # an updated full_system and a SecurityResult with the abort flag.
+        security_result = self._security_gate.evaluate(ctx, full_system, mem, target)
+        full_system = security_result.full_system
+        security = security_result.assessment
+        if security_result.blocked:
+            return ChatResult(
+                text=(
+                    f"\U0001f6e1️ This workflow has been paused because the cumulative "
+                    f"risk score ({security.risk_assessment.cumulative_score:.1f}) "
+                    f"exceeds the safety threshold. This happens when a conversation "
+                    f"involves many high-risk operations. Start a new conversation "
+                    f"or adjust the risk threshold in Settings."
+                ),
+                model="", route_reason="security_abort",
+                tokens_in=0, tokens_out=0, cost_usd=0.0,
+                message_id=str(uuid.uuid4()),
             )
-            security.context_violations = violations
-
-            # --- Risk Ledger: track cumulative risk for THIS turn only ---
-            # A fresh ledger is created each turn because DATA_READ +
-            # EXTERNAL_API accumulate to 0.35 per message; persisting across
-            # turns causes the conversation to hit the 3.0 abort threshold
-            # after ~9 messages.
-            #
-            # DiLoCo blast-radius containment: replace the per-turn amnesia
-            # with a sliding window of the last 5 turn-level cumulative
-            # scores. A sustained injection campaign (5+ turns averaging
-            # 0.6+) trips the abort; a single spike followed by normal
-            # turns does not.
-            ledger = RiskLedger()
-            ledger.record(
-                RiskCategory.DATA_READ,
-                f"Context assembled: {len(mem.rag_chunks)} RAG chunks, "
-                f"{len(mem.session_facts)} facts, {len(mem.memories)} memories",
-            )
-            if target.backend == "claude":
-                ledger.record(
-                    RiskCategory.EXTERNAL_API,
-                    f"Sending to external API: {target.model_name}",
-                    weight_override=0.15,  # low weight for standard chat
-                )
-            security.risk_assessment = ledger.assess()
-
-            history = self._risk_history.setdefault(conversation_id, [])
-            history.append(security.risk_assessment.cumulative_score)
-            if len(history) > 5:
-                del history[:-5]
-            # Mark this conversation as most-recently-used and evict the
-            # least-recently-used once we exceed the bound. Without this
-            # the dict accumulated one entry per conversation forever.
-            self._risk_history.move_to_end(conversation_id)
-            while len(self._risk_history) > self._risk_history_max_conversations:
-                self._risk_history.popitem(last=False)
-            if len(history) >= 5:
-                window_avg = sum(history) / len(history)
-                if window_avg > RISK_ABORT_THRESHOLD / 5:
-                    security.risk_assessment.should_abort = True
-
-            # --- Hard abort if risk threshold exceeded ---
-            if security.risk_assessment.should_abort:
-                security.blocked = True
-                security.block_reason = (
-                    f"Cumulative risk score {security.risk_assessment.cumulative_score:.1f} "
-                    f"exceeds threshold {3.0}. Requires human approval."
-                )
-                _emit_event("security_assessment", security.to_event())
-                return ChatResult(
-                    text=(
-                        f"🛡️ This workflow has been paused because the cumulative "
-                        f"risk score ({security.risk_assessment.cumulative_score:.1f}) "
-                        f"exceeds the safety threshold. This happens when a conversation "
-                        f"involves many high-risk operations. Start a new conversation "
-                        f"or adjust the risk threshold in Settings."
-                    ),
-                    model="", route_reason="security_abort",
-                    tokens_in=0, tokens_out=0, cost_usd=0.0,
-                    message_id=str(uuid.uuid4()),
-                )
-
-            # Emit security assessment to frontend thinking timeline
-            _emit_event("security_assessment", security.to_event())
-
-        except Exception as exc:
-            log.debug("Security engine non-fatal error: %s", exc)
 
         # ══════════════════════════════════════════════════════════════════════
 
