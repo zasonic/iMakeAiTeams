@@ -42,6 +42,12 @@ class TurnContext:
     user_msg_id:     str = ""                                  # set by TurnLifecycle on user-msg INSERT
     started_at:      str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+    # Budget bookkeeping (set by TurnLifecycle.open) ──────────────────────
+    budget:          float = 0.0      # max_conversation_budget_usd at turn start
+    warn_pct:        float = 0.0      # budget_warning_threshold_pct at turn start
+    spent:           float = 0.0      # cumulative spend BEFORE this turn (snapshot)
+    budget_exceeded: bool  = False    # True iff open() saw spent >= budget
+
     def emit(self, event_type: str, data: dict) -> None:
         """Forward a structured event to ``on_event`` if one was provided.
 

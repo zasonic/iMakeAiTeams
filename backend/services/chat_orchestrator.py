@@ -210,7 +210,12 @@ class ChatOrchestrator:
         # initial recall and the post-trim rebuild route through the same
         # MemoryRecall._assemble() so the two can never drift apart.
         from services.memory_recall import MemoryRecall
+        from services.turn_lifecycle import TurnLifecycle
         self._memory_recall = MemoryRecall(memory, settings, mcp_registry)
+        # TurnLifecycle owns the open/close transaction boundary that
+        # Layer 1's Bug 5 + Bug 6 fixes hardened. Auto-title uses the local
+        # client OUTSIDE the transaction (see TurnLifecycle.maybe_auto_title).
+        self._turn_lifecycle = TurnLifecycle(settings, local_client)
         # DiLoCo blast-radius containment: instead of a fresh-per-turn ledger
         # (which forgets) or a perpetual ledger (which locks out after ~9
         # messages), keep a sliding window of the last N turn-level risk
@@ -1030,33 +1035,24 @@ class ChatOrchestrator:
                 except Exception:
                     pass
 
-        now = datetime.now(timezone.utc).isoformat()
-
-        # ── Improvement 2: Token budget enforcement ──────────────────────────
-        # Hold the db lock across the SUM and the INSERT so two concurrent
-        # chat_send calls on the same conversation can't both pass the cap
-        # before either has recorded its user message.
-        budget = self._settings.get("max_conversation_budget_usd", 5.0)
-        warn_pct = self._settings.get("budget_warning_threshold_pct", 80.0)
-        user_msg_id = str(uuid.uuid4())
-        budget_exceeded = False
-        spent = 0.0
-        with _db._lock:
-            conn = _db.get_db()
-            row = conn.execute(
-                "SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage WHERE conversation_id = ?",
-                (conversation_id,),
-            ).fetchone()
-            spent = row["total"] if row else 0.0
-            if budget > 0 and spent >= budget:
-                budget_exceeded = True
-            else:
-                conn.execute(
-                    "INSERT INTO messages (id, conversation_id, role, content, created_at) "
-                    "VALUES (?, ?, 'user', ?, ?)",
-                    (user_msg_id, conversation_id, user_message, now),
-                )
-                conn.commit()
+        # Layer 3 extraction: TurnLifecycle owns the budget check + user
+        # message INSERT under the same db lock. Mutates ctx with budget,
+        # warn_pct, spent, budget_exceeded, user_msg_id; we keep local
+        # aliases to minimise downstream churn for the rest of send().
+        from services.turn_context import TurnContext
+        ctx = TurnContext(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            agent_id=agent_id,
+            on_event=on_event,
+            on_token=on_token,
+        )
+        budget_exceeded = not self._turn_lifecycle.open(ctx)
+        budget = ctx.budget
+        warn_pct = ctx.warn_pct
+        spent = ctx.spent
+        user_msg_id = ctx.user_msg_id
+        now = ctx.started_at
 
         if budget_exceeded:
             return ChatResult(
@@ -1957,84 +1953,26 @@ class ChatOrchestrator:
                 ),
             )
 
-        # Save assistant message — redact the persisted copy so credentials
-        # never land on disk. The streaming UI already received the original
-        # text via on_token, and ChatResult.text below stays un-redacted for
-        # the in-flight return value.
+        # Layer 3 extraction: TurnLifecycle.close owns the three-INSERT-plus-
+        # UPDATE atomicity (Bug 6) and the in-transaction SUM that closes
+        # Bug 5's race on stale ``spent``. Auto-title fires post-commit so
+        # its blocking LLM call doesn't sit inside the db lock.
         # Phase 8: asst_msg_id was pre-allocated above so the
         # high_stakes_voting_complete event could carry it for the
         # frontend badge; reuse the same id when persisting.
         cost = _estimate_cost(model_name, tokens_in, tokens_out, self._settings)
-        reply_text_for_storage = redact(response_text)
-        resp_now = datetime.now(timezone.utc).isoformat()
-        # Persist assistant message + conversation update + token_usage as a
-        # single transaction. Splitting these used to leave the DB in a torn
-        # state on a crash (message saved but token_usage missing — budget
-        # under-counted). _db.transaction() rolls back on exception so a
-        # mid-write SQLite error leaves both rows absent, never just one.
-        # Re-reading the running total inside the same transaction also
-        # closes the race where two concurrent sends both used a stale
-        # ``spent`` and skipped the budget warning.
-        # Auto-title runs AFTER this transaction (not inside) to preserve
-        # current behavior — it makes a blocking LLM call we don't hold locks across.
-        budget_warning = ""
-        with _db.transaction() as conn:
-            conn.execute(
-                "INSERT INTO messages (id, conversation_id, role, content, model_used, "
-                "route_reason, tokens_in, tokens_out, cost_usd, created_at) "
-                "VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
-                (asst_msg_id, conversation_id, reply_text_for_storage, model_name,
-                 route_reason, tokens_in, tokens_out, cost, resp_now),
-            )
-            conn.execute(
-                "UPDATE conversations SET updated_at = ?, "
-                "title = CASE WHEN title = 'New conversation' THEN ? ELSE title END "
-                "WHERE id = ?",
-                (resp_now, user_message[:60], conversation_id),
-            )
-            conn.execute(
-                "INSERT INTO token_usage (id, conversation_id, model, tokens_in, "
-                "tokens_out, cost_usd, routed_reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), conversation_id, model_name,
-                 tokens_in, tokens_out, cost, route_reason, resp_now),
-            )
-            if budget > 0:
-                row = conn.execute(
-                    "SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage "
-                    "WHERE conversation_id = ?",
-                    (conversation_id,),
-                ).fetchone()
-                new_spent = row["total"] if row else (spent + cost)
-                pct = (new_spent / budget) * 100
-                if pct >= warn_pct:
-                    budget_warning = (
-                        f"⚠️ Approaching conversation budget limit "
-                        f"(${new_spent:.2f}/${budget:.2f})"
-                    )
-
-        # Auto-title: generate a concise title from the first exchange.
-        # Only fires once — when the title is still the raw truncation.
-        conv_row = _db.fetchone(
-            "SELECT title FROM conversations WHERE id = ?", (conversation_id,)
+        close_result = self._turn_lifecycle.close(
+            ctx,
+            asst_msg_id=asst_msg_id,
+            response_text=response_text,
+            route_reason=route_reason,
+            model_name=model_name,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost=cost,
         )
-        if conv_row and conv_row["title"] == user_message[:60]:
-            if self.local and self.local.is_available():
-                try:
-                    title_raw = self.local.chat(
-                        "Generate a 3-6 word title for this conversation. "
-                        "Return ONLY the title text, no quotes, no explanation.",
-                        f"User: {user_message[:200]}\nAssistant: {response_text[:200]}",
-                        max_tokens=20,
-                    )
-                    if title_raw and 2 < len(title_raw.strip()) <= 80:
-                        clean_title = title_raw.strip().strip('"\'').strip()
-                        _db.execute(
-                            "UPDATE conversations SET title = ? WHERE id = ?",
-                            (clean_title, conversation_id),
-                        )
-                        _db.commit()
-                except Exception:
-                    pass  # auto-title is best-effort, never block
+        budget_warning = close_result.budget_warning
+        self._turn_lifecycle.maybe_auto_title(ctx, response_text)
 
         # Update memory
         self.memory.add_to_buffer(conversation_id, "user", user_message)
