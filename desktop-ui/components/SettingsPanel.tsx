@@ -285,12 +285,22 @@ export function SettingsPanel() {
         <label className="label">Claude model</label>
         <input
           className="input"
+          list="claude-model-suggestions"
+          placeholder="claude-sonnet-4-6"
           value={config.claude_model}
           onChange={(e) =>
             setConfig({ ...config, claude_model: e.target.value })
           }
           onBlur={() => save("claude_model", config.claude_model)}
         />
+        <datalist id="claude-model-suggestions">
+          <option value="claude-opus-4-7" />
+          <option value="claude-sonnet-4-6" />
+          <option value="claude-haiku-4-5-20251001" />
+        </datalist>
+        <p className="text-xs text-ink-dim mt-1">
+          Opus 4.7 = most capable · Sonnet 4.6 = recommended · Haiku 4.5 = fastest
+        </p>
       </section>
 
       <section className="card">
