@@ -214,6 +214,7 @@ class ChatOrchestrator:
         from services.turn_router import TurnRouter
         from services.security_gate import SecurityGate
         from services.escalation_ladder import EscalationLadder
+        from services.worker_dispatch import WorkerDispatch
         self._memory_recall = MemoryRecall(memory, settings, mcp_registry)
         # TurnLifecycle owns the open/close transaction boundary that
         # Layer 1's Bug 5 + Bug 6 fixes hardened. Auto-title uses the local
@@ -245,6 +246,10 @@ class ChatOrchestrator:
         self._escalation_ladder = self._EscalationLadder(
             self.hub_router, self._local_client_ref,
         )
+        # WorkerDispatch wraps RoutingDecision construction + hub_router.invoke
+        # so the orchestrator stops re-implementing the same shell at every
+        # call site (per-turn dispatch, reader phase, actor phase).
+        self._worker_dispatch = WorkerDispatch(self.hub_router)
 
     # ── Conversation management ──────────────────────────────────────────────
 
@@ -698,8 +703,8 @@ class ChatOrchestrator:
             + "Return JSON now."
         )
 
-        decision = self._build_decision_for_role(agent_id, user_message)
-        worker = self.hub_router.invoke(
+        decision = self._worker_dispatch.build_phase_decision(agent_id, user_message)
+        worker = self._worker_dispatch.dispatch(
             decision,
             reader_system,
             [{"role": "user", "content": reader_user}],
@@ -781,7 +786,7 @@ class ChatOrchestrator:
             + (f"\n\n{quarantine_block}" if quarantine_block else "")
         )
 
-        decision = self._build_decision_for_role(agent_id, actor_user)
+        decision = self._worker_dispatch.build_phase_decision(agent_id, actor_user)
         actor_messages = [{"role": "user", "content": actor_user}]
         voting_samples: list[dict] | None = None
         if vote and decision.backend == "claude":
@@ -807,7 +812,7 @@ class ChatOrchestrator:
                 except Exception:
                     pass
         else:
-            worker = self.hub_router.invoke(
+            worker = self._worker_dispatch.dispatch(
                 decision,
                 actor_system,
                 actor_messages,
@@ -853,31 +858,6 @@ class ChatOrchestrator:
             input_tokens=actor_result.input_tokens,
             output_tokens=actor_result.output_tokens,
             had_error=actor_result.had_error,
-        )
-
-    def _build_decision_for_role(
-        self, agent_id: str | None, text: str,
-    ) -> RoutingDecision:
-        """Build a RoutingDecision for a single phase invocation.
-
-        Matches the existing send() shape: when an agent is selected we go
-        through ``route_for_agent`` (so authz + agent-pref still apply); when
-        no agent is selected we synthesize a hub-direct decision.
-        """
-        if agent_id:
-            try:
-                return self.hub_router.route_for_agent(
-                    agent_id, TaskDescriptor(text=text, preferred_agent_id=agent_id),
-                )
-            except Exception as exc:
-                log.debug("route_for_agent failed in phase build: %s", exc)
-        return RoutingDecision(
-            agent_id=agent_id or "",
-            backend="claude",
-            score=1.0,
-            reasoning="reader_actor phase",
-            used_fallback=False,
-            skill_matched="",
         )
 
     def _log_phase_router_event(
@@ -1227,27 +1207,18 @@ class ChatOrchestrator:
 
         # ── Phase 1: Build routing decision through the HubRouter ────────────
         # The TaskRouter above decided which *backend* to use; the HubRouter
-        # decides which *worker* and authorizes the dispatch. When the caller
-        # specified an agent_id we go through ``route_for_agent`` (which can
-        # raise AuthorizationError); when no agent is specified we synthesize
-        # a hub-direct decision so the chat path keeps working without forcing
-        # every caller to declare a worker.
+        # decides which *worker* and authorizes the dispatch. WorkerDispatch
+        # handles both branches: route_for_agent when agent_id is set
+        # (AuthorizationError still propagates) and hub-direct synthesis
+        # driven by the TurnRouter's RouteOutcome when it isn't.
         task = TaskDescriptor(
             text=user_message,
             preferred_agent_id=agent_id,
             backend_hint=route_model,
         )
-        if agent_id:
-            decision = self.hub_router.route_for_agent(agent_id, task)
-        else:
-            decision = RoutingDecision(
-                agent_id="",
-                backend=route_model,
-                score=1.0,
-                reasoning=route_reason,
-                used_fallback=False,
-                skill_matched="",
-            )
+        decision = self._worker_dispatch.build_turn_decision(
+            agent_id, task, route_outcome,
+        )
 
         # ── Improvement 6: Resolve execution target ──────────────────────────
         target = self._resolve_target(decision.backend, agent)
@@ -1697,7 +1668,7 @@ class ChatOrchestrator:
                     response_text = f"[Error: {exc}]"
                     had_error = True
             else:
-                worker_result = self.hub_router.invoke(
+                worker_result = self._worker_dispatch.dispatch(
                     decision, full_system, messages,
                     max_tokens=target.max_tokens, on_token=on_token,
                 )
