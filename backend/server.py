@@ -227,6 +227,16 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         sse_events.attach_loop(asyncio.get_running_loop())
+        # Sweep workflow_checkpoints rows that were 'provisional' when the
+        # previous sidecar exited. Without this, every restart leaves the
+        # debate/saga UI showing in-flight work that nobody is processing.
+        try:
+            from services.pipeline import mark_abandoned_provisional_checkpoints
+            n = mark_abandoned_provisional_checkpoints()
+            if n:
+                log.info("workflow_checkpoints: marked %d orphaned provisional rows as abandoned", n)
+        except Exception as exc:
+            log.warning("workflow_checkpoints abandon-sweep skipped: %s", exc)
         yield
 
     app = FastAPI(

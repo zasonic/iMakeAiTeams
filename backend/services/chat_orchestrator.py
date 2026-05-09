@@ -2130,7 +2130,10 @@ class ChatOrchestrator:
         ]
         history = self._trim_history_to_budget(history)
 
-        executor = PipelineExecutor(self.hub_router, self._settings)
+        executor = PipelineExecutor(
+            self.hub_router, self._settings,
+            claude_client=self.claude, local_client=self.local,
+        )
         try:
             result = executor.run(
                 team_id=team_id,

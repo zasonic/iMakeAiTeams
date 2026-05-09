@@ -146,7 +146,11 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     "knowledge_graph_enabled":       (bool,  True),
     "studio_mode":                   (bool,  False),
     "firewall_enabled":              (bool,  True),
-    "debate_enabled":                (bool,  True),
+    # Adversarial debate (Du 2024) defaults off — it adds an LLM call per
+    # specialist step. Power users opt in. When enabled, the high-stakes
+    # gate below keeps it from firing on cheap "what's 2+2" turns.
+    "debate_enabled":                (bool,  False),
+    "debate_only_high_stakes":       (bool,  True),
     "guardrails_enabled":            (bool,  False),
 
     # DiLoCo-inspired sliding-window risk ledger. Default off — the legacy

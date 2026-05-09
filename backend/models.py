@@ -479,6 +479,70 @@ def proof_of_work_validate_handoff(
     return packet
 
 
+# ── Priority 6: Adversarial debate (Du 2024) ─────────────────────────────────
+#
+# A ChallengePacket is the output of a "challenger" agent that critiques a
+# committed HandoffPacket. The synthesizer receives both the original artifact
+# and the challenge so it can resolve disagreements before answering the user.
+# Fields mirror the debate_log columns one-for-one so persistence is a single
+# straight-line INSERT.
+
+
+@dataclass
+class ChallengePacket:
+    """Adversarial critique of a committed HandoffPacket."""
+    challenge_id:        str
+    debate_id:           str          # one debate per turn; ties many challenges together
+    workflow_id:         Optional[str]
+    agent_id:            str          # the challenger's id
+    agent_name:          str          # the challenger's display name
+    assumption_diffs:    list = field(default_factory=list)   # assumptions the challenger disputes
+    fact_conflicts:      list = field(default_factory=list)   # claimed facts that conflict
+    missing_analysis:    list = field(default_factory=list)   # gaps the original missed
+    changed_position:    bool = False                          # would the challenger draw a different conclusion?
+    revised_conclusion:  Optional[str] = None                  # the challenger's preferred answer (optional)
+    overall_assessment:  str = ""                              # one-sentence summary
+    input_tokens:        int = 0
+    output_tokens:       int = 0
+    duration_ms:         float = 0.0
+    parse_failed:        bool = False                          # JSON parse failure → packet is best-effort, no signal
+    timestamp:           str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    def has_signal(self) -> bool:
+        """Did the challenger find anything worth surfacing to the synthesizer?"""
+        if self.parse_failed:
+            return False
+        return bool(
+            self.assumption_diffs or self.fact_conflicts
+            or self.missing_analysis or self.changed_position
+            or (self.revised_conclusion or "").strip()
+        )
+
+    def to_context_block(self) -> str:
+        """Format for injection into the synthesizer prompt."""
+        if not self.has_signal():
+            return ""
+        lines = [f"## Challenger review by {self.agent_name}"]
+        if self.overall_assessment:
+            lines.append(f"**Assessment:** {self.overall_assessment}")
+        if self.assumption_diffs:
+            lines.append("**Disputed assumptions:**")
+            for a in self.assumption_diffs:
+                lines.append(f"- {a}")
+        if self.fact_conflicts:
+            lines.append("**Fact conflicts:**")
+            for f in self.fact_conflicts:
+                lines.append(f"- {f}")
+        if self.missing_analysis:
+            lines.append("**Missing analysis:**")
+            for m in self.missing_analysis:
+                lines.append(f"- {m}")
+        if self.changed_position and self.revised_conclusion:
+            lines.append(f"**Challenger's preferred conclusion:** {self.revised_conclusion}")
+        lines.append("---")
+        return "\n".join(lines)
+
+
 # ── Phase 1: Hub routing contracts (NEW) ─────────────────────────────────────
 #
 # These types support the deterministic HubRouter that selects a worker by
