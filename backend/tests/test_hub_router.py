@@ -358,8 +358,7 @@ def test_no_direct_worker_calls_outside_hub_router():
     # internally (e.g. local_client's streaming fallback to non-streaming).
     # Only hub_router.py is allowed to invoke them as a *consumer*.
     # qwen_thinking.py is the Phase 3 wrapper invoked exclusively from
-    # HubRouter._invoke_local — it is part of the routing layer, not a
-    # peer service.
+    # HubRouter.invoke — it is part of the routing layer, not a peer service.
     allowed_files = {
         "hub_router.py", "claude_client.py", "local_client.py",
         "qwen_thinking.py",
