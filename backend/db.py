@@ -815,6 +815,22 @@ _MIGRATIONS = [
         )""",
         "CREATE INDEX IF NOT EXISTS idx_camel_log_conv ON camel_log(conversation_id)",
     ]),
+
+    # ── Phase 13: Voice asset bookkeeping (Whisper.cpp + Piper) ──────────────
+    # Mirror of phase9.local_backend_mode for the voice models. The Whisper
+    # .bin and Piper .onnx + .json files live under userData/voice/ and the
+    # row records the sha256 + size for re-validation on each feature use.
+    # asset_type is 'stt' for Whisper models and 'tts' for Piper voices.
+    ("phase13.voice_assets", [
+        """CREATE TABLE IF NOT EXISTS voice_assets (
+            asset_id      TEXT PRIMARY KEY,
+            asset_type    TEXT NOT NULL,
+            file_path     TEXT NOT NULL,
+            sha256        TEXT NOT NULL,
+            size_bytes    INTEGER NOT NULL,
+            downloaded_at TEXT NOT NULL
+        )""",
+    ]),
 ]
 
 

@@ -5,9 +5,12 @@ import {
   Docker,
   Settings,
   System,
+  Voice,
   type DockerStatus,
   type SettingsPayload,
+  type VoiceAssetsStatus,
 } from "@/api/client";
+import { VoiceSetupModal } from "@/components/VoiceSetupModal";
 import { useAppStore } from "@/stores/appStore";
 
 interface RouterStats {
@@ -38,6 +41,9 @@ export function SettingsPanel() {
   const [pmApiKey, setPmApiKey] = useState("");
   const [pmBusy, setPmBusy] = useState<"start" | "stop" | "check" | null>(null);
   const [routerStats, setRouterStats] = useState<RouterStats | null>(null);
+  // PR 17: voice setup modal + asset readiness probe.
+  const [voiceModalOpen, setVoiceModalOpen] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceAssetsStatus | null>(null);
 
   const reload = async () => {
     try {
@@ -77,11 +83,21 @@ export function SettingsPanel() {
     }
   };
 
+  const reloadVoiceStatus = async () => {
+    try {
+      const status = await Voice.assetsStatus();
+      setVoiceStatus(status);
+    } catch {
+      setVoiceStatus(null);
+    }
+  };
+
   useEffect(() => {
     if (ready) {
       reload();
       refreshDocker();
       reloadRouterStats();
+      reloadVoiceStatus();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
@@ -200,6 +216,31 @@ export function SettingsPanel() {
     pushToast({ kind: "success", text: "Power Mode API key saved." });
   };
 
+  // PR 17: voice toggle. When the user enables either voice flag and the
+  // backend reports the assets aren't ready yet, fire the setup modal so
+  // they don't get a confusing 503 the first time they hit the mic.
+  const toggleVoiceInput = async (enabled: boolean) => {
+    await save("voice_input_enabled", enabled);
+    if (enabled) {
+      const fresh = await Voice.assetsStatus().catch(() => null);
+      setVoiceStatus(fresh);
+      if (fresh && !fresh.stt_ready) {
+        setVoiceModalOpen(true);
+      }
+    }
+  };
+
+  const toggleVoiceOutput = async (enabled: boolean) => {
+    await save("voice_output_enabled", enabled);
+    if (enabled) {
+      const fresh = await Voice.assetsStatus().catch(() => null);
+      setVoiceStatus(fresh);
+      if (fresh && !fresh.tts_ready) {
+        setVoiceModalOpen(true);
+      }
+    }
+  };
+
   if (!config) {
     return (
       <div className="p-6 text-ink-dim text-sm">
@@ -303,6 +344,126 @@ export function SettingsPanel() {
           </span>
         </label>
       </section>
+
+      <section className="card" data-testid="settings-voice-section">
+        <h3 className="font-semibold mb-2">Voice</h3>
+        <p className="text-sm text-ink-dim mb-3">
+          Speak to dictate messages and have replies read back to you. Both
+          features run on your machine — audio never leaves this computer.
+        </p>
+        <label className="flex items-start gap-2 mb-2">
+          <input
+            type="checkbox"
+            data-testid="settings-voice-input-toggle"
+            className="mt-1"
+            checked={!!config.voice_input_enabled}
+            onChange={(e) => toggleVoiceInput(e.target.checked)}
+          />
+          <span className="text-sm">
+            <div>Voice input</div>
+            <div className="text-xs text-ink-dim">
+              Adds a mic button to the chat input. Click to record, click again
+              to transcribe with Whisper.cpp.
+            </div>
+          </span>
+        </label>
+        <label className="flex items-start gap-2 mb-3">
+          <input
+            type="checkbox"
+            data-testid="settings-voice-output-toggle"
+            className="mt-1"
+            checked={!!config.voice_output_enabled}
+            onChange={(e) => toggleVoiceOutput(e.target.checked)}
+          />
+          <span className="text-sm">
+            <div>Voice output</div>
+            <div className="text-xs text-ink-dim">
+              Adds a speaker button to assistant messages. Click to hear the
+              reply spoken aloud with Piper.
+            </div>
+          </span>
+        </label>
+
+        {(config.voice_input_enabled || config.voice_output_enabled) && (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="label">Speech-to-text model</label>
+                <input
+                  className="input"
+                  value={config.stt_model_id || ""}
+                  onChange={(e) =>
+                    setConfig({ ...config, stt_model_id: e.target.value })
+                  }
+                  onBlur={() => save("stt_model_id", config.stt_model_id)}
+                />
+              </div>
+              <div>
+                <label className="label">Text-to-speech voice</label>
+                <input
+                  className="input"
+                  value={config.tts_voice_id || ""}
+                  onChange={(e) =>
+                    setConfig({ ...config, tts_voice_id: e.target.value })
+                  }
+                  onBlur={() => save("tts_voice_id", config.tts_voice_id)}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-md border border-line bg-bg-2 px-3 py-2 text-xs space-y-1.5 mt-3">
+              <div className="flex items-center justify-between">
+                <span className="text-ink-dim">STT model</span>
+                <span className={voiceStatus?.stt_ready ? "text-ok" : "text-warn"}>
+                  {voiceStatus == null
+                    ? "Checking…"
+                    : voiceStatus.stt_ready
+                      ? "Ready"
+                      : "Not downloaded"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-ink-dim">TTS voice</span>
+                <span className={voiceStatus?.tts_ready ? "text-ok" : "text-warn"}>
+                  {voiceStatus == null
+                    ? "Checking…"
+                    : voiceStatus.tts_ready
+                      ? "Ready"
+                      : "Not downloaded"}
+                </span>
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  className="btn-ghost text-xs"
+                  onClick={reloadVoiceStatus}
+                >
+                  Re-check
+                </button>
+                {(voiceStatus && (!voiceStatus.stt_ready || !voiceStatus.tts_ready)) && (
+                  <button
+                    type="button"
+                    className="btn-primary text-xs"
+                    onClick={() => setVoiceModalOpen(true)}
+                    data-testid="settings-voice-download"
+                  >
+                    Download models
+                  </button>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+
+      <VoiceSetupModal
+        open={voiceModalOpen}
+        onClose={() => setVoiceModalOpen(false)}
+        onComplete={() => {
+          setVoiceModalOpen(false);
+          reloadVoiceStatus();
+        }}
+      />
 
       <section className="card">
         <h3 className="font-semibold mb-2">System prompt</h3>

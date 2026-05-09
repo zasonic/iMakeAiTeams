@@ -193,6 +193,17 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
         "qwen2.5-vl", "llava", "minicpm-v", "moondream",
     ]),
 
+    # Phase 13: voice input (Whisper.cpp) + voice output (Piper). Both
+    # default off so a fresh install doesn't show the mic / speaker UI
+    # until the user opts in. The model ids reference the build-pipeline
+    # catalog at branding/sidecar-bundle/voice_assets.json; the actual
+    # binary files (Whisper .bin, Piper .onnx + .json) live under
+    # userData/voice/ and download on first feature use.
+    "voice_input_enabled":           (bool,  False),
+    "voice_output_enabled":          (bool,  False),
+    "stt_model_id":                  (str,   "whisper-base.en"),
+    "tts_voice_id":                  (str,   "en_US-amy-medium"),
+
     # Agent / project
     "agent_project_root":            (str,   ""),
 

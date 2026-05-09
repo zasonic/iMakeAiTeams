@@ -183,6 +183,11 @@ export interface SettingsPayload {
   power_mode_autostart: boolean;
   power_mode_gateway_port: number;
   auto_update_enabled: boolean;
+  // PR 17: voice input (Whisper.cpp) + voice output (Piper)
+  voice_input_enabled: boolean;
+  voice_output_enabled: boolean;
+  stt_model_id: string;
+  tts_voice_id: string;
 }
 
 export const Settings = {
@@ -596,6 +601,84 @@ export interface ClassifyResult {
   reasoning: string;
   source: string;
 }
+
+// ── PR 17: Voice (Whisper.cpp STT + Piper TTS) ─────────────────────────────
+
+export interface VoiceAssetsStatus {
+  stt_ready: boolean;
+  tts_ready: boolean;
+  stt_model_id: string;
+  tts_voice_id: string;
+}
+
+export interface VoiceAssetsDownloadResult {
+  ok: boolean;
+  stt_model_id?: string;
+  tts_voice_id?: string;
+  error?: string;
+}
+
+async function postMultipartJson<T>(path: string, form: FormData): Promise<T> {
+  return postMultipart<T>(path, form);
+}
+
+async function fetchBlobPost(path: string, body: unknown): Promise<Blob> {
+  const info = await getSidecarInfo();
+  const url = `${baseUrl(info)}${path}`;
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${info.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    const e: ApiError = new Error(
+      err instanceof Error ? err.message : "Network request failed",
+    );
+    throw e;
+  }
+  if (!resp.ok) {
+    let parsed: unknown = null;
+    try {
+      parsed = await resp.json();
+    } catch {
+      /* not JSON */
+    }
+    const detail =
+      typeof parsed === "object" && parsed && "detail" in parsed
+        ? String((parsed as { detail: unknown }).detail)
+        : `Request failed with ${resp.status}`;
+    const e: ApiError = new Error(detail);
+    e.status = resp.status;
+    e.body = parsed;
+    throw e;
+  }
+  return resp.blob();
+}
+
+export const Voice = {
+  transcribe: (audio: Blob, filename = "clip.wav"): Promise<{ text: string }> => {
+    const form = new FormData();
+    form.append("file", audio, filename);
+    return postMultipartJson<{ text: string }>("/api/voice/transcribe", form);
+  },
+  synthesize: (text: string, voice_id = ""): Promise<Blob> =>
+    fetchBlobPost("/api/voice/synthesize", { text, voice_id }),
+  assetsStatus: (): Promise<VoiceAssetsStatus> =>
+    api.get<VoiceAssetsStatus>("/api/voice/assets/status"),
+  assetsDownload: (
+    stt_model_id?: string,
+    tts_voice_id?: string,
+  ): Promise<VoiceAssetsDownloadResult> =>
+    api.post<VoiceAssetsDownloadResult>("/api/voice/assets/download", {
+      stt_model_id: stt_model_id ?? "",
+      tts_voice_id: tts_voice_id ?? "",
+    }),
+};
 
 export const Docker = {
   status: () => api.get<DockerStatus>("/api/docker/status"),

@@ -14,11 +14,14 @@ files:
   - "!**/{tsconfig*,*.config.*,.eslintrc*}"
 
 extraResources:
-  # Mirrors branding/sidecar-bundle/** into resources/backend/. As of Phase 9
+  # Mirrors branding/sidecar-bundle/** into resources/backend/. As of PR 17
   # this tree contains:
   #   server.exe + onedir layout — the FastAPI sidecar
   #   llama-server/              — the bundled llama.cpp server (Phase 9)
   #   bundled_models.json        — HF catalog with pinned sha256 (Phase 9)
+  #   whisper/                   — bundled Whisper.cpp CLI + DLLs (PR 17)
+  #   piper/                     — bundled Piper TTS + DLLs (PR 17)
+  #   voice_assets.json          — voice model catalog with pinned sha256 (PR 17)
   # build-installer.bat regenerates the directory on every run, so
   # electron-builder always picks up the latest contents.
   - from: branding/sidecar-bundle

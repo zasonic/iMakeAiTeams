@@ -36,9 +36,15 @@ vi.mock("@/api/client", () => ({
     delete: vi.fn(),
     fetchBlob: vi.fn(),
   },
+  Voice: {
+    transcribe: vi.fn(),
+    synthesize: vi.fn(),
+    assetsStatus: vi.fn(),
+    assetsDownload: vi.fn(),
+  },
 }));
 
-import { Attachments, Chat, Settings } from "@/api/client";
+import { Attachments, Chat, Settings, Voice } from "@/api/client";
 
 // jsdom doesn't ship ResizeObserver but the virtualized message list
 // instantiates one. A no-op stand-in is enough — the export menu doesn't
@@ -92,7 +98,13 @@ beforeEach(() => {
   vi.mocked(Chat.exportConversation).mockReset();
   vi.mocked(Chat.searchConversations).mockReset();
   vi.mocked(Chat.searchConversations).mockResolvedValue([]);
-  vi.mocked(Settings.get).mockResolvedValue({ power_mode_enabled: false } as never);
+  vi.mocked(Settings.get).mockResolvedValue({
+    power_mode_enabled: false,
+    voice_input_enabled: false,
+    voice_output_enabled: false,
+  } as never);
+  vi.mocked(Voice.transcribe).mockReset();
+  vi.mocked(Voice.synthesize).mockReset();
   vi.mocked(Attachments.list).mockResolvedValue([]);
   vi.mocked(Attachments.upload).mockReset();
   vi.mocked(Attachments.delete).mockReset();
@@ -620,5 +632,147 @@ describe("ChatView conversation search", () => {
     await userEvent.type(search, "{Escape}");
 
     expect(search.value).toBe("");
+  });
+});
+
+// ── PR 17: voice input ──────────────────────────────────────────────────────
+
+// Drive a fake MediaRecorder so the mic-button path can run end-to-end
+// without jsdom shipping the real one. Each instance captures the last
+// constructed recorder so tests can fire ondataavailable / onstop manually.
+class _FakeMediaRecorder {
+  static instances: _FakeMediaRecorder[] = [];
+  static isTypeSupported = vi.fn(() => true);
+  state: "inactive" | "recording" | "paused" = "inactive";
+  ondataavailable: ((e: { data: Blob }) => void) | null = null;
+  onstop: (() => void) | null = null;
+  onerror: ((e: unknown) => void) | null = null;
+
+  constructor(_stream: MediaStream, _opts?: { mimeType?: string }) {
+    _FakeMediaRecorder.instances.push(this);
+  }
+
+  start() {
+    this.state = "recording";
+  }
+
+  stop() {
+    this.state = "inactive";
+    // Fire the data + stop callbacks asynchronously so the test sees the
+    // same event ordering the real DOM API exposes.
+    setTimeout(() => {
+      this.ondataavailable?.({
+        data: new Blob([new Uint8Array([1, 2, 3, 4])], { type: "audio/webm" }),
+      });
+      this.onstop?.();
+    }, 0);
+  }
+}
+
+function _stubMediaRecorder() {
+  Object.defineProperty(globalThis, "MediaRecorder", {
+    configurable: true,
+    writable: true,
+    value: _FakeMediaRecorder,
+  });
+}
+
+function _stubGetUserMedia() {
+  const fakeStream = {
+    getTracks: () => [{ stop: vi.fn() }],
+  } as unknown as MediaStream;
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: {
+      getUserMedia: vi.fn().mockResolvedValue(fakeStream),
+    },
+  });
+}
+
+describe("ChatView voice input (PR 17)", () => {
+  beforeEach(() => {
+    _FakeMediaRecorder.instances = [];
+    _stubMediaRecorder();
+    _stubGetUserMedia();
+  });
+
+  it("does not render the mic button when voice_input_enabled is false", async () => {
+    vi.mocked(Settings.get).mockResolvedValue({
+      power_mode_enabled: false,
+      voice_input_enabled: false,
+      voice_output_enabled: false,
+    } as never);
+    await renderWithLoadedConversation();
+    expect(screen.queryByTestId("chat-mic-button")).toBeNull();
+  });
+
+  it("renders the mic button when voice_input_enabled is true", async () => {
+    vi.mocked(Settings.get).mockResolvedValue({
+      power_mode_enabled: false,
+      voice_input_enabled: true,
+      voice_output_enabled: false,
+    } as never);
+    await renderWithLoadedConversation();
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-mic-button")).toBeTruthy();
+    });
+  });
+
+  it("clicking mic toggles isRecording and starts MediaRecorder", async () => {
+    vi.mocked(Settings.get).mockResolvedValue({
+      power_mode_enabled: false,
+      voice_input_enabled: true,
+      voice_output_enabled: false,
+    } as never);
+    await renderWithLoadedConversation();
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-mic-button")).toBeTruthy();
+    });
+
+    await userEvent.click(screen.getByTestId("chat-mic-button"));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().voiceRecording.isRecording).toBe(true);
+    });
+    expect(_FakeMediaRecorder.instances.length).toBeGreaterThan(0);
+
+    // Recording indicator visible.
+    expect(screen.getByTestId("chat-recording-indicator")).toBeTruthy();
+  });
+
+  it("stopping the recording calls Voice.transcribe and populates the input", async () => {
+    vi.mocked(Settings.get).mockResolvedValue({
+      power_mode_enabled: false,
+      voice_input_enabled: true,
+      voice_output_enabled: false,
+    } as never);
+    vi.mocked(Voice.transcribe).mockResolvedValue({ text: "hello world" });
+    await renderWithLoadedConversation();
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-mic-button")).toBeTruthy();
+    });
+
+    // Start
+    await userEvent.click(screen.getByTestId("chat-mic-button"));
+    await waitFor(() => {
+      expect(useAppStore.getState().voiceRecording.isRecording).toBe(true);
+    });
+
+    // Stop — fires the fake recorder's ondataavailable + onstop on a
+    // microtask, which kicks off Voice.transcribe.
+    await userEvent.click(screen.getByTestId("chat-mic-button"));
+
+    await waitFor(() => {
+      expect(Voice.transcribe).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      const textarea = screen.getByTestId("chat-input") as HTMLTextAreaElement;
+      expect(textarea.value).toContain("hello world");
+    });
+    // Recording state cleared.
+    await waitFor(() => {
+      expect(useAppStore.getState().voiceRecording.isRecording).toBe(false);
+      expect(useAppStore.getState().voiceRecording.isTranscribing).toBe(false);
+    });
   });
 });
