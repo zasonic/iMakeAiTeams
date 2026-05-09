@@ -205,6 +205,12 @@ class ChatOrchestrator:
         self._settings = settings
         self._mcp_registry = mcp_registry
         self._governance = GovernanceEngine(settings)
+        # Layer 3 extraction: memory recall + system-prompt assembly. The
+        # RAG-trim path used to duplicate the assembly logic; now both the
+        # initial recall and the post-trim rebuild route through the same
+        # MemoryRecall._assemble() so the two can never drift apart.
+        from services.memory_recall import MemoryRecall
+        self._memory_recall = MemoryRecall(memory, settings, mcp_registry)
         # DiLoCo blast-radius containment: instead of a fresh-per-turn ledger
         # (which forgets) or a perpetual ledger (which locks out after ~9
         # messages), keep a sliding window of the last N turn-level risk
@@ -1161,33 +1167,24 @@ class ChatOrchestrator:
             except Exception as exc:
                 log.debug("image attachment fetch failed: %s", exc)
 
-        # Recall memory and build system context
-        mem = self.memory.get_context(conversation_id, user_message)
-        mem_suffix = mem.to_system_suffix()
+        # Recall memory + build system context. Layer 3: MemoryRecall
+        # owns the get_context call, the mem_suffix stitching, the tool
+        # restriction block, and the MCP tool description block. Both
+        # initial recall and the post-trim rebuild route through it, so
+        # the two paths can't drift the way they used to.
+        mem_result = self._memory_recall.recall(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            system_prompt=system_prompt,
+            allowed_tools=_allowed_tools,
+            agent=agent,
+        )
+        mem = mem_result.mem
+        mem_suffix = mem_result.mem_suffix
+        full_system = mem_result.full_system
 
-        full_system = system_prompt
-        if mem_suffix:
-            full_system = system_prompt + "\n\n" + mem_suffix
-
-        # ── Fix 9: Inject tool restrictions into system prompt ───────────────
-        if _allowed_tools:
-            tool_names = ", ".join(_allowed_tools)
-            full_system += (
-                "\n\n## Tool Restrictions\n"
-                f"You may ONLY use these tools: {tool_names}. "
-                "Do not attempt to use any other tools or capabilities "
-                "outside this list."
-            )
-
-        # Emit structured event so the frontend can show memory indicator
-        _emit_event("memory_recalled", {
-            "facts_count": len(mem.session_facts),
-            "rag_chunks": len(mem.rag_chunks),
-            "memories": len(mem.memories),
-        })
-
-        if self.memory.should_summarize(conversation_id):
-            self.memory.summarize_buffer(conversation_id)
+        _emit_event("memory_recalled", self._memory_recall.memory_recalled_event(mem))
+        self._memory_recall.maybe_summarize(conversation_id)
 
         # Route: Claude or local?
         model_pref = agent.get("model_preference", "auto") if agent else "auto"
@@ -1222,56 +1219,17 @@ class ChatOrchestrator:
                 "suggestion": "Try selecting a team coordinator for complex multi-part requests.",
             })
 
-        # ── v4.1: Adaptive memory injection budget (Engram-inspired) ─────────
-        # The Engram U-shaped finding says ~25% memory, ~75% reasoning is
-        # optimal. For simple queries, we cap injected context aggressively
-        # to avoid RAG noise overwhelming the model. For complex queries,
-        # we allow more context. This prevents the common failure mode where
-        # irrelevant retrieved chunks confuse a simple Q&A response.
-        max_context_items = {"simple": 2, "medium": 4, "complex": 8}.get(
-            complexity, 4
+        # Adaptive RAG trim (Engram-inspired). MemoryRecall owns the
+        # complexity → max-items mapping and the system-prompt rebuild, so
+        # the trim and the initial assembly always produce identical
+        # prompts for the same inputs.
+        mem_result = self._memory_recall.trim_for_complexity(
+            mem_result, complexity, system_prompt,
+            allowed_tools=_allowed_tools, agent=agent,
         )
-        if len(mem.rag_chunks) > max_context_items:
-            log.debug("Memory budget: trimming RAG from %d to %d chunks (%s)",
-                      len(mem.rag_chunks), max_context_items, complexity)
-            mem.rag_chunks = mem.rag_chunks[:max_context_items]
-            # Rebuild system prompt with trimmed context
-            mem_suffix = mem.to_system_suffix()
-            full_system = system_prompt
-            if mem_suffix:
-                full_system = system_prompt + "\n\n" + mem_suffix
-            if _allowed_tools:
-                tool_names = ", ".join(_allowed_tools)
-                full_system += (
-                    "\n\n## Tool Restrictions\n"
-                    f"You may ONLY use these tools: {tool_names}. "
-                    "Do not attempt to use any other tools or capabilities "
-                    "outside this list."
-                )
-
-        # Inject MCP tool descriptions for this agent's skills
-        if agent and agent.get("skills") and self._mcp_registry:
-            try:
-                agent_skills = (
-                    json.loads(agent["skills"]) if isinstance(agent["skills"], str)
-                    else agent["skills"]
-                )
-                skill_names = [
-                    s.get("name", "") for s in agent_skills
-                    if isinstance(s, dict)
-                ]
-                mcp_tools = self._mcp_registry.get_tools_for_tags(skill_names)
-                if mcp_tools:
-                    tool_lines = "\n".join(
-                        f"- **{t['name']}**: {t['description']}" for t in mcp_tools[:10]
-                    )
-                    full_system += (
-                        "\n\n## Available External Tools\n"
-                        "(These tools are available via MCP. Mention them if relevant.)\n\n"
-                        + tool_lines
-                    )
-            except Exception:
-                pass  # MCP injection is best-effort
+        mem = mem_result.mem
+        mem_suffix = mem_result.mem_suffix
+        full_system = mem_result.full_system
 
         # ── Phase 1: Build routing decision through the HubRouter ────────────
         # The TaskRouter above decided which *backend* to use; the HubRouter
