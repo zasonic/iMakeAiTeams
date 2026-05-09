@@ -1,0 +1,80 @@
+# dev/ts-prune-allowlist.txt — Layer 4.3 ts-prune gate baseline.
+#
+# One entry per line in the form `path:line - exportName`, matching
+# ts-prune's own output. Lines starting with "#" or blank are ignored.
+#
+# Add an entry only after verifying that the export is actually
+# referenced through indirection ts-prune cannot see — most commonly:
+#
+#   1. Cross-tsconfig boundaries: tsconfig.web.json (renderer) and
+#      tsconfig.node.json (main process + preload) are separate
+#      compilation graphs, so an export consumed across the boundary
+#      shows up as unused on whichever side declared it. Examples:
+#      `SidecarManager`, `SidecarInfo`, `ElectronAPI`.
+#
+#   2. Re-exported convenience namespaces in api/client.ts (`api`,
+#      `Lifecycle`, `Echo`, `*PromptTemplate*`) — kept available for
+#      callers even when no current component imports them.
+#
+#   3. Internal-only types/interfaces in api/client.ts and
+#      stores/appStore.ts that ts-prune flags as "used in module"
+#      because they are referenced exclusively within their declaring
+#      file. They are still exported in case a sibling component
+#      starts importing the type later.
+#
+#   4. Domain types in types/safety.ts and types/usage.ts that are
+#      consumed via property access on a parent type rather than
+#      directly imported by name.
+#
+# When you delete dead code, remove the corresponding allowlist line.
+
+# ── Cross-tsconfig: desktop-shell ↔ desktop-ui boundary ─────────────────────
+desktop-shell/preload.ts:11 - SidecarInfo
+desktop-shell/preload.ts:16 - ElectronAPI
+desktop-shell/sidecar.ts:62 - SidecarInfo
+desktop-shell/sidecar.ts:67 - SidecarManager
+desktop-ui/env.d.ts:10 - ElectronAPI
+
+# ── api/client.ts: convenience namespaces + types used internally ───────────
+desktop-ui/api/client.ts:48 - ApiError
+desktop-ui/api/client.ts:109 - api
+desktop-ui/api/client.ts:302 - PendingWriteRow
+desktop-ui/api/client.ts:345 - AttachmentUploadResult
+desktop-ui/api/client.ts:420 - McpServerSummary
+desktop-ui/api/client.ts:485 - PromptTemplateCreatePayload
+desktop-ui/api/client.ts:492 - PromptTemplateUpdatePayload
+desktop-ui/api/client.ts:527 - listPromptTemplates
+desktop-ui/api/client.ts:528 - getPromptTemplate
+desktop-ui/api/client.ts:529 - createPromptTemplate
+desktop-ui/api/client.ts:530 - updatePromptTemplate
+desktop-ui/api/client.ts:531 - deletePromptTemplate
+desktop-ui/api/client.ts:532 - usePromptTemplate
+desktop-ui/api/client.ts:543 - LocalModelsResponse
+desktop-ui/api/client.ts:602 - Lifecycle
+desktop-ui/api/client.ts:609 - EscalationRow
+desktop-ui/api/client.ts:633 - Echo
+desktop-ui/api/client.ts:663 - ClassifyResult
+desktop-ui/api/client.ts:679 - VoiceAssetsDownloadResult
+
+# ── api/sse.ts: internal types referenced within the module only ────────────
+desktop-ui/api/sse.ts:16 - EventHandler
+desktop-ui/api/sse.ts:18 - EventSubscription
+desktop-ui/api/sse.ts:22 - EventStreamOptions
+
+# ── stores/appStore.ts: domain types consumed via parent state shape ────────
+desktop-ui/stores/appStore.ts:30 - ToastAction
+desktop-ui/stores/appStore.ts:32 - ToastMessage
+desktop-ui/stores/appStore.ts:39 - ChatStreamState
+desktop-ui/stores/appStore.ts:76 - ExecutionApproval
+desktop-ui/stores/appStore.ts:125 - BundledDownloadState
+desktop-ui/stores/appStore.ts:151 - VoiceRecordingState
+desktop-ui/stores/appStore.ts:171 - AppState
+
+# ── types/safety.ts + types/usage.ts: nested types reached via property access
+desktop-ui/types/safety.ts:7 - SafetyEscalations
+desktop-ui/types/safety.ts:14 - SafetyMemoryGate
+desktop-ui/types/safety.ts:22 - SafetyCanary
+desktop-ui/types/safety.ts:33 - SafetyGovernance
+desktop-ui/types/safety.ts:44 - SafetyRouting
+desktop-ui/types/safety.ts:50 - SafetyVoting
+desktop-ui/types/usage.ts:9 - UsageTotal

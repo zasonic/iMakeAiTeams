@@ -1,0 +1,99 @@
+name: tests
+
+# Runs backend pytest + vulture on every push/PR that touches backend/,
+# and ts-prune on every push/PR that touches the renderer / desktop-shell.
+# Without these gates, the 530+ pytest cases pinning Bugs 1/4/5/6/7 +
+# Layer 2 saga + Layer 3 module contracts (plus the renderer's growing
+# desktop-ui surface) only fire when someone remembers to run them
+# locally — which is to say, sometimes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "desktop-ui/**"
+      - "desktop-shell/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig*.json"
+      - "dev/ts-prune-allowlist.txt"
+      - "dev/run-ts-prune.cjs"
+      - ".github/workflows/tests.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "desktop-ui/**"
+      - "desktop-shell/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig*.json"
+      - "dev/ts-prune-allowlist.txt"
+      - "dev/run-ts-prune.cjs"
+      - ".github/workflows/tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime + dev dependencies
+        # requirements.txt is the lite production bundle; requirements-dev.txt
+        # adds pytest + hypothesis. We deliberately do NOT install
+        # requirements-bench.txt — AgentDojo runs in its own workflow
+        # (security-bench.yml) which is also wired as a path-scoped PR
+        # gate on the security/orchestration surface (Layer 4.4).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Run backend tests
+        # backend/pytest.ini already excludes tests/agentdojo/ via norecursedirs
+        # and skips slow tests by default. Run from the backend/ dir so
+        # `import db`, `import models`, etc. resolve without sys.path hacks.
+        working-directory: backend
+        run: pytest tests/ -v --tb=short
+
+      - name: Dead-code gate (vulture)
+        # Layer 4.2: fail on new high-confidence dead code anywhere under
+        # backend/. Existing false positives (forward-compat params, chained
+        # ImportError stubs) are documented in dev/vulture_allowlist.py.
+        # Confidence threshold 90 keeps the noise floor low.
+        run: |
+          vulture backend/services backend/models.py backend/db.py \
+                  dev/vulture_allowlist.py --min-confidence 90
+
+  ts-prune:
+    # Layer 4.3: dead-code gate for the renderer + desktop-shell. Symmetric
+    # with the vulture step above. Existing cross-tsconfig false positives
+    # (SidecarManager, ElectronAPI, etc.) are documented in
+    # dev/ts-prune-allowlist.txt.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Node dependencies
+        # `npm ci` requires package-lock.json to be present and in sync.
+        run: npm ci --no-audit --no-fund
+
+      - name: Run ts-prune (dead-code gate)
+        run: node dev/run-ts-prune.cjs

@@ -11,6 +11,7 @@
     "build": "electron-vite build",
     "build:sidecar": "node build-scripts/build-sidecar.cjs",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "ts-prune": "node dev/run-ts-prune.cjs",
     "test:frontend": "vitest run",
     "test:backend": "cd backend && python -m pytest tests/ -q",
     "dist": "npm run build:sidecar && npm run build && electron-builder --win",
@@ -48,6 +49,7 @@
     "jsdom": "^25.0.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
+    "ts-prune": "^0.10.3",
     "typescript": "^5.7.2",
     "vite": "^5.4.11",
     "vitest": "^2.1.8"
