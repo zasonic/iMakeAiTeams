@@ -4,6 +4,16 @@ import userEvent from "@testing-library/user-event";
 
 import { MessageRenderer } from "./MessageRenderer";
 
+// Mock the Voice API client so the speaker button can run end-to-end
+// without hitting the network. Tests override the synthesize return value.
+vi.mock("@/api/client", () => ({
+  Voice: {
+    synthesize: vi.fn(),
+  },
+}));
+
+import { Voice } from "@/api/client";
+
 // Mermaid (and its d3 dependency) reach for browser APIs that jsdom doesn't
 // implement (XMLSerializer behaviors, getBBox, etc.). Mock the module so the
 // component-side contract — call render(id, src), inject the returned
@@ -223,5 +233,114 @@ describe("MessageRenderer", () => {
     // rehype-highlight stamps `hljs language-…` on the <code> element.
     const code = container.querySelector("pre code");
     expect(code?.className).toMatch(/hljs|language-js/);
+  });
+});
+
+// ── PR 17: speaker button ───────────────────────────────────────────────────
+
+describe("MessageRenderer speaker button (PR 17)", () => {
+  beforeEach(() => {
+    vi.mocked(Voice.synthesize).mockReset();
+    // Stub Audio so play() doesn't throw under jsdom.
+    Object.defineProperty(globalThis, "Audio", {
+      configurable: true,
+      writable: true,
+      value: class {
+        src = "";
+        currentTime = 0;
+        _listeners: Record<string, Array<() => void>> = {};
+        addEventListener(event: string, fn: () => void) {
+          (this._listeners[event] ||= []).push(fn);
+        }
+        play() {
+          return Promise.resolve();
+        }
+        pause() {}
+      },
+    });
+    if (typeof URL.createObjectURL !== "function") {
+      Object.defineProperty(URL, "createObjectURL", {
+        configurable: true,
+        value: vi.fn(() => "blob:fake-tts"),
+      });
+    }
+    if (typeof URL.revokeObjectURL !== "function") {
+      Object.defineProperty(URL, "revokeObjectURL", {
+        configurable: true,
+        value: vi.fn(),
+      });
+    }
+  });
+
+  it("does not render the speaker button when voiceOutputEnabled is false", () => {
+    render(
+      <MessageRenderer
+        content="Hello there."
+        role="assistant"
+        voiceOutputEnabled={false}
+      />,
+    );
+    expect(screen.queryByTestId("message-speaker-button")).toBeNull();
+  });
+
+  it("renders the speaker button only on assistant messages with voiceOutputEnabled", () => {
+    render(
+      <MessageRenderer
+        content="Hello there."
+        role="assistant"
+        voiceOutputEnabled={true}
+      />,
+    );
+    expect(screen.getByTestId("message-speaker-button")).toBeTruthy();
+  });
+
+  it("does not render the speaker button on user messages", () => {
+    render(
+      <MessageRenderer
+        content="Hi back"
+        role="user"
+        voiceOutputEnabled={true}
+      />,
+    );
+    expect(screen.queryByTestId("message-speaker-button")).toBeNull();
+  });
+
+  it("clicking the speaker calls Voice.synthesize with the message text", async () => {
+    vi.mocked(Voice.synthesize).mockResolvedValue(
+      new Blob([new Uint8Array([1, 2, 3])], { type: "audio/wav" }),
+    );
+    render(
+      <MessageRenderer
+        content="Hello world"
+        role="assistant"
+        voiceOutputEnabled={true}
+      />,
+    );
+    await userEvent.click(screen.getByTestId("message-speaker-button"));
+    await waitFor(() => {
+      expect(Voice.synthesize).toHaveBeenCalledTimes(1);
+    });
+    const arg = vi.mocked(Voice.synthesize).mock.calls[0][0];
+    expect(arg).toContain("Hello world");
+  });
+
+  it("strips Markdown before sending the text to synthesis", async () => {
+    vi.mocked(Voice.synthesize).mockResolvedValue(
+      new Blob([new Uint8Array([1, 2, 3])], { type: "audio/wav" }),
+    );
+    render(
+      <MessageRenderer
+        content={"This **is** a `code` test"}
+        role="assistant"
+        voiceOutputEnabled={true}
+      />,
+    );
+    await userEvent.click(screen.getByTestId("message-speaker-button"));
+    await waitFor(() => {
+      expect(Voice.synthesize).toHaveBeenCalled();
+    });
+    const arg = vi.mocked(Voice.synthesize).mock.calls[0][0];
+    expect(arg).not.toContain("**");
+    expect(arg).not.toContain("`");
   });
 });

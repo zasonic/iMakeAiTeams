@@ -279,6 +279,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
         settings as settings_routes,
         system as system_routes,
         usage as usage_routes,
+        voice as voice_routes,
     )
 
     app.include_router(health_routes.router)
@@ -299,6 +300,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
     app.include_router(system_routes.router, prefix="/api/system")
     app.include_router(usage_routes.router, prefix="/api/usage")
     app.include_router(docker_routes.router, prefix="/api/docker")
+    app.include_router(voice_routes.router, prefix="/api/voice")
 
     @app.post("/shutdown")
     async def _shutdown(request: Request) -> dict:

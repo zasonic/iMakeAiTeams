@@ -65,6 +65,7 @@ export function App() {
   const canaryAlertOpen = useAppStore((s) => s.canaryAlertOpen);
   const setVotingActive = useAppStore((s) => s.setVotingActive);
   const patchBundledDownload = useAppStore((s) => s.patchBundledDownload);
+  const patchVoiceAssets = useAppStore((s) => s.patchVoiceAssets);
 
   // ── Sidecar status subscription ────────────────────────────────────────
   useEffect(() => {
@@ -320,6 +321,61 @@ export function App() {
               text: evt.error ?? "Download failed",
             });
           },
+          // ── PR 17: voice asset download progress ─────────────────────
+          voice_assets_progress: (data) => {
+            const evt = data as {
+              kind?: "stt" | "tts";
+              bytes_done?: number;
+              bytes_total?: number;
+            };
+            const done =
+              typeof evt.bytes_done === "number" ? evt.bytes_done : 0;
+            const total =
+              typeof evt.bytes_total === "number" ? evt.bytes_total : 0;
+            if (evt.kind === "stt") {
+              patchVoiceAssets({
+                status: "downloading",
+                sttBytesDone: done,
+                sttBytesTotal: total,
+                error: "",
+              });
+            } else if (evt.kind === "tts") {
+              patchVoiceAssets({
+                status: "downloading",
+                ttsBytesDone: done,
+                ttsBytesTotal: total,
+                error: "",
+              });
+            }
+          },
+          voice_assets_complete: (data) => {
+            const evt = data as { kind?: "stt" | "tts" };
+            if (evt.kind === "stt") {
+              patchVoiceAssets({ sttReady: true });
+            } else if (evt.kind === "tts") {
+              patchVoiceAssets({ ttsReady: true });
+            }
+          },
+          voice_assets_done: (data) => {
+            const evt = data as { stt_ready?: boolean; tts_ready?: boolean };
+            patchVoiceAssets({
+              status: "complete",
+              sttReady: evt.stt_ready ?? true,
+              ttsReady: evt.tts_ready ?? true,
+              error: "",
+            });
+          },
+          voice_assets_error: (data) => {
+            const evt = data as { error?: string };
+            patchVoiceAssets({
+              status: "error",
+              error: evt.error ?? "Voice asset download failed",
+            });
+            pushToast({
+              kind: "error",
+              text: evt.error ?? "Voice asset download failed",
+            });
+          },
           // ── Phase 5: MINJA-style memory write gate ───────────────────
           memory_review_required: (data) => {
             const evt = data as {
@@ -399,6 +455,7 @@ export function App() {
     setSidecarStatus,
     setVotingActive,
     patchBundledDownload,
+    patchVoiceAssets,
   ]);
 
   // ── Pending escalations: hydrate on backend-ready ──────────────────────

@@ -24,6 +24,7 @@ import {
   Chat,
   Docker,
   Settings,
+  Voice,
   type Attachment,
   type ConversationExportFormat,
   type SearchResult,
@@ -56,6 +57,7 @@ interface ChatRowData {
   setRowHeight: (index: number, height: number) => void;
   approve: (taskId: string, approvalId: string, allow: boolean) => void;
   cancelRun: (taskId: string) => void;
+  voiceOutputEnabled: boolean;
 }
 
 // PR 11: image input. Browser MIME types we accept for vision blocks.
@@ -93,6 +95,16 @@ export function ChatView() {
   const setPendingAttachments = useAppStore((s) => s.setPendingAttachments);
   const addPendingAttachment = useAppStore((s) => s.addPendingAttachment);
   const removePendingAttachment = useAppStore((s) => s.removePendingAttachment);
+  // PR 17: voice recording state lives in the store so the StatusBar can
+  // mirror the indicator without ChatView re-rendering it on every tick.
+  const voiceRecording = useAppStore((s) => s.voiceRecording);
+  const patchVoiceRecording = useAppStore((s) => s.patchVoiceRecording);
+  const [voiceInputEnabled, setVoiceInputEnabled] = useState<boolean>(false);
+  const [voiceOutputEnabled, setVoiceOutputEnabled] = useState<boolean>(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<BlobPart[]>([]);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const [recordingTick, setRecordingTick] = useState<number>(0);
 
   const [conversations, setConversations] = useState<ConversationRow[]>([]);
   const [activeId, setActiveId] = useState<string>("");
@@ -149,13 +161,44 @@ export function ChatView() {
     let alive = true;
     Settings.get()
       .then((s) => {
-        if (alive) setPowerModeEnabled(!!s.power_mode_enabled);
+        if (!alive) return;
+        setPowerModeEnabled(!!s.power_mode_enabled);
+        setVoiceInputEnabled(!!s.voice_input_enabled);
+        setVoiceOutputEnabled(!!s.voice_output_enabled);
       })
       .catch(() => {});
     return () => {
       alive = false;
     };
   }, [ready, setPowerModeEnabled]);
+
+  // PR 17: re-sync the voice toggle whenever the user flips it elsewhere.
+  // SettingsPanel writes the same setting; we listen for the focus event
+  // rather than poll because the SSE stream doesn't surface settings
+  // changes today.
+  useEffect(() => {
+    if (!ready) return;
+    const onFocus = () => {
+      Settings.get()
+        .then((s) => {
+          setVoiceInputEnabled(!!s.voice_input_enabled);
+          setVoiceOutputEnabled(!!s.voice_output_enabled);
+        })
+        .catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [ready]);
+
+  // PR 17: tick a counter once a second while recording so the indicator
+  // re-renders the elapsed-time display without the store doing it.
+  useEffect(() => {
+    if (!voiceRecording.isRecording) return;
+    const id = window.setInterval(() => {
+      setRecordingTick((n) => n + 1);
+    }, 500);
+    return () => window.clearInterval(id);
+  }, [voiceRecording.isRecording]);
 
   // Load conversation list once the sidecar is ready.
   useEffect(() => {
@@ -426,6 +469,186 @@ export function ChatView() {
     [activeId, uploadFiles],
   );
 
+  // ── PR 17: voice recording ─────────────────────────────────────────────
+
+  // Picks a MIME type the renderer's MediaRecorder can produce that the
+  // backend's whisper-cli build can also read. Webm/Opus is what every
+  // Chromium build supports for getUserMedia capture; whisper-cli accepts
+  // it through ffmpeg (shipped alongside whisper.cpp) on Windows. wav is
+  // a fallback for browsers that don't ship the Opus encoder.
+  const _pickRecorderMime = (): string => {
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/ogg;codecs=opus",
+      "audio/wav",
+    ];
+    for (const m of candidates) {
+      if (
+        typeof MediaRecorder !== "undefined" &&
+        MediaRecorder.isTypeSupported &&
+        MediaRecorder.isTypeSupported(m)
+      ) {
+        return m;
+      }
+    }
+    return "";
+  };
+
+  const _stopRecordingTracks = useCallback(() => {
+    const stream = recordingStreamRef.current;
+    if (stream) {
+      try {
+        stream.getTracks().forEach((t) => t.stop());
+      } catch {
+        /* ignore */
+      }
+    }
+    recordingStreamRef.current = null;
+    mediaRecorderRef.current = null;
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    if (voiceRecording.isRecording) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      pushToast({
+        kind: "error",
+        text: "Microphone access isn't available in this build.",
+      });
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordingStreamRef.current = stream;
+      const mime = _pickRecorderMime();
+      const recorder =
+        mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      recordedChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) recordedChunksRef.current.push(e.data);
+      };
+      recorder.onerror = () => {
+        pushToast({
+          kind: "error",
+          text: "Recording failed. Check your microphone permissions.",
+        });
+        _stopRecordingTracks();
+        patchVoiceRecording({
+          isRecording: false,
+          isTranscribing: false,
+          recordingStartedAt: 0,
+        });
+      };
+      recorder.onstop = async () => {
+        const blob = new Blob(recordedChunksRef.current, {
+          type: mime || "audio/webm",
+        });
+        recordedChunksRef.current = [];
+        _stopRecordingTracks();
+        if (blob.size === 0) {
+          patchVoiceRecording({
+            isRecording: false,
+            isTranscribing: false,
+            recordingStartedAt: 0,
+          });
+          return;
+        }
+        patchVoiceRecording({
+          isRecording: false,
+          isTranscribing: true,
+        });
+        try {
+          const ext = (mime.includes("wav")
+            ? "wav"
+            : mime.includes("ogg")
+              ? "ogg"
+              : "webm");
+          const result = await Voice.transcribe(blob, `clip.${ext}`);
+          const text = (result.text || "").trim();
+          if (text) {
+            // Append rather than overwrite so the user can dictate on top
+            // of an existing draft.
+            setInput((prev) => (prev ? `${prev} ${text}` : text));
+          } else {
+            pushToast({ kind: "info", text: "No speech detected." });
+          }
+        } catch (err) {
+          pushToast({
+            kind: "error",
+            text:
+              err instanceof Error
+                ? err.message
+                : "Transcription failed",
+          });
+        } finally {
+          patchVoiceRecording({
+            isRecording: false,
+            isTranscribing: false,
+            recordingStartedAt: 0,
+          });
+        }
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      patchVoiceRecording({
+        isRecording: true,
+        isTranscribing: false,
+        recordingStartedAt: Date.now(),
+      });
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text:
+          err instanceof Error
+            ? err.message
+            : "Could not access the microphone.",
+      });
+      _stopRecordingTracks();
+    }
+  }, [
+    voiceRecording.isRecording,
+    pushToast,
+    patchVoiceRecording,
+    _stopRecordingTracks,
+  ]);
+
+  const stopRecording = useCallback(() => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) {
+      patchVoiceRecording({
+        isRecording: false,
+        isTranscribing: false,
+        recordingStartedAt: 0,
+      });
+      _stopRecordingTracks();
+      return;
+    }
+    if (recorder.state !== "inactive") {
+      try {
+        recorder.stop();
+      } catch {
+        /* onstop will run regardless */
+      }
+    }
+  }, [_stopRecordingTracks, patchVoiceRecording]);
+
+  const toggleRecording = useCallback(() => {
+    if (voiceRecording.isRecording) {
+      stopRecording();
+    } else {
+      void startRecording();
+    }
+  }, [voiceRecording.isRecording, startRecording, stopRecording]);
+
+  // Tear down recording cleanly when the component unmounts (conversation
+  // switch, view change). MediaStreams keep the mic LED on until they're
+  // closed, so leaking one is a privacy bug.
+  useEffect(() => {
+    return () => {
+      _stopRecordingTracks();
+    };
+  }, [_stopRecordingTracks]);
+
   const onPickImages = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
@@ -654,8 +877,8 @@ export function ChatView() {
   }, []);
 
   const rowData = useMemo<ChatRowData>(
-    () => ({ items, setRowHeight, approve, cancelRun }),
-    [items, setRowHeight, approve, cancelRun],
+    () => ({ items, setRowHeight, approve, cancelRun, voiceOutputEnabled }),
+    [items, setRowHeight, approve, cancelRun, voiceOutputEnabled],
   );
 
   // Track the message-list area's pixel size so VariableSizeList can size
@@ -787,6 +1010,14 @@ export function ChatView() {
             attachments={pendingAttachments[activeId] ?? []}
             onRemove={removeAttachment}
           />
+          {(voiceRecording.isRecording || voiceRecording.isTranscribing) && (
+            <RecordingIndicator
+              isRecording={voiceRecording.isRecording}
+              isTranscribing={voiceRecording.isTranscribing}
+              startedAt={voiceRecording.recordingStartedAt}
+              tick={recordingTick}
+            />
+          )}
           <div className="flex gap-2 items-end">
             <button
               type="button"
@@ -815,6 +1046,44 @@ export function ChatView() {
                 <polyline points="21 15 16 10 5 21" />
               </svg>
             </button>
+            {voiceInputEnabled && (
+              <button
+                type="button"
+                data-testid="chat-mic-button"
+                className={`btn-ghost px-2 py-1 text-base leading-none ${
+                  voiceRecording.isRecording ? "text-err" : ""
+                }`}
+                onClick={toggleRecording}
+                disabled={!ready || !activeId || voiceRecording.isTranscribing}
+                title={
+                  voiceRecording.isRecording
+                    ? "Stop recording"
+                    : "Record a voice message"
+                }
+                aria-label={
+                  voiceRecording.isRecording
+                    ? "Stop recording"
+                    : "Record a voice message"
+                }
+                aria-pressed={voiceRecording.isRecording}
+              >
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="9" y="2" width="6" height="12" rx="3" />
+                  <path d="M5 10v2a7 7 0 0 0 14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="22" />
+                </svg>
+              </button>
+            )}
             <input
               ref={fileInputRef}
               data-testid="chat-image-input"
@@ -894,6 +1163,62 @@ export function ChatView() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── PR 17: Recording indicator ──────────────────────────────────────────────
+
+interface RecordingIndicatorProps {
+  isRecording: boolean;
+  isTranscribing: boolean;
+  startedAt: number;
+  // ``tick`` forces a re-render once a second while the timer's running;
+  // we read the elapsed time from Date.now() so the displayed value stays
+  // accurate even if a few ticks are dropped (e.g. tab backgrounded).
+  tick: number;
+}
+
+function RecordingIndicator({
+  isRecording,
+  isTranscribing,
+  startedAt,
+  // ``tick`` is intentionally unused inside the body — accepting it as a
+  // prop is what triggers the re-render that recomputes ``elapsed``.
+  tick: _tick,
+}: RecordingIndicatorProps) {
+  const elapsed = isRecording && startedAt
+    ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+    : 0;
+  const mm = Math.floor(elapsed / 60);
+  const ss = elapsed % 60;
+  const formatted = `${mm}:${ss < 10 ? "0" : ""}${ss}`;
+  return (
+    <div
+      data-testid="chat-recording-indicator"
+      className="mb-2 flex items-center gap-2 text-xs"
+      role="status"
+      aria-live="polite"
+    >
+      {isTranscribing ? (
+        <>
+          <span
+            aria-hidden="true"
+            className="inline-block h-2 w-2 rounded-full bg-accent animate-pulse"
+          />
+          <span className="text-ink-dim">Transcribing…</span>
+        </>
+      ) : (
+        <>
+          <span
+            aria-hidden="true"
+            className="inline-block h-2 w-2 rounded-full bg-err animate-pulse"
+          />
+          <span className="text-ink-dim">
+            Recording <span className="font-mono text-ink">{formatted}</span>
+          </span>
+        </>
+      )}
     </div>
   );
 }
@@ -1174,7 +1499,12 @@ function ChatListRow({ index, style, data }: ListChildComponentProps<ChatRowData
   return (
     <div style={style}>
       <div ref={innerRef} className="px-6 py-1.5">
-        {item.kind === "message" && <MessageBubble msg={item.msg} />}
+        {item.kind === "message" && (
+          <MessageBubble
+            msg={item.msg}
+            voiceOutputEnabled={data.voiceOutputEnabled}
+          />
+        )}
         {item.kind === "run" && (
           <PowerModeMessage
             run={item.run}
@@ -1190,6 +1520,9 @@ function ChatListRow({ index, style, data }: ListChildComponentProps<ChatRowData
             aria-atomic="false"
             className="max-w-[80%] rounded-xl px-4 py-2 text-sm bg-bg-2 text-ink border border-line"
           >
+            {/* Don't expose the speaker on the still-streaming buffer; the
+                speaker would synthesize a partial sentence. The persisted
+                MessageBubble below picks it up after chat_done. */}
             <MessageRenderer content={item.buffer} role="assistant" />
             <span
               role="status"
@@ -1203,7 +1536,13 @@ function ChatListRow({ index, style, data }: ListChildComponentProps<ChatRowData
   );
 }
 
-function MessageBubble({ msg }: { msg: MessageRow }) {
+function MessageBubble({
+  msg,
+  voiceOutputEnabled,
+}: {
+  msg: MessageRow;
+  voiceOutputEnabled: boolean;
+}) {
   return (
     <div
       className={`max-w-[80%] rounded-xl px-4 py-2 text-sm ${
@@ -1212,7 +1551,11 @@ function MessageBubble({ msg }: { msg: MessageRow }) {
           : "bg-bg-2 text-ink border border-line"
       }`}
     >
-      <MessageRenderer content={msg.content} role={msg.role} />
+      <MessageRenderer
+        content={msg.content}
+        role={msg.role}
+        voiceOutputEnabled={voiceOutputEnabled}
+      />
       {msg.model_used && (
         <div className="text-[11px] text-ink-faint mt-2">
           {msg.model_used}

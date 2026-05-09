@@ -71,6 +71,11 @@ class SettingsAPI(BaseAPI):
             "power_mode_gateway_port":    int(self._settings.get("power_mode_gateway_port") or 18789),
             # Phase 10: silent auto-update toggle.
             "auto_update_enabled":        bool(self._settings.get("auto_update_enabled")),
+            # PR 17: voice input/output toggles + selected models.
+            "voice_input_enabled":        bool(self._settings.get("voice_input_enabled")),
+            "voice_output_enabled":       bool(self._settings.get("voice_output_enabled")),
+            "stt_model_id":               self._settings.get("stt_model_id") or "",
+            "tts_voice_id":               self._settings.get("tts_voice_id") or "",
         }
 
     def save_setting(self, key: str, value: Any) -> None:

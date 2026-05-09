@@ -7,6 +7,11 @@
 // code blocks are intercepted and rendered as SVG diagrams. Code fences
 // get a copy button; links open in the system browser via the existing
 // IPC bridge when available.
+//
+// PR 17: when ``voiceOutputEnabled`` is true, assistant messages also get a
+// speaker button next to the text. Clicking it pipes the message through
+// /api/voice/synthesize and plays the returned wav via the Audio element.
+// Auto-play is intentionally off — speech is opt-in per message.
 
 import {
   useCallback,
@@ -28,9 +33,15 @@ import remarkMath from "remark-math";
 import "highlight.js/styles/github-dark.css";
 import "katex/dist/katex.min.css";
 
+import { Voice } from "@/api/client";
+
 interface MessageRendererProps {
   content: string;
   role: "user" | "assistant" | "system";
+  // PR 17: when true, assistant messages render a speaker button that
+  // synthesizes their text on click. Defaults off so existing call sites
+  // (tests, message bubbles in the streaming preview) keep current behavior.
+  voiceOutputEnabled?: boolean;
 }
 
 // Mermaid is heavy (~700 kB minified plus per-diagram chunks). We lazy-load
@@ -56,7 +67,11 @@ function loadMermaid(): Promise<MermaidModule> {
   return mermaidPromise;
 }
 
-export function MessageRenderer({ content, role }: MessageRendererProps) {
+export function MessageRenderer({
+  content,
+  role,
+  voiceOutputEnabled = false,
+}: MessageRendererProps) {
   if (role !== "assistant") {
     return <span className="whitespace-pre-wrap">{content}</span>;
   }
@@ -78,6 +93,166 @@ export function MessageRenderer({ content, role }: MessageRendererProps) {
       >
         {content}
       </ReactMarkdown>
+      {voiceOutputEnabled && content.trim().length > 0 && (
+        <SpeakerButton text={content} />
+      )}
+    </div>
+  );
+}
+
+// ── PR 17: speaker button + audio player ────────────────────────────────────
+//
+// Lazily fetches the synthesized wav on click, then either plays it through
+// a transient <audio> or pauses an in-flight playback. We don't pre-fetch:
+// most messages are never spoken, and synthesizing every assistant turn
+// would burn local CPU for no benefit.
+
+function SpeakerButton({ text }: { text: string }) {
+  const [state, setState] = useState<"idle" | "loading" | "playing" | "error">(
+    "idle",
+  );
+  const [error, setError] = useState<string>("");
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+
+  // Strip Markdown / code blocks before sending to TTS — Piper would happily
+  // read out the literal asterisks. Lossy by design: a code block in chat
+  // is announced as "[code]" rather than enumerating every character.
+  const _sanitize = (raw: string): string => {
+    let s = raw;
+    s = s.replace(/```[\s\S]*?```/g, " (code) ");
+    s = s.replace(/`[^`]*`/g, " (code) ");
+    s = s.replace(/!\[[^\]]*\]\([^)]*\)/g, " (image) ");
+    s = s.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+    s = s.replace(/[*_~#>]+/g, "");
+    s = s.replace(/\s+/g, " ").trim();
+    return s;
+  };
+
+  // Tear down the audio + object URL when the button unmounts so a played
+  // message that scrolls offscreen frees its blob.
+  useEffect(() => {
+    return () => {
+      const audio = audioRef.current;
+      if (audio) {
+        audio.pause();
+        audio.src = "";
+      }
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  const stopPlayback = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+    }
+    setState("idle");
+  }, []);
+
+  const onClick = useCallback(async () => {
+    if (state === "playing") {
+      stopPlayback();
+      return;
+    }
+    if (state === "loading") {
+      // Click-to-cancel during fetch is a nice-to-have; for now we just
+      // ignore double-clicks.
+      return;
+    }
+    setState("loading");
+    setError("");
+    const sanitized = _sanitize(text);
+    if (!sanitized) {
+      setState("idle");
+      return;
+    }
+    try {
+      const blob = await Voice.synthesize(sanitized);
+      // Replace any prior URL before we overwrite the ref so the previous
+      // playback's blob doesn't leak.
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+      const url = URL.createObjectURL(blob);
+      objectUrlRef.current = url;
+      let audio = audioRef.current;
+      if (!audio) {
+        audio = new Audio();
+        audio.addEventListener("ended", () => setState("idle"));
+        audio.addEventListener("error", () => {
+          setState("error");
+          setError("Playback failed");
+        });
+        audioRef.current = audio;
+      }
+      audio.src = url;
+      try {
+        await audio.play();
+        setState("playing");
+      } catch (playErr) {
+        setState("error");
+        setError(playErr instanceof Error ? playErr.message : "Playback blocked");
+      }
+    } catch (err) {
+      setState("error");
+      setError(err instanceof Error ? err.message : "Synthesis failed");
+    }
+  }, [state, text, stopPlayback]);
+
+  const label =
+    state === "playing"
+      ? "Stop playback"
+      : state === "loading"
+        ? "Synthesizing…"
+        : "Play this message";
+
+  return (
+    <div className="mt-1.5 flex items-center gap-2">
+      <button
+        type="button"
+        data-testid="message-speaker-button"
+        onClick={onClick}
+        aria-label={label}
+        title={label}
+        disabled={state === "loading"}
+        className={`inline-flex items-center gap-1 rounded border border-line bg-bg-2 px-2 py-0.5 text-[11px] text-ink-dim hover:text-ink hover:bg-bg-3 ${
+          state === "playing" ? "text-accent border-accent/40" : ""
+        }`}
+      >
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+        </svg>
+        <span>
+          {state === "loading"
+            ? "Synthesizing…"
+            : state === "playing"
+              ? "Stop"
+              : "Speak"}
+        </span>
+      </button>
+      {state === "error" && (
+        <span className="text-[11px] text-err" role="alert">
+          {error || "Synthesis failed"}
+        </span>
+      )}
     </div>
   );
 }

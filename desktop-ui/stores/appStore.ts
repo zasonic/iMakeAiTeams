@@ -129,6 +129,30 @@ export interface BundledDownloadState {
   error: string;
 }
 
+// PR 17: voice asset download progress. Two-track because the UI surfaces
+// STT and TTS download progress separately even though they're streamed by
+// one /assets/download call. Status is the shared rollup so the wizard can
+// show a single progress bar when both tracks are in flight.
+export interface VoiceAssetsState {
+  status: "idle" | "downloading" | "complete" | "error";
+  sttReady: boolean;
+  ttsReady: boolean;
+  sttBytesDone: number;
+  sttBytesTotal: number;
+  ttsBytesDone: number;
+  ttsBytesTotal: number;
+  error: string;
+}
+
+// PR 17: voice recording session state. ``isRecording`` is the source of
+// truth for the mic button highlight; ``recordingStartedAt`` lets the
+// recording-indicator render an elapsed-time counter without re-renders.
+export interface VoiceRecordingState {
+  isRecording: boolean;
+  recordingStartedAt: number;
+  isTranscribing: boolean;
+}
+
 export interface DockerStatusSnapshot {
   wsl_installed: boolean;
   docker_installed: boolean;
@@ -196,6 +220,13 @@ export interface AppState {
   // on conversation switch via Attachments.list().
   pendingAttachments: Record<string, Attachment[]>;
 
+  // PR 17: voice. ``voiceAssets`` mirrors the bundled-download pattern; the
+  // SSE handlers in App.tsx patch it as voice_assets_progress / _complete /
+  // _error events arrive. ``voiceRecording`` is in-process state for the
+  // mic button — never persisted, never observable to the backend.
+  voiceAssets: VoiceAssetsState;
+  voiceRecording: VoiceRecordingState;
+
   // Actions
   setActiveView: (v: ActiveView) => void;
   setStudioMode: (on: boolean) => void;
@@ -249,6 +280,12 @@ export interface AppState {
   setPendingAttachments: (conversationId: string, attachments: Attachment[]) => void;
   addPendingAttachment: (conversationId: string, a: Attachment) => void;
   removePendingAttachment: (conversationId: string, id: string) => void;
+
+  // Voice actions (PR 17)
+  setVoiceAssets: (s: VoiceAssetsState) => void;
+  patchVoiceAssets: (patch: Partial<VoiceAssetsState>) => void;
+  setVoiceRecording: (s: VoiceRecordingState) => void;
+  patchVoiceRecording: (patch: Partial<VoiceRecordingState>) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -280,6 +317,21 @@ export const useAppStore = create<AppState>()(
       updateReady: null,
       updateBannerDismissed: false,
       pendingAttachments: {},
+      voiceAssets: {
+        status: "idle",
+        sttReady: false,
+        ttsReady: false,
+        sttBytesDone: 0,
+        sttBytesTotal: 0,
+        ttsBytesDone: 0,
+        ttsBytesTotal: 0,
+        error: "",
+      },
+      voiceRecording: {
+        isRecording: false,
+        recordingStartedAt: 0,
+        isTranscribing: false,
+      },
 
       setActiveView: (v) => set({ activeView: v }),
       setStudioMode: (on) => set({ studioMode: on }),
@@ -502,6 +554,14 @@ export const useAppStore = create<AppState>()(
             },
           };
         }),
+
+      // ── Voice (PR 17) ────────────────────────────────────────────────
+      setVoiceAssets: (s) => set({ voiceAssets: s }),
+      patchVoiceAssets: (patch) =>
+        set((state) => ({ voiceAssets: { ...state.voiceAssets, ...patch } })),
+      setVoiceRecording: (s) => set({ voiceRecording: s }),
+      patchVoiceRecording: (patch) =>
+        set((state) => ({ voiceRecording: { ...state.voiceRecording, ...patch } })),
 
       endPowerModeRun: (taskId) => {
         set((state) => {
