@@ -831,6 +831,25 @@ _MIGRATIONS = [
             downloaded_at TEXT NOT NULL
         )""",
     ]),
+
+    # ── Phase 14: User-saved prompt templates (snippets + system prompts) ────
+    # Distinct from the legacy `prompts` table (which holds versioned
+    # orchestrator system prompts). Templates here are user-authored, free
+    # to edit/delete, and surfaced through the slash-command picker in chat
+    # plus the Settings "Set as default system prompt" action.
+    ("phase14.prompt_templates", [
+        """CREATE TABLE IF NOT EXISTS prompt_templates (
+            id          TEXT PRIMARY KEY,
+            title       TEXT NOT NULL,
+            body        TEXT NOT NULL,
+            kind        TEXT NOT NULL,
+            tags        TEXT,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            use_count   INTEGER NOT NULL DEFAULT 0
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_prompt_templates_kind ON prompt_templates(kind)",
+    ]),
 ]
 
 

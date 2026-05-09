@@ -249,7 +249,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
             "http://127.0.0.1:5174",
         ],
         allow_credentials=False,
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
     app.add_middleware(BearerAuthMiddleware, expected_token=token)
@@ -273,6 +273,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
         lifecycle as lifecycle_routes,
         mcp as mcp_routes,
         memory as memory_routes,
+        prompt_templates as prompt_templates_routes,
         prompts as prompts_routes,
         rag as rag_routes,
         safety as safety_routes,
@@ -296,6 +297,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
     app.include_router(lifecycle_routes.router, prefix="/api/lifecycle")
     app.include_router(escalation_routes.router, prefix="/api/escalation")
     app.include_router(prompts_routes.router, prefix="/api/prompts")
+    app.include_router(prompt_templates_routes.router, prefix="/api/prompt-templates")
     app.include_router(safety_routes.router, prefix="/api/safety")
     app.include_router(system_routes.router, prefix="/api/system")
     app.include_router(usage_routes.router, prefix="/api/usage")

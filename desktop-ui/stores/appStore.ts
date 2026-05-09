@@ -7,7 +7,7 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 
-import type { Attachment } from "@/api/client";
+import type { Attachment, PromptTemplate } from "@/api/client";
 import type { SidecarStatus } from "../../desktop-shell/sidecar";
 
 export type ActiveView =
@@ -18,6 +18,7 @@ export type ActiveView =
   | "memory_review"
   | "models"
   | "prompts"
+  | "saved_prompts"
   | "mcp"
   | "security"
   | "safety"
@@ -227,6 +228,12 @@ export interface AppState {
   voiceAssets: VoiceAssetsState;
   voiceRecording: VoiceRecordingState;
 
+  // PR 18: user-saved prompt templates. Cached client-side so the slash
+  // picker in ChatView can render synchronously without a round-trip on
+  // every keystroke. The PromptLibraryPanel rehydrates this from the
+  // backend on mount; mutations write through and refresh.
+  promptTemplates: PromptTemplate[];
+
   // Actions
   setActiveView: (v: ActiveView) => void;
   setStudioMode: (on: boolean) => void;
@@ -286,6 +293,11 @@ export interface AppState {
   patchVoiceAssets: (patch: Partial<VoiceAssetsState>) => void;
   setVoiceRecording: (s: VoiceRecordingState) => void;
   patchVoiceRecording: (patch: Partial<VoiceRecordingState>) => void;
+
+  // Prompt template actions (PR 18)
+  setPromptTemplates: (rows: PromptTemplate[]) => void;
+  upsertPromptTemplate: (t: PromptTemplate) => void;
+  removePromptTemplate: (id: string) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -332,6 +344,7 @@ export const useAppStore = create<AppState>()(
         recordingStartedAt: 0,
         isTranscribing: false,
       },
+      promptTemplates: [],
 
       setActiveView: (v) => set({ activeView: v }),
       setStudioMode: (on) => set({ studioMode: on }),
@@ -562,6 +575,23 @@ export const useAppStore = create<AppState>()(
       setVoiceRecording: (s) => set({ voiceRecording: s }),
       patchVoiceRecording: (patch) =>
         set((state) => ({ voiceRecording: { ...state.voiceRecording, ...patch } })),
+
+      // ── Prompt templates (PR 18) ─────────────────────────────────────
+      setPromptTemplates: (rows) => set({ promptTemplates: rows }),
+      upsertPromptTemplate: (t) =>
+        set((state) => {
+          const idx = state.promptTemplates.findIndex((p) => p.id === t.id);
+          if (idx < 0) {
+            return { promptTemplates: [...state.promptTemplates, t] };
+          }
+          const next = state.promptTemplates.slice();
+          next[idx] = t;
+          return { promptTemplates: next };
+        }),
+      removePromptTemplate: (id) =>
+        set((state) => ({
+          promptTemplates: state.promptTemplates.filter((p) => p.id !== id),
+        })),
 
       endPowerModeRun: (taskId) => {
         set((state) => {
