@@ -1,0 +1,50 @@
+name: backend-tests
+
+# Runs the backend pytest suite (including Layer 4 property tests) on
+# every push and pull request. Without this gate, the 320+ tests pinning
+# Bugs 1/4/5/6/7 + Layer 2 saga + Layer 3 module contracts only fire when
+# someone remembers to run them locally — which is to say, sometimes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-tests.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime + dev dependencies
+        # requirements.txt is the lite production bundle; requirements-dev.txt
+        # adds pytest + hypothesis. We deliberately do NOT install
+        # requirements-bench.txt — AgentDojo runs in its own scheduled
+        # workflow (security-bench.yml) on a 30-min cadence we don't want
+        # blocking PRs.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Run backend tests
+        # backend/pytest.ini already excludes tests/agentdojo/ via norecursedirs
+        # and skips slow tests by default. Run from the backend/ dir so
+        # `import db`, `import models`, etc. resolve without sys.path hacks.
+        working-directory: backend
+        run: pytest tests/ -v --tb=short
