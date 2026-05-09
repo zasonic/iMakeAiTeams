@@ -213,6 +213,7 @@ class ChatOrchestrator:
         from services.turn_lifecycle import TurnLifecycle
         from services.turn_router import TurnRouter
         from services.security_gate import SecurityGate
+        from services.escalation_ladder import EscalationLadder
         self._memory_recall = MemoryRecall(memory, settings, mcp_registry)
         # TurnLifecycle owns the open/close transaction boundary that
         # Layer 1's Bug 5 + Bug 6 fixes hardened. Auto-title uses the local
@@ -226,6 +227,9 @@ class ChatOrchestrator:
         # dict lives inside it; delete_conversation calls .forget() to
         # evict on archival.
         self._security_gate = SecurityGate()
+        # EscalationLadder is constructed below, after hub_router is wired.
+        self._EscalationLadder = EscalationLadder
+        self._local_client_ref = local_client
         # Single boundary for worker invocation (Phase 1) with Phase 3 LLM
         # fallback wired through Qwen3 /no_think for routing decisions that
         # have no deterministic skill match.
@@ -237,6 +241,10 @@ class ChatOrchestrator:
                 claude_client, local_client, settings, llm_fallback=fallback,
             )
         self.hub_router = hub_router
+        # Now that hub_router is wired, finish building EscalationLadder.
+        self._escalation_ladder = self._EscalationLadder(
+            self.hub_router, self._local_client_ref,
+        )
 
     # ── Conversation management ──────────────────────────────────────────────
 
@@ -1750,86 +1758,30 @@ class ChatOrchestrator:
             except Exception:
                 pass  # alignment check is best-effort, never block response
 
-        # ── Local response quality gate ─────────────────────────────────────
-        # If response came from local and looks weak, escalate to Claude.
-        # An empty local response is the strongest possible signal of failure,
-        # so it bypasses the quality scorer (which can't grade an empty input)
-        # and escalates directly.
-        response_empty = len((response_text or "").strip()) < 20
-
-        def _escalate_to_claude(reason: str) -> bool:
-            nonlocal response_text, tokens_in, tokens_out, route_model, model_name
-            try:
-                escalation = RoutingDecision(
-                    agent_id=decision.agent_id,
-                    backend="claude",
-                    score=decision.score,
-                    reasoning=reason,
-                    used_fallback=False,
-                    skill_matched=decision.skill_matched,
-                )
-                esc_result = self.hub_router.invoke(
-                    escalation, full_system, messages,
-                    max_tokens=target.max_tokens, on_token=on_token,
-                )
-                response_text = esc_result.text
-                tokens_in = esc_result.input_tokens
-                tokens_out = esc_result.output_tokens
-                route_model = "claude"
-                model_name = esc_result.model_name
-                return True
-            except Exception as esc_exc:
-                log.debug("Escalation to Claude failed: %s", esc_exc)
-                return False
-
-        if (
-            not had_error
-            and not split_enabled  # split owns its own escalation; the legacy
-                                   # gate would re-invoke with full_system,
-                                   # leaking RAG past the architectural wall
-            and target.backend == "local"
-            and self.local and self.local.is_available()
-            and len(user_message.split()) >= 5  # skip for trivial messages
-        ):
-            if response_empty:
-                log.info("Local response empty — escalating to Claude")
-                _escalate_to_claude("local response empty; escalated")
-            else:
-                try:
-                    from services.task_artifacts import local_first_call
-                    quality_raw = local_first_call(
-                        self.local, None,  # local only, no Claude fallback
-                        "Rate this response's relevance and completeness for the given question. "
-                        "Respond with ONLY a JSON: {\"score\": 0-10, \"reason\": \"...\"}",
-                        f"QUESTION: {user_message[:300]}\nRESPONSE: {(response_text or '')[:500]}",
-                        max_tokens=100,
-                    )
-                    if quality_raw:
-                        import json as _json
-                        _qstart = quality_raw.find("{")
-                        _qend = quality_raw.rfind("}")
-                        if _qstart != -1 and _qend != -1:
-                            try:
-                                quality = _json.loads(quality_raw[_qstart:_qend + 1])
-                            except (ValueError, TypeError):
-                                quality = {}
-                            # Coerce score to a number; a model emitting
-                            # {"score": "low"} would otherwise raise TypeError
-                            # on the comparison and silently disable escalation
-                            # via the outer `except Exception: pass` swallow.
-                            try:
-                                score = float(quality.get("score", 10))
-                            except (TypeError, ValueError):
-                                score = 10.0
-                            if score < 4:
-                                log.info("Local response scored %s — escalating to Claude", score)
-                                _escalate_to_claude("local response failed quality gate; escalated")
-                except Exception:
-                    pass  # quality check is best-effort, never block response
-
-        # Recompute after possible escalation so router_log records the
-        # post-escalation state, not the stale pre-escalation reading.
-        response_empty = len((response_text or "").strip()) < 20
+        # Layer 3 extraction: EscalationLadder owns the empty-response
+        # rung + quality-gate rung. Returns an EscalationOutcome whose
+        # response_empty already reflects the post-escalation state
+        # (Bug 4 fix), so the router_log write below sees the true value.
+        esc_outcome = self._escalation_ladder.maybe_escalate(
+            ctx=ctx,
+            decision=decision,
+            target=target,
+            full_system=full_system,
+            messages=messages,
+            response_text=response_text,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            route_model=route_model,
+            model_name=model_name,
+            had_error=had_error,
+            split_enabled=split_enabled,
+        )
+        response_text = esc_outcome.response_text
+        tokens_in = esc_outcome.tokens_in
+        tokens_out = esc_outcome.tokens_out
+        route_model = esc_outcome.route_model
+        model_name = esc_outcome.model_name
+        response_empty = esc_outcome.response_empty
 
         # Persist router feedback
         turn_failed = had_error or response_text.startswith("[Error")
