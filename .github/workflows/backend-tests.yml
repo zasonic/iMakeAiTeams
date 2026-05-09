@@ -48,3 +48,12 @@ jobs:
         # `import db`, `import models`, etc. resolve without sys.path hacks.
         working-directory: backend
         run: pytest tests/ -v --tb=short
+
+      - name: Dead-code gate (vulture)
+        # Layer 4.2: fail on new high-confidence dead code anywhere under
+        # backend/. Existing false positives (forward-compat params, chained
+        # ImportError stubs) are documented in dev/vulture_allowlist.py.
+        # Confidence threshold 90 keeps the noise floor low.
+        run: |
+          vulture backend/services backend/models.py backend/db.py \
+                  dev/vulture_allowlist.py --min-confidence 90
