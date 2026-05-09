@@ -33,6 +33,17 @@ Defense 5 — Deterministic Rule Engine (desktop guardrails)
     instruction delimiters in retrieved content, role reassignment,
     base64/unicode smuggling. Runs in <1ms, can't be prompt-injected
     because it doesn't use an LLM.
+
+Defense 6 — CaMeL: Privileged-LLM / Quarantined-LLM split (arXiv 2503.18813)
+    Re-exports ``camel_plan_and_execute`` from services.camel.pipeline so
+    a single import path covers all six defenses. The privileged LLM emits
+    a restricted-Python plan; the interpreter propagates capability tags
+    through every value and refuses to use UNTRUSTED data as a function
+    name or attribute name. Sets a structural ceiling on what an injected
+    directive can do — the model cannot be tricked into running it,
+    because executing it would require the data to drive control flow.
+    Activates per-turn from chat_orchestrator when the camel_enabled
+    setting is on and the turn has retrieved RAG chunks.
 """
 
 import hashlib
@@ -715,3 +726,22 @@ class SecurityAssessment:
             ),
             "status": "ok",
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEFENSE 6: CaMeL — Privileged/Quarantined LLM split with capability-tagged plan
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# The implementation lives in services.camel/. We re-export the entry-point
+# function here so callers that already depend on security_engine for the
+# other five defenses get CaMeL through the same module surface.
+#
+# from services.security_engine import camel_plan_and_execute  # ← single import
+#
+# The chat orchestrator is the only production caller and only routes
+# through CaMeL when settings.camel_enabled is True AND the turn has
+# retrieved chunks. See backend/services/camel/pipeline.py for the
+# algorithm and backend/services/camel/interpreter.py for the AST walker.
+
+from services.camel.pipeline import camel_plan_and_execute  # noqa: E402,F401
+from services.camel.adapter import make_tool_executor_for_turn  # noqa: E402,F401

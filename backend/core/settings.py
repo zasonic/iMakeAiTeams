@@ -169,6 +169,14 @@ SETTINGS_DEFAULTS: dict[str, tuple] = {
     # Reader proposed. Default False so existing behavior is preserved.
     "reader_actor_split_enabled":    (bool,  False),
 
+    # Phase 12: CaMeL (Defeating Prompt Injections by Design — DeepMind/ETH,
+    # arXiv 2503.18813). Privileged-LLM / Quarantined-LLM split with
+    # capability-tagged plan execution. Only fires when the turn has
+    # retrieved RAG chunks. Mutually exclusive with the Reader/Actor split:
+    # when both flags are on, CaMeL wins (it is a stricter superset).
+    # Default False so existing behavior is preserved.
+    "camel_enabled":                 (bool,  False),
+
     # Phase 8: Symphony-style weighted-vote consensus on high-stakes turns.
     # Three parallel CoT samples, majority weighted by self-reported
     # confidence + lexical similarity. Only fires when the message is

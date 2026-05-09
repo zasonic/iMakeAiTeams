@@ -1488,6 +1488,21 @@ class ChatOrchestrator:
             self._settings.get("reader_actor_split_enabled", False)
         )
 
+        # ── Phase 12: CaMeL — Privileged/Quarantined LLM split ──────────────
+        # CaMeL (DeepMind/ETH, arXiv 2503.18813) is mutually exclusive with
+        # the Reader/Actor split for the same turn. When both flags are on,
+        # CaMeL wins because it is a strictly stricter superset: it also
+        # quarantines retrieved data, but additionally enforces capability
+        # tags through a sandboxed plan interpreter. Voting is also skipped
+        # on a CaMeL turn — the plan IS the model's reasoning step, and
+        # running 3 plans concurrently would burn 3x the privileged budget
+        # for no measurable consensus signal on a structurally-bounded
+        # output.
+        camel_enabled = bool(self._settings.get("camel_enabled", False))
+        camel_active = camel_enabled and bool(mem.rag_chunks)
+        if camel_active:
+            split_enabled = False  # CaMeL takes precedence on this turn.
+
         # ── Phase 8: Symphony-style weighted-vote consensus ──────────────────
         # On high-stakes turns run 3 parallel CoT samples and pick a weighted
         # majority. Composes with the Wiser-Human escalation channel: voting
@@ -1514,10 +1529,13 @@ class ChatOrchestrator:
         )
         # Voting only fires when the resolved target is Claude. Local-only
         # turns skip it (3x latency on a local model is too painful).
+        # CaMeL replaces the worker invocation entirely, so voting is
+        # mutually exclusive on a CaMeL turn (see comment above).
         should_vote = (
             is_high_stakes
             and voting_enabled
             and target.backend == "claude"
+            and not camel_active
         )
         # Pre-allocate the assistant message id so the voting_complete event
         # carries it; the same id is reused when persisting the assistant
@@ -1595,6 +1613,85 @@ class ChatOrchestrator:
                 tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=0.0,
                 message_id=str(uuid.uuid4()),
             )
+
+        # ── Phase 12: CaMeL plan + execute ───────────────────────────────────
+        # The privileged client gets the user message; the quarantined
+        # client only sees the retrieved chunks. The interpreter walks the
+        # restricted-Python plan and refuses any control flow driven by an
+        # UNTRUSTED value. CaMeL is mutually exclusive with the
+        # Reader/Actor split — see comment by ``camel_active`` above.
+        if camel_active:
+            try:
+                from services.camel import (
+                    camel_plan_and_execute, make_tool_executor_for_turn,
+                )
+                tool_executor = make_tool_executor_for_turn(
+                    agent_id=agent_id or "",
+                    conversation_id=conversation_id,
+                    governance=self._governance,
+                    execution_bridge=getattr(self, "_execution_bridge", None),
+                )
+                _emit_event("camel_started", {
+                    "rag_chunks": len(mem.rag_chunks),
+                })
+                camel_result = camel_plan_and_execute(
+                    user_message=user_message,
+                    retrieved_chunks=list(mem.rag_chunks),
+                    privileged_client=self.claude,
+                    quarantined_client=self.local if (
+                        self.local and getattr(self.local, "is_available", lambda: False)()
+                    ) else self.claude,
+                    tool_executor=tool_executor,
+                )
+                response_text = camel_result.get("output_text", "") or ""
+                if on_token and response_text:
+                    try:
+                        on_token(response_text)
+                    except Exception:
+                        pass
+                # Persist a camel_log row capturing the plan + audit counters.
+                try:
+                    _db.execute(
+                        "INSERT INTO camel_log "
+                        "(id, conversation_id, plan_source, executed_steps, "
+                        "capability_violations, blocked_calls, output_text, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            str(uuid.uuid4()),
+                            conversation_id,
+                            camel_result.get("plan_source", "") or "",
+                            int(camel_result.get("executed_steps", 0) or 0),
+                            int(camel_result.get("capability_violations", 0) or 0),
+                            json.dumps(camel_result.get("blocked_calls", []) or []),
+                            response_text,
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+                    _db.commit()
+                except Exception as exc:
+                    log.debug("camel_log insert failed: %s", exc)
+                _emit_event("camel_complete", {
+                    "executed_steps": camel_result.get("executed_steps", 0),
+                    "capability_violations": camel_result.get(
+                        "capability_violations", 0,
+                    ),
+                    "blocked_calls": len(
+                        camel_result.get("blocked_calls", []) or []
+                    ),
+                    "error": camel_result.get("error", "") or "",
+                })
+                model_name = target.model_name
+                # The privileged + quarantined calls each consumed tokens we
+                # can't count without instrumenting every client implementation;
+                # leave tokens at 0 so the existing UI and budget logic
+                # continue to function on a CaMeL turn rather than miscounting.
+            except Exception as exc:
+                log.warning("CaMeL pipeline crashed, falling back to monolithic: %s", exc)
+                response_text = ""
+                # Re-enable downstream paths so the turn still produces an
+                # answer instead of a hang. CaMeL is opt-in; a crash should
+                # not eat the user's message.
+                camel_active = False
 
         # ── Phase 6: Hackett et al. (ACL 2025) Reader/Actor split ────────────
         # When the flag is on we run a 3-phase pipeline: the Reader analyzes
@@ -1880,19 +1977,22 @@ class ChatOrchestrator:
         # Phase 6: in split mode the per-phase router_log rows already cover
         # this turn (reader + actor). Skip the legacy turn-summary write so
         # we don't double-count or produce a misleading "monolithic" row.
+        # Phase 12: CaMeL writes its own row to camel_log. Tag the
+        # router_log entry as ``camel`` so analytics queries can tell
+        # which path produced this turn.
         if not split_enabled:
             _log_router_event(
                 conversation_id=conversation_id,
                 message_preview=user_message,
                 route_taken=route_model,
                 complexity=complexity,
-                reasoning=route_reason,
+                reasoning=("camel plan+execute" if camel_active else route_reason),
                 tokens_out=tokens_out,
                 had_error=turn_failed,
                 response_empty=response_empty,
                 model_used=model_name,
                 mast_category=mast_category,
-                agent_role="monolithic",
+                agent_role=("camel" if camel_active else "monolithic"),
                 voting_samples_json=(
                     json.dumps(voting_samples) if voting_samples is not None
                     else None
