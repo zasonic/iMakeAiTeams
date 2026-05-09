@@ -51,7 +51,7 @@ export interface ApiError extends Error {
 }
 
 async function request<T>(
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   body?: unknown,
   query?: Record<string, string | number | boolean | undefined>,
@@ -110,6 +110,7 @@ export const api = {
   get: <T>(path: string, query?: Record<string, string | number | boolean | undefined>) =>
     request<T>("GET", path, undefined, query),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
+  put: <T>(path: string, body?: unknown) => request<T>("PUT", path, body),
   delete: <T>(path: string) => request<T>("DELETE", path),
 };
 
@@ -465,6 +466,70 @@ export const Prompts = {
     model_target?: string;
   }) => api.post<unknown>("/api/prompts/create", input),
 };
+
+// ── PR 18: User-saved prompt templates ─────────────────────────────────────
+
+export type PromptTemplateKind = "snippet" | "system_prompt";
+
+export interface PromptTemplate {
+  id: string;
+  title: string;
+  body: string;
+  kind: PromptTemplateKind;
+  tags: string;
+  created_at: string;
+  updated_at: string;
+  use_count: number;
+}
+
+export interface PromptTemplateCreatePayload {
+  title: string;
+  body: string;
+  kind: PromptTemplateKind;
+  tags?: string;
+}
+
+export interface PromptTemplateUpdatePayload {
+  title?: string;
+  body?: string;
+  kind?: PromptTemplateKind;
+  tags?: string;
+}
+
+export const PromptTemplates = {
+  list: (): Promise<PromptTemplate[]> =>
+    api.get<PromptTemplate[]>("/api/prompt-templates"),
+  get: (id: string): Promise<PromptTemplate> =>
+    api.get<PromptTemplate>(`/api/prompt-templates/${encodeURIComponent(id)}`),
+  create: (payload: PromptTemplateCreatePayload): Promise<PromptTemplate> =>
+    api.post<PromptTemplate>("/api/prompt-templates", payload),
+  update: (
+    id: string,
+    payload: PromptTemplateUpdatePayload,
+  ): Promise<PromptTemplate> =>
+    api.put<PromptTemplate>(
+      `/api/prompt-templates/${encodeURIComponent(id)}`,
+      payload,
+    ),
+  delete: (id: string): Promise<{ ok: boolean }> =>
+    api.delete<{ ok: boolean }>(
+      `/api/prompt-templates/${encodeURIComponent(id)}`,
+    ),
+  use: (id: string): Promise<PromptTemplate> =>
+    api.post<PromptTemplate>(
+      `/api/prompt-templates/${encodeURIComponent(id)}/use`,
+    ),
+};
+
+// Convenience aliases that match the function-name shape called out in the
+// PR spec. Re-exported so callers can use either ``PromptTemplates.list()``
+// or ``listPromptTemplates()`` interchangeably.
+export const listPromptTemplates = PromptTemplates.list;
+export const getPromptTemplate = PromptTemplates.get;
+export const createPromptTemplate = PromptTemplates.create;
+export const updatePromptTemplate = PromptTemplates.update;
+export const deletePromptTemplate = PromptTemplates.delete;
+export const usePromptTemplate = PromptTemplates.use;
 
 export interface LocalModelRow {
   id: string;

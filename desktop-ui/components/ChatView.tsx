@@ -23,12 +23,15 @@ import {
   Attachments,
   Chat,
   Docker,
+  PromptTemplates,
   Settings,
   Voice,
   type Attachment,
   type ConversationExportFormat,
+  type PromptTemplate,
   type SearchResult,
 } from "@/api/client";
+import { t } from "@/i18n";
 import { ExecutionCard } from "@/components/ExecutionCard";
 import { MessageRenderer } from "@/components/MessageRenderer";
 import { useAppStore, type PowerModeRun } from "@/stores/appStore";
@@ -95,6 +98,13 @@ export function ChatView() {
   const setPendingAttachments = useAppStore((s) => s.setPendingAttachments);
   const addPendingAttachment = useAppStore((s) => s.addPendingAttachment);
   const removePendingAttachment = useAppStore((s) => s.removePendingAttachment);
+  // PR 18: snippet picker. Lazily hydrates the prompt-templates cache the
+  // first time the user types "/" so chat sessions that never use a snippet
+  // don't pay for the round-trip.
+  const promptTemplates = useAppStore((s) => s.promptTemplates);
+  const setPromptTemplates = useAppStore((s) => s.setPromptTemplates);
+  const upsertPromptTemplate = useAppStore((s) => s.upsertPromptTemplate);
+  const [promptTemplatesLoaded, setPromptTemplatesLoaded] = useState(false);
   // PR 17: voice recording state lives in the store so the StatusBar can
   // mirror the indicator without ChatView re-rendering it on every tick.
   const voiceRecording = useAppStore((s) => s.voiceRecording);
@@ -110,6 +120,10 @@ export function ChatView() {
   const [activeId, setActiveId] = useState<string>("");
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [input, setInput] = useState<string>("");
+  // PR 18: snippet dropdown. ``slashOpen`` is true whenever the input
+  // starts with "/" — the picker filters by what comes after the slash.
+  const [slashOpen, setSlashOpen] = useState<boolean>(false);
+  const [slashIndex, setSlashIndex] = useState<number>(0);
   const [dragActive, setDragActive] = useState(false);
   // Tracks the in-flight Shift state on dragover so the overlay label
   // can show the "permanent" hint. The drop event itself reads e.shiftKey
@@ -649,6 +663,81 @@ export function ChatView() {
     };
   }, [_stopRecordingTracks]);
 
+  // ── PR 18: slash-command snippet picker ────────────────────────────────
+
+  // Hydrate the templates cache on first need. The PromptLibraryPanel does
+  // the same on its own mount; this covers the case where the user opens a
+  // snippet via slash command before they've ever opened the panel.
+  const hydrateTemplates = useCallback(async () => {
+    if (promptTemplatesLoaded || !ready) return;
+    try {
+      const rows = await PromptTemplates.list();
+      setPromptTemplates(rows);
+    } catch {
+      /* surfaced via the panel; the picker just stays empty */
+    } finally {
+      setPromptTemplatesLoaded(true);
+    }
+  }, [promptTemplatesLoaded, ready, setPromptTemplates]);
+
+  const slashQuery = useMemo<string | null>(() => {
+    if (!slashOpen) return null;
+    if (!input.startsWith("/")) return null;
+    return input.slice(1).toLowerCase();
+  }, [slashOpen, input]);
+
+  const slashMatches = useMemo<PromptTemplate[]>(() => {
+    if (slashQuery === null) return [];
+    const snippets = promptTemplates.filter((t) => t.kind === "snippet");
+    const q = slashQuery.trim();
+    if (!q) return snippets.slice(0, 8);
+    return snippets
+      .filter((t) => {
+        if (t.title.toLowerCase().includes(q)) return true;
+        const tags = (t.tags || "").toLowerCase();
+        return tags.includes(q);
+      })
+      .slice(0, 8);
+  }, [slashQuery, promptTemplates]);
+
+  // Reset the highlighted row whenever the filtered set changes so we don't
+  // point past the end of the visible list.
+  useEffect(() => {
+    setSlashIndex((idx) => {
+      if (idx < 0) return 0;
+      if (idx >= slashMatches.length) return Math.max(0, slashMatches.length - 1);
+      return idx;
+    });
+  }, [slashMatches.length]);
+
+  const insertSnippet = useCallback(
+    async (template: PromptTemplate) => {
+      setInput(template.body);
+      setSlashOpen(false);
+      try {
+        const updated = await PromptTemplates.use(template.id);
+        upsertPromptTemplate(updated);
+      } catch {
+        /* counter bump is best-effort */
+      }
+    },
+    [upsertPromptTemplate],
+  );
+
+  const onInputChange = useCallback(
+    (value: string) => {
+      setInput(value);
+      const startsWithSlash = value.startsWith("/");
+      if (startsWithSlash) {
+        setSlashOpen(true);
+        void hydrateTemplates();
+      } else {
+        setSlashOpen(false);
+      }
+    },
+    [hydrateTemplates],
+  );
+
   const onPickImages = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
@@ -1093,37 +1182,78 @@ export function ChatView() {
               className="hidden"
               onChange={onImagesPicked}
             />
-            <textarea
-              data-testid="chat-input"
-              className="input flex-1 min-h-[44px] max-h-40 resize-none"
-              placeholder={
-                ready
-                  ? powerModeEnabled
-                    ? "Type a message… (Power Mode is on)"
-                    : "Type a message…"
-                  : "Waiting for backend…"
-              }
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onPaste={onPaste}
-              onCompositionStart={() => {
-                composingRef.current = true;
-              }}
-              onCompositionEnd={() => {
-                composingRef.current = false;
-              }}
-              onKeyDown={(e) => {
-                if (e.key !== "Enter" || e.shiftKey) return;
-                // Don't submit while an IME composition is in flight (e.g.
-                // Japanese / Chinese / Korean input). isComposing covers both
-                // the keydown that commits a composition (which fires after
-                // compositionend on some browsers) and key 229 events.
-                if (composingRef.current || e.nativeEvent.isComposing) return;
-                e.preventDefault();
-                send();
-              }}
-              disabled={!ready || !activeId || busy}
-            />
+            <div className="relative flex-1">
+              <textarea
+                data-testid="chat-input"
+                className="input w-full min-h-[44px] max-h-40 resize-none"
+                placeholder={
+                  ready
+                    ? powerModeEnabled
+                      ? "Type a message… (Power Mode is on)"
+                      : "Type a message…"
+                    : "Waiting for backend…"
+                }
+                value={input}
+                onChange={(e) => onInputChange(e.target.value)}
+                onPaste={onPaste}
+                onCompositionStart={() => {
+                  composingRef.current = true;
+                }}
+                onCompositionEnd={() => {
+                  composingRef.current = false;
+                }}
+                onKeyDown={(e) => {
+                  // Slash dropdown navigation takes priority. Arrow keys and
+                  // Tab move the highlight, Enter inserts, Esc dismisses.
+                  if (slashOpen && slashMatches.length > 0) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setSlashIndex((i) => Math.min(slashMatches.length - 1, i + 1));
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setSlashIndex((i) => Math.max(0, i - 1));
+                      return;
+                    }
+                    if (e.key === "Tab") {
+                      e.preventDefault();
+                      const choice = slashMatches[slashIndex] ?? slashMatches[0];
+                      if (choice) void insertSnippet(choice);
+                      return;
+                    }
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      const choice = slashMatches[slashIndex] ?? slashMatches[0];
+                      if (choice) void insertSnippet(choice);
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setSlashOpen(false);
+                      return;
+                    }
+                  }
+                  if (e.key !== "Enter" || e.shiftKey) return;
+                  // Don't submit while an IME composition is in flight (e.g.
+                  // Japanese / Chinese / Korean input). isComposing covers both
+                  // the keydown that commits a composition (which fires after
+                  // compositionend on some browsers) and key 229 events.
+                  if (composingRef.current || e.nativeEvent.isComposing) return;
+                  e.preventDefault();
+                  send();
+                }}
+                disabled={!ready || !activeId || busy}
+              />
+              {slashOpen && (
+                <SnippetDropdown
+                  matches={slashMatches}
+                  highlighted={slashIndex}
+                  onPick={insertSnippet}
+                  onHover={setSlashIndex}
+                />
+              )}
+            </div>
             <button
               className="btn-primary"
               onClick={send}
@@ -1163,6 +1293,66 @@ export function ChatView() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── PR 18: Slash-command snippet dropdown ──────────────────────────────────
+
+interface SnippetDropdownProps {
+  matches: PromptTemplate[];
+  highlighted: number;
+  onPick: (t: PromptTemplate) => void;
+  onHover: (idx: number) => void;
+}
+
+function SnippetDropdown({
+  matches,
+  highlighted,
+  onPick,
+  onHover,
+}: SnippetDropdownProps) {
+  return (
+    <div
+      data-testid="chat-slash-dropdown"
+      className="absolute bottom-full left-0 right-0 mb-1 z-20 max-h-60 overflow-y-auto rounded-md border border-line bg-bg-1 shadow-lg"
+      role="listbox"
+    >
+      {matches.length === 0 ? (
+        <div
+          data-testid="chat-slash-empty"
+          className="px-3 py-2 text-xs text-ink-faint"
+        >
+          {t("prompts.slash.hint")}
+        </div>
+      ) : (
+        matches.map((m, i) => (
+          <button
+            key={m.id}
+            type="button"
+            role="option"
+            aria-selected={i === highlighted}
+            data-testid={`chat-slash-option-${m.id}`}
+            onMouseDown={(e) => {
+              // Use mousedown so the textarea doesn't lose focus before the
+              // pick fires (which would close the dropdown on blur first).
+              e.preventDefault();
+              onPick(m);
+            }}
+            onMouseEnter={() => onHover(i)}
+            className={`w-full text-left px-3 py-2 text-xs ${
+              i === highlighted
+                ? "bg-accent/15 text-ink"
+                : "text-ink-dim hover:bg-bg-2"
+            }`}
+          >
+            <div className="font-medium text-ink">{m.title}</div>
+            <div className="text-[11px] text-ink-faint truncate">
+              {m.body.slice(0, 80)}
+            </div>
+          </button>
+        ))
+      )}
     </div>
   );
 }

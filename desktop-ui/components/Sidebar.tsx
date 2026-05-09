@@ -16,6 +16,7 @@ const NAV: NavItem[] = [
   { id: "memory_review", label: "Memory Review", hint: "Approve memory writes" },
   { id: "escalations", label: "Pending Reviews", hint: "Approve paused actions" },
   { id: "prompts", label: "Prompts", hint: "Manage system prompts", studioOnly: true },
+  { id: "saved_prompts", label: "Saved prompts", hint: "Snippets and system prompt templates" },
   { id: "mcp", label: "MCP", hint: "Tool servers", studioOnly: true },
   { id: "security", label: "Security", hint: "Firewall + scan log", studioOnly: true },
   { id: "safety", label: "Safety", hint: "Escalations, gate, canary, voting" },

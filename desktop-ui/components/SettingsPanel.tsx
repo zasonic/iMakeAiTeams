@@ -3,13 +3,16 @@ import { useEffect, useState } from "react";
 import {
   Chat,
   Docker,
+  PromptTemplates,
   Settings,
   System,
   Voice,
   type DockerStatus,
+  type PromptTemplate,
   type SettingsPayload,
   type VoiceAssetsStatus,
 } from "@/api/client";
+import { t } from "@/i18n";
 import { VoiceSetupModal } from "@/components/VoiceSetupModal";
 import { useAppStore } from "@/stores/appStore";
 
@@ -475,6 +478,12 @@ export function SettingsPanel() {
           }
           onBlur={() => save("system_prompt", config.system_prompt)}
         />
+        <SystemPromptTemplatesPicker
+          onApply={(tmpl) => {
+            setConfig({ ...config, system_prompt: tmpl.body });
+            save("system_prompt", tmpl.body);
+          }}
+        />
       </section>
 
       <PowerModeSection
@@ -526,6 +535,72 @@ export function SettingsPanel() {
           </button>
         </div>
       </section>
+    </div>
+  );
+}
+
+// ── PR 18: pick a saved system_prompt template as the default ──────────────
+
+interface SystemPromptTemplatesPickerProps {
+  onApply: (tmpl: PromptTemplate) => void;
+}
+
+function SystemPromptTemplatesPicker({
+  onApply,
+}: SystemPromptTemplatesPickerProps) {
+  const ready = useAppStore((s) => s.sidecarStatus?.status === "ready");
+  const pushToast = useAppStore((s) => s.pushToast);
+  const templates = useAppStore((s) => s.promptTemplates);
+  const setPromptTemplates = useAppStore((s) => s.setPromptTemplates);
+
+  useEffect(() => {
+    if (!ready) return;
+    let alive = true;
+    PromptTemplates.list()
+      .then((rows) => {
+        if (alive) setPromptTemplates(rows);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [ready, setPromptTemplates]);
+
+  const systemPrompts = templates.filter((p) => p.kind === "system_prompt");
+  if (systemPrompts.length === 0) return null;
+
+  return (
+    <div
+      className="mt-3 rounded-md border border-line bg-bg-2 px-3 py-2"
+      data-testid="settings-system-prompt-templates"
+    >
+      <div className="text-xs text-ink-dim mb-2">
+        {t("prompts.set_as_default_system_prompt")}
+      </div>
+      <ul className="space-y-1">
+        {systemPrompts.map((tmpl) => (
+          <li
+            key={tmpl.id}
+            className="flex items-center justify-between gap-2 text-xs"
+          >
+            <span className="truncate">{tmpl.title}</span>
+            <button
+              type="button"
+              className="btn-ghost text-xs"
+              data-testid={`settings-set-default-${tmpl.id}`}
+              onClick={() => {
+                onApply(tmpl);
+                pushToast({
+                  kind: "success",
+                  text: t("prompts.set_as_default.success"),
+                });
+              }}
+            >
+              {t("prompts.set_as_default_system_prompt")}
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

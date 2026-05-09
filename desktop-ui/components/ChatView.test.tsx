@@ -42,9 +42,13 @@ vi.mock("@/api/client", () => ({
     assetsStatus: vi.fn(),
     assetsDownload: vi.fn(),
   },
+  PromptTemplates: {
+    list: vi.fn(),
+    use: vi.fn(),
+  },
 }));
 
-import { Attachments, Chat, Settings, Voice } from "@/api/client";
+import { Attachments, Chat, PromptTemplates, Settings, Voice } from "@/api/client";
 
 // jsdom doesn't ship ResizeObserver but the virtualized message list
 // instantiates one. A no-op stand-in is enough — the export menu doesn't
@@ -115,6 +119,9 @@ beforeEach(() => {
   vi.mocked(Attachments.fetchBlob).mockResolvedValue(
     new Blob([new Uint8Array([0])], { type: "image/png" }),
   );
+  vi.mocked(PromptTemplates.list).mockReset();
+  vi.mocked(PromptTemplates.list).mockResolvedValue([]);
+  vi.mocked(PromptTemplates.use).mockReset();
   // jsdom doesn't ship URL.createObjectURL — the image chip renders a
   // <img src=…> from one. Stub it (and the matching revoke) so the chip
   // mounts cleanly under test.
@@ -774,5 +781,101 @@ describe("ChatView voice input (PR 17)", () => {
       expect(useAppStore.getState().voiceRecording.isRecording).toBe(false);
       expect(useAppStore.getState().voiceRecording.isTranscribing).toBe(false);
     });
+  });
+});
+
+// ── PR 18: slash-command snippet picker ────────────────────────────────────
+
+describe("ChatView slash command snippet picker", () => {
+  const SNIPPET = {
+    id: "snip-fluffy",
+    title: "Fluffy",
+    body: "Make it fluffy.",
+    kind: "snippet" as const,
+    tags: "tone",
+    created_at: "2026-05-01T10:00:00Z",
+    updated_at: "2026-05-01T10:00:00Z",
+    use_count: 1,
+  };
+  const SYS_PROMPT = {
+    id: "sys-formal",
+    title: "Formal",
+    body: "Be formal.",
+    kind: "system_prompt" as const,
+    tags: "tone",
+    created_at: "2026-05-01T10:00:00Z",
+    updated_at: "2026-05-01T10:00:00Z",
+    use_count: 0,
+  };
+
+  it("typing '/' at start of input shows the snippet dropdown", async () => {
+    vi.mocked(PromptTemplates.list).mockResolvedValue([SNIPPET, SYS_PROMPT]);
+    await renderWithLoadedConversation();
+
+    const textarea = screen.getByTestId("chat-input") as HTMLTextAreaElement;
+    await userEvent.type(textarea, "/");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-slash-dropdown")).toBeTruthy();
+    });
+    // Snippet appears, system_prompt does not.
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-slash-option-snip-fluffy")).toBeTruthy();
+    });
+    expect(screen.queryByTestId("chat-slash-option-sys-formal")).toBeNull();
+  });
+
+  it("selecting a snippet from the dropdown inserts its body and calls /use", async () => {
+    vi.mocked(PromptTemplates.list).mockResolvedValue([SNIPPET]);
+    vi.mocked(PromptTemplates.use).mockResolvedValue({
+      ...SNIPPET,
+      use_count: 2,
+    });
+    await renderWithLoadedConversation();
+
+    const textarea = screen.getByTestId("chat-input") as HTMLTextAreaElement;
+    await userEvent.type(textarea, "/");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-slash-option-snip-fluffy")).toBeTruthy();
+    });
+
+    // mousedown is what the option uses to fire the pick (so blur doesn't
+    // race the click). userEvent.click fires mousedown + mouseup + click,
+    // which exercises the same path.
+    await userEvent.click(
+      screen.getByTestId("chat-slash-option-snip-fluffy"),
+    );
+
+    await waitFor(() => {
+      expect((screen.getByTestId("chat-input") as HTMLTextAreaElement).value)
+        .toBe("Make it fluffy.");
+    });
+    await waitFor(() => {
+      expect(PromptTemplates.use).toHaveBeenCalledWith("snip-fluffy");
+    });
+    // Dropdown closes after a pick.
+    await waitFor(() => {
+      expect(screen.queryByTestId("chat-slash-dropdown")).toBeNull();
+    });
+  });
+
+  it("typing after the slash filters the visible snippets", async () => {
+    const SNIPPET_B = {
+      ...SNIPPET,
+      id: "snip-other",
+      title: "Other thing",
+      tags: "misc",
+    };
+    vi.mocked(PromptTemplates.list).mockResolvedValue([SNIPPET, SNIPPET_B]);
+    await renderWithLoadedConversation();
+
+    const textarea = screen.getByTestId("chat-input") as HTMLTextAreaElement;
+    await userEvent.type(textarea, "/fluf");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-slash-option-snip-fluffy")).toBeTruthy();
+    });
+    expect(screen.queryByTestId("chat-slash-option-snip-other")).toBeNull();
   });
 });
