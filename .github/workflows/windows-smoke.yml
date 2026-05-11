@@ -1,0 +1,154 @@
+name: windows-smoke
+
+# Layer C4 boot-smoke: PR + main builds the PyInstaller sidecar bundle on
+# a Windows runner and verifies the resulting server.exe prints READY
+# on stdout. This catches packaging regressions (missing hidden imports,
+# wrong sqlite_vec wheel, broken keyring stub) before they reach users
+# instead of after a user posts a screenshot.
+#
+# Scope:
+#   Builds the sidecar with PyInstaller, runs it, waits for READY.
+#   Does NOT exercise the Electron shell or the NSIS installer — those
+#   need a desktop session and elevated installs. The full "install →
+#   click → screenshot" Playwright smoke is still deferred (see
+#   Layer C2/C4 deferrals).
+#
+# Why path-scoped: a typo in a renderer .tsx doesn't risk the
+# PyInstaller bundle, so we skip the ~10-min Windows build in that case.
+# Anything that could change the sidecar bundle DOES trigger it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "build-scripts/build-sidecar.*"
+      - "branding/**"
+      - "electron-builder.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "pyinstaller.spec"
+      - "backend/pyinstaller.spec"
+      - ".github/workflows/windows-smoke.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "build-scripts/build-sidecar.*"
+      - "branding/**"
+      - "electron-builder.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "pyinstaller.spec"
+      - "backend/pyinstaller.spec"
+      - ".github/workflows/windows-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  boot-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Python dependencies
+        # PyInstaller bakes whatever's installed at build time into the
+        # exe, so requirements.txt is the production-shipped bundle.
+        # PyInstaller itself comes from requirements-dev.txt (kept off
+        # the lite installer footprint).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build sidecar (PyInstaller)
+        # Runs build-scripts/build-sidecar.bat → produces
+        # backend/dist/server/server.exe and mirrors to
+        # branding/sidecar-bundle/. Failure here means PyInstaller
+        # could not assemble a working bundle — bad hidden import,
+        # missing wheel, etc.
+        run: npm run build:sidecar
+
+      - name: Verify server.exe was produced
+        shell: pwsh
+        run: |
+          $exe = "backend\dist\server\server.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "Sidecar build did not produce $exe"
+            exit 1
+          }
+          $size = (Get-Item $exe).Length
+          Write-Host "server.exe size: $size bytes"
+          if ($size -lt 1MB) {
+            Write-Error "server.exe is implausibly small ($size bytes) — bundle likely incomplete"
+            exit 1
+          }
+
+      - name: Run the sidecar and wait for READY
+        # The sidecar prints "READY" on stdout once uvicorn is serving
+        # (see backend/server.py:394). The smoke is: launch the bundled
+        # exe, capture stdout, fail if READY isn't seen within 30s.
+        # Kills the process afterwards so the runner isn't left waiting.
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          $exe = "backend\dist\server\server.exe"
+          $logPath = "$env:RUNNER_TEMP\sidecar-stdout.log"
+          Write-Host "Launching $exe; capturing stdout to $logPath"
+
+          $proc = Start-Process -FilePath $exe `
+              -RedirectStandardOutput $logPath `
+              -RedirectStandardError "$env:RUNNER_TEMP\sidecar-stderr.log" `
+              -PassThru `
+              -NoNewWindow
+
+          $deadline = (Get-Date).AddSeconds(30)
+          $ready = $false
+          while ((Get-Date) -lt $deadline) {
+            if (Test-Path $logPath) {
+              $content = Get-Content $logPath -Raw -ErrorAction SilentlyContinue
+              if ($content -and $content -match "READY") {
+                $ready = $true
+                Write-Host "Sidecar reported READY — boot-smoke passed."
+                break
+              }
+            }
+            Start-Sleep -Milliseconds 250
+          }
+
+          # Always print whatever the sidecar emitted so CI shows the
+          # failure mode (missing module, port conflict, etc.) inline.
+          Write-Host "--- sidecar stdout ---"
+          if (Test-Path $logPath) { Get-Content $logPath } else { Write-Host "(no stdout captured)" }
+          Write-Host "--- sidecar stderr ---"
+          if (Test-Path "$env:RUNNER_TEMP\sidecar-stderr.log") {
+            Get-Content "$env:RUNNER_TEMP\sidecar-stderr.log"
+          } else {
+            Write-Host "(no stderr captured)"
+          }
+
+          # Kill the sidecar regardless of outcome.
+          try {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          } catch { }
+
+          if (-not $ready) {
+            Write-Error "Sidecar did not print READY within 30s — packaging regression."
+            exit 1
+          }
