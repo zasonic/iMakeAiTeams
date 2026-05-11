@@ -11,6 +11,7 @@ on:
     branches: [main]
     paths:
       - "backend/**"
+      - "build-scripts/generate_api_types.py"
       - "desktop-ui/**"
       - "desktop-shell/**"
       - "package.json"
@@ -22,6 +23,7 @@ on:
   pull_request:
     paths:
       - "backend/**"
+      - "build-scripts/generate_api_types.py"
       - "desktop-ui/**"
       - "desktop-shell/**"
       - "package.json"
@@ -97,3 +99,57 @@ jobs:
 
       - name: Run ts-prune (dead-code gate)
         run: node dev/run-ts-prune.cjs
+
+  codegen:
+    # Layer C5: Pydantic → TS codegen drift gate. Regenerates
+    # desktop-ui/api/generated.d.ts from the route-layer BaseModels and
+    # fails when the result differs from the file on disk. Forces
+    # operators to commit the regenerated file alongside the Pydantic
+    # change instead of letting renderer types silently drift.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Python dependencies
+        # Need the production deps (the script imports FastAPI route
+        # modules) plus pydantic-to-typescript from requirements-dev.txt.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Install Node dependencies
+        # json-schema-to-typescript is a devDependency; npm ci installs
+        # it under node_modules/.bin/json2ts where the codegen script
+        # finds it via `npx --no-install json2ts`.
+        run: npm ci --no-audit --no-fund
+
+      - name: Regenerate API types
+        run: python build-scripts/generate_api_types.py
+
+      - name: Fail on drift
+        # If regenerating produced any change to the committed file, the
+        # operator forgot to re-run the codegen after editing a Pydantic
+        # model. `git diff --exit-code` returns non-zero and prints the
+        # delta so the PR author sees exactly what they need to commit.
+        run: |
+          if ! git diff --exit-code -- desktop-ui/api/generated.d.ts; then
+            echo ""
+            echo "::error::desktop-ui/api/generated.d.ts is out of sync with the Pydantic models."
+            echo "Run: python build-scripts/generate_api_types.py"
+            echo "Then commit the regenerated file."
+            exit 1
+          fi

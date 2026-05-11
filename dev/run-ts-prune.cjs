@@ -60,6 +60,16 @@ function runTsPrune(project) {
 const allowlist = loadAllowlist();
 const projects = ["tsconfig.web.json", "tsconfig.node.json"];
 
+// Paths excluded from the gate entirely. Generated files emit interfaces
+// the renderer may not import yet — `desktop-ui/api/generated.d.ts` is
+// the Pydantic → TS codegen output (Layer C5). Listing every entry in
+// the allowlist would spam it; the gate that matters for generated files
+// is the "did regenerating it change anything" check in CI, not the
+// dead-export check.
+const IGNORED_PATHS = new Set([
+  "desktop-ui/api/generated.d.ts",
+]);
+
 const findings = [];
 for (const project of projects) {
   const raw = runTsPrune(project);
@@ -76,6 +86,7 @@ for (const project of projects) {
     if (dashIdx < 0) continue;
     const head = trimmed.slice(0, dashIdx).replace(/:\d+$/, "");
     const tail = trimmed.slice(dashIdx + 3).split(" ")[0];
+    if (IGNORED_PATHS.has(head)) continue;
     const key = `${head} - ${tail}`;
     if (allowlist.has(key)) continue;
     findings.push(trimmed);

@@ -1,7 +1,7 @@
 # ── Dev / test dependencies — NEVER shipped to users ────────────────────────
 #
 # These are pulled in by:
-#   - .github/workflows/backend-tests.yml (push/PR gate on backend/tests/)
+#   - .github/workflows/tests.yml (pytest + vulture + ts-prune + codegen)
 #   - local `cd backend && pytest tests/`
 #
 # They are NOT in requirements.txt (the lite bundle that ships in the
@@ -16,3 +16,8 @@ pytest>=8.0.0,<10.0.0
 hypothesis>=6.100.0,<7.0.0
 httpx>=0.27.0,<0.30.0  # required by fastapi.testclient in route tests
 vulture>=2.10,<3.0    # Layer 4.2 dead-code gate
+# Layer C5: Pydantic → TS codegen. The Python side discovers BaseModels
+# and emits a combined JSON Schema; json-schema-to-typescript (Node, in
+# package.json devDependencies) does the second hop. The CI codegen job
+# fails when re-running generate_api_types.py would change the output.
+pydantic-to-typescript>=2.0.0,<3.0.0
