@@ -28,7 +28,7 @@ from models import RouteDecision
 
 log = logging.getLogger("iMakeAiTeams.router")
 
-# ── Deterministic keyword fallback ────────────────────────────────────────
+# ── Deterministic keyword fallback ────────────────────────────────────────────────
 # Used when no local model is available for routing classification.
 
 import re as _re
@@ -90,7 +90,7 @@ def _keyword_classify(message: str) -> RouteDecision:
     )
 
 
-# ── Confidence thresholds ─────────────────────────────────────────────────────
+# ── Confidence thresholds ───────────────────────────────────────────────────────
 # Below this confidence, local routes escalate to Claude.
 ESCALATION_THRESHOLD = 0.6
 # Below this confidence, the orchestrator is told to expand RAG context.
@@ -148,10 +148,10 @@ class TaskRouter:
         if not self.local.is_available():
             log.info("Local model unavailable — using keyword classifier")
             return _keyword_classify(message)
-        # If routing is disabled or local unavailable, always use Claude
-        if not self._enabled or not self.local.is_available():
+        # Routing disabled: always use Claude
+        if not self._enabled:
             return RouteDecision(model="claude", complexity="complex",
-                                reasoning="routing disabled or local unavailable",
+                                reasoning="routing disabled",
                                 confidence=1.0)
 
         # Fast path: explicit user overrides (no model call needed)
@@ -196,7 +196,7 @@ class TaskRouter:
             result = self.local.chat(ROUTER_SYSTEM, prompt, max_tokens=250)
             route = RouteDecision.from_json(result)
 
-            # ── UAR escalation: low confidence local -> Claude ────────────────
+            # ── UAR escalation: low confidence local -> Claude ────────────────────
             # Per-complexity adaptive thresholds: error rates differ sharply
             # between simple/medium/complex buckets, so a single aggregate
             # rate over-tightens simple queries and under-tightens medium ones.
@@ -215,7 +215,7 @@ class TaskRouter:
                     needs_context=route.confidence < CONTEXT_EXPANSION_THRESHOLD,
                 )
 
-            # ── Heuristic safety net (unchanged) ─────────────────────────────
+            # ── Heuristic safety net (unchanged) ───────────────────────────────────
             if route.model == "local" and self._looks_complex(message):
                 log.info("Router override: heuristic says complex, upgrading to Claude")
                 return RouteDecision(
@@ -225,7 +225,7 @@ class TaskRouter:
                     needs_context=route.needs_context,
                 )
 
-            # ── Tag context expansion for any low-confidence route ────────────
+            # ── Tag context expansion for any low-confidence route ────────────────
             if route.confidence < CONTEXT_EXPANSION_THRESHOLD and not route.needs_context:
                 route = RouteDecision(
                     model=route.model,
