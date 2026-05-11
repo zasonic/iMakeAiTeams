@@ -12,6 +12,7 @@
     "build:sidecar": "node build-scripts/build-sidecar.cjs",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "ts-prune": "node dev/run-ts-prune.cjs",
+    "bundle-size": "node dev/check-bundle-size.cjs",
     "test:frontend": "vitest run",
     "test:backend": "cd backend && python -m pytest tests/ -q",
     "dist": "npm run build:sidecar && npm run build && electron-builder --win",

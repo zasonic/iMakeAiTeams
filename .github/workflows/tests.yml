@@ -17,8 +17,11 @@ on:
       - "package.json"
       - "package-lock.json"
       - "tsconfig*.json"
+      - "electron.vite.config.ts"
       - "dev/ts-prune-allowlist.txt"
       - "dev/run-ts-prune.cjs"
+      - "dev/check-bundle-size.cjs"
+      - "dev/bundle-size-baseline.json"
       - ".github/workflows/tests.yml"
   pull_request:
     paths:
@@ -29,8 +32,11 @@ on:
       - "package.json"
       - "package-lock.json"
       - "tsconfig*.json"
+      - "electron.vite.config.ts"
       - "dev/ts-prune-allowlist.txt"
       - "dev/run-ts-prune.cjs"
+      - "dev/check-bundle-size.cjs"
+      - "dev/bundle-size-baseline.json"
       - ".github/workflows/tests.yml"
 
 permissions:
@@ -153,3 +159,34 @@ jobs:
             echo "Then commit the regenerated file."
             exit 1
           fi
+
+  bundle-size:
+    # Layer C6: renderer bundle-size delta gate. Builds the renderer
+    # via `npm run build` and fails when the rolled-up byte total
+    # grew by more than 10% over the committed baseline. The
+    # first-paint half of the original C6 plan (Lighthouse-CI) is
+    # still deferred because it needs a packaged Electron run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build renderer
+        # Only the renderer side is needed; the sidecar Python bundle
+        # has its own Windows-only smoke (see windows-smoke.yml).
+        # `electron-vite build` emits the main + preload + renderer
+        # outputs into `out/`; we measure `out/renderer/` only.
+        run: npm run build
+
+      - name: Bundle-size gate
+        run: node dev/check-bundle-size.cjs
