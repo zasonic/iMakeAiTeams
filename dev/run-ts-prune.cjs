@@ -7,11 +7,13 @@
  * with non-zero exit if it reports any unused export NOT listed in
  * dev/ts-prune-allowlist.txt.
  *
- * Allowlist format: one entry per line, ``relative/path.ts:NN - exportName``,
- * matching ts-prune's own output. Lines starting with ``#`` are comments.
- * Add an entry only after verifying the export is referenced through
- * indirection ts-prune can't see (test-only imports, dynamic imports,
- * Vite/Electron entry points re-imported through HTML).
+ * Allowlist format: one entry per line, ``relative/path.ts - exportName``
+ * (line numbers omitted on purpose — they shift on every edit and would
+ * force allowlist churn even for unrelated changes). Lines starting
+ * with ``#`` are comments. Add an entry only after verifying the
+ * export is referenced through indirection ts-prune can't see
+ * (test-only imports, dynamic imports, Vite/Electron entry points
+ * re-imported through HTML).
  *
  * Why a wrapper instead of vanilla ``ts-prune --error``: ts-prune's
  * built-in ignore mechanism is regex-based and entry-point-aware but
@@ -67,11 +69,12 @@ for (const project of projects) {
     // ts-prune lines look like:
     //   desktop-ui/api/client.ts:42 - foo
     //   desktop-ui/api/client.ts:42 - foo (used in module)
-    // We allowlist by the leading "path:line - name" portion so the
-    // "used in module" decoration doesn't bypass an entry.
+    // We strip the `:NN` line number before allowlist matching so an
+    // unrelated edit that just shifts line numbers doesn't churn the
+    // allowlist. Match the key against `path - name`.
     const dashIdx = trimmed.indexOf(" - ");
     if (dashIdx < 0) continue;
-    const head = trimmed.slice(0, dashIdx);
+    const head = trimmed.slice(0, dashIdx).replace(/:\d+$/, "");
     const tail = trimmed.slice(dashIdx + 3).split(" ")[0];
     const key = `${head} - ${tail}`;
     if (allowlist.has(key)) continue;

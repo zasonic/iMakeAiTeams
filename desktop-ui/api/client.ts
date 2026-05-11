@@ -209,6 +209,27 @@ export const Settings = {
     api.post<{ ok: true; prices: unknown }>("/api/settings/model_prices", { prices }),
 };
 
+// ── Models catalog (single source of truth, served from backend/config/models.json)
+export interface ModelCatalogEntry {
+  id:                       string;
+  family:                   "opus" | "sonnet" | "haiku";
+  display_name:             string;
+  input_price_per_mtok:     number;
+  output_price_per_mtok:    number;
+  context_window_tokens:    number;
+  vision:                   boolean;
+  available_via:            string[];
+}
+
+export interface ModelCatalogResponse {
+  default_claude_id: string;
+  models:            ModelCatalogEntry[];
+}
+
+export const Models = {
+  catalog: () => api.get<ModelCatalogResponse>("/api/models/catalog"),
+};
+
 // Plain-text GET helper. The export routes return raw markdown / JSON /
 // HTML — not the JSON envelope `request<T>()` parses — so this skips the
 // JSON.parse step and returns the response body verbatim.

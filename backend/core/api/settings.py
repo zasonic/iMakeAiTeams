@@ -204,9 +204,18 @@ class SettingsAPI(BaseAPI):
         }
 
     def get_model_prices(self) -> dict:
-        """Return current model pricing (defaults + any user overrides)."""
-        from services.chat_orchestrator import _DEFAULT_MODEL_PRICES
-        defaults = {k: {"input": v[0], "output": v[1]} for k, v in _DEFAULT_MODEL_PRICES.items()}
+        """Return current model pricing (defaults + any user overrides).
+
+        Defaults come from the catalog's ``family_fallback_prices`` so
+        ``backend/config/models.json`` remains the single source of truth.
+        Per-family user overrides via ``settings.model_prices`` still
+        flow through unchanged.
+        """
+        from core.model_catalog import get_catalog
+        catalog = get_catalog()
+        defaults: dict[str, dict[str, float]] = {}
+        for family, (price_in, price_out) in catalog.family_fallback_prices.items():
+            defaults[family] = {"input": price_in, "output": price_out}
         custom = self._settings.get("model_prices", None)
         if custom and isinstance(custom, dict):
             for k, v in custom.items():

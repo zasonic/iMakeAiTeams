@@ -108,44 +108,31 @@ def _detect_compound(msg: str) -> bool:
     """Detect messages containing multiple independent requests."""
     return len(_COMPOUND_SIGNALS.findall(msg)) >= 2 or msg.count("?") >= 3
 
-# Per-million-token pricing defaults. Users can override in Settings
-# to keep cost tracking accurate when Anthropic changes prices.
-_DEFAULT_MODEL_PRICES: dict[str, tuple[float, float]] = {
-    "haiku":  (0.80,  4.0),
-    "sonnet": (3.0,  15.0),
-    "opus":  (15.0,  75.0),
-}
-
-
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int,
                    settings=None) -> float:
+    """Estimate per-turn USD cost.
+
+    Delegates to ``core.model_catalog`` so the catalog file is the
+    single source of truth — adding a model requires editing
+    ``backend/config/models.json`` and nothing else. Users can still
+    override prices via the ``model_prices`` setting; ModelCatalog
+    threads that dict through before falling back to catalog defaults.
+    """
     if not model or "claude" not in model.lower():
         return 0.0
 
-    # Allow user-configured price overrides
-    prices = dict(_DEFAULT_MODEL_PRICES)
+    from core.model_catalog import get_catalog
+
+    user_overrides: dict[str, tuple[float, float]] | None = None
     if settings:
         custom = settings.get("model_prices", None)
         if custom and isinstance(custom, dict):
+            user_overrides = {}
             for key, val in custom.items():
                 if isinstance(val, (list, tuple)) and len(val) == 2:
-                    prices[key] = (float(val[0]), float(val[1]))
+                    user_overrides[key] = (float(val[0]), float(val[1]))
 
-    # Deterministic family detection. The previous code did a substring
-    # search over `prices.items()` and took the first match, which depended
-    # on dict iteration order — a model named e.g. `claude-haiku-with-opus-
-    # fallback` could resolve to `opus` (75x output cost) or `haiku`
-    # depending on Python version. Pick the family explicitly.
-    m = model.lower()
-    family: str | None = None
-    for candidate in ("opus", "sonnet", "haiku"):
-        if candidate in m:
-            family = candidate
-            break
-    if family and family in prices:
-        price_in, price_out = prices[family]
-    else:
-        price_in, price_out = (3.0, 15.0)
+    price_in, price_out = get_catalog().prices_for_model(model, user_overrides)
     return (tokens_in * price_in + tokens_out * price_out) / 1_000_000
 
 
