@@ -1,18 +1,56 @@
 """
 db.py — SQLite database manager for iMakeAiTeams.
 
-Single source of truth for the persistent database. All modules
-import from here and never touch sqlite3 directly.
+Single source of truth for the persistent database. All modules import
+from here and never touch sqlite3 directly.
 
-Tables (original):
-  Coordination  — workflows, tasks, agent_runs
-  Chat          — conversations, messages
-  Documents     — documents (replaces old captions)
-  Memory        — memory_entries, session_facts
-  Agents        — agents, agent_teams, agent_team_members
-  Analytics     — token_usage
-  Prompts       — prompts, prompt_versions, prompt_experiments
-  Errors        — error_logs
+Aggregate boundaries (informal — see "Why monolithic" below):
+
+  Coordination   — workflows, tasks, agent_runs
+  Chat           — conversations, messages, messages_fts
+  Documents      — documents, attachments, bm25_corpus
+  Memory         — memory_entries, session_facts, pending_review,
+                   pending_writes, knowledge_triples
+  Agents         — agents, agent_teams, agent_team_members,
+                   agent_performance
+  Analytics      — token_usage, router_log, camel_log, search_log,
+                   handoff_log, debate_log
+  Prompts        — prompts, prompt_versions, prompt_experiments,
+                   prompt_templates
+  Security       — security_scan_log, escalations, canary_baseline
+  Saga           — workflow_checkpoints
+  Voice          — voice_assets
+  Errors         — error_logs
+  Lifecycle      — schema_migrations
+
+Each block in ``_create_schema()`` is comment-headered with the same
+boundaries so a future maintainer can find the relevant CREATE TABLE
+in O(grep) time.
+
+Why monolithic, not one module per aggregate:
+
+  The architectural plan (Layer C3) proposed splitting this file into
+  ``db.workflows``, ``db.memory``, etc. — one module per aggregate
+  above — and was explicit that the change should NOT ship: 24 caller
+  import-site edits + test fallout, and no bug class disappears. The
+  block-comment grouping in ``_create_schema()`` and the migration list
+  already documents the boundaries for human readers; a true package
+  split adds files without adding correctness.
+
+  Concrete triggers that WOULD justify reopening the split:
+    1. SQLite is replaced by Postgres / DuckDB / a separate KV store.
+       Each aggregate's transaction semantics start to diverge and a
+       single ``_db.transaction()`` helper can't model them all.
+    2. Row-level locking semantics are needed on one aggregate (e.g.
+       workflows) without paying the contention cost on the others.
+    3. Read-replica or replication is introduced and per-aggregate
+       routing matters.
+    4. Separate connection pools per aggregate become necessary
+       (memory writes contending with chat-message INSERTs on the
+       same global ``_lock`` ever shows up in a profile).
+
+  Until one of those fires, the boundaries are read by humans, not by
+  the type system, and the cost-of-split is not justified.
 
 Tables added by Priority 1–6 upgrades:
   bm25_corpus          — BM25 document token corpus (Priority 2)
@@ -24,6 +62,8 @@ Tables added by Priority 1–6 upgrades:
 Columns added to existing tables:
   agents: role, domain, scope, tom_enabled  (Priority 1)
   settings: firewall_enabled, debate_enabled, debate_tier_threshold (Priorities 5, 6)
+  token_usage: turn_id  (Layer C1)
+  router_log:  turn_id  (Layer C1)
 """
 
 import sqlite3
