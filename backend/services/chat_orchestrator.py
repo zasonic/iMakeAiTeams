@@ -149,8 +149,16 @@ def _log_router_event(
     mast_category: str | None = None,
     agent_role: str = "monolithic",
     voting_samples_json: str | None = None,
+    turn_id: str = "",
 ) -> None:
-    """Append one row to the router_log table. Non-fatal — never raises."""
+    """Append one row to the router_log table. Non-fatal — never raises.
+
+    Layer C1: ``turn_id`` is the per-turn correlation id from
+    ``TurnContext.turn_id``. Every per-phase row (reader, actor,
+    voting samples, escalation rescue, monolithic summary, CaMeL turn)
+    carries it so analytics can reassemble the timeline of a single
+    chat turn with one indexed query.
+    """
     try:
         with _db.transaction() as conn:
             conn.execute(
@@ -158,8 +166,8 @@ def _log_router_event(
                 INSERT INTO router_log
                     (id, conversation_id, message_preview, route_taken, complexity,
                      reasoning, tokens_out, had_error, response_empty, model_used,
-                     mast_category, agent_role, voting_samples_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mast_category, agent_role, voting_samples_json, turn_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()),
@@ -175,6 +183,7 @@ def _log_router_event(
                     mast_category,
                     agent_role,
                     voting_samples_json,
+                    turn_id or None,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -652,6 +661,7 @@ class ChatOrchestrator:
         agent_id: str | None,
         history: list,
         mem,
+        turn_id: str = "",
     ) -> ReaderOutput:
         """Reader: analyze the request and propose tools. No tool execution."""
         reader_system = self._load_prompt_template(
@@ -705,6 +715,7 @@ class ChatOrchestrator:
             decision=decision,
             worker=worker,
             agent_role="reader",
+            turn_id=turn_id,
         )
         return ReaderOutput.from_raw(worker.text)
 
@@ -720,6 +731,7 @@ class ChatOrchestrator:
         vote: bool = False,
         voting_message_id: str = "",
         voting_emit=None,
+        turn_id: str = "",
     ) -> tuple[WorkerResult, list[dict] | None]:
         """Actor: execute against the Reader's plan. Never sees raw user text.
 
@@ -817,6 +829,7 @@ class ChatOrchestrator:
                 json.dumps(voting_samples) if voting_samples is not None
                 else None
             ),
+            turn_id=turn_id,
         )
         return worker, voting_samples
 
@@ -856,6 +869,7 @@ class ChatOrchestrator:
         worker: WorkerResult,
         agent_role: str,
         voting_samples_json: str | None = None,
+        turn_id: str = "",
     ) -> None:
         text = worker.text or ""
         _log_router_event(
@@ -870,6 +884,7 @@ class ChatOrchestrator:
             model_used=worker.model_name,
             agent_role=agent_role,
             voting_samples_json=voting_samples_json,
+            turn_id=turn_id,
         )
 
     # ── Phase 8: Symphony-style weighted-vote consensus ─────────────────────
@@ -1441,6 +1456,7 @@ class ChatOrchestrator:
                     model_used=model_name,
                     agent_role="monolithic",
                     voting_samples_json=json.dumps(voting_samples),
+                    turn_id=ctx.turn_id,
                 )
             return ChatResult(
                 text="Awaiting your review for this action.",
@@ -1543,6 +1559,7 @@ class ChatOrchestrator:
                     agent_id=agent_id,
                     history=messages,
                     mem=mem,
+                    turn_id=ctx.turn_id,
                 )
                 _emit_event("reader_complete", {
                     "intent": reader_output.intent[:200],
@@ -1563,6 +1580,7 @@ class ChatOrchestrator:
                     vote=should_vote,
                     voting_message_id=asst_msg_id,
                     voting_emit=_emit_event,
+                    turn_id=ctx.turn_id,
                 )
                 if actor_voting_samples is not None:
                     voting_samples = actor_voting_samples
@@ -1776,6 +1794,7 @@ class ChatOrchestrator:
                     json.dumps(voting_samples) if voting_samples is not None
                     else None
                 ),
+                turn_id=ctx.turn_id,
             )
 
         # Layer 3 extraction: TurnLifecycle.close owns the three-INSERT-plus-

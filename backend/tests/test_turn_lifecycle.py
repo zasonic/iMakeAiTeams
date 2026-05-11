@@ -53,6 +53,30 @@ def test_open_inserts_user_message_and_returns_true(in_memory_db, lifecycle):
     assert rows[0]["id"] == ctx.user_msg_id
 
 
+def test_open_assigns_turn_id(in_memory_db, lifecycle):
+    """Layer C1: every open() sets ctx.turn_id to a fresh UUID. Distinct
+    from user_msg_id (a single turn can produce multiple message rows
+    via reader/actor/voting but only one correlation id)."""
+    cid = _seed_conversation(in_memory_db)
+    ctx = TurnContext(conversation_id=cid, user_message="hello")
+    assert ctx.turn_id == ""  # populated by open(), not at construction
+    lifecycle.open(ctx)
+    assert ctx.turn_id != ""
+    assert ctx.turn_id != ctx.user_msg_id  # two separate ids
+    # Format check: stringified UUID
+    assert len(ctx.turn_id) == 36 and ctx.turn_id.count("-") == 4
+
+
+def test_open_assigns_unique_turn_id_per_call(in_memory_db, lifecycle):
+    """Two opens on the same conversation get different turn_ids."""
+    cid = _seed_conversation(in_memory_db)
+    ctx1 = TurnContext(conversation_id=cid, user_message="first")
+    lifecycle.open(ctx1)
+    ctx2 = TurnContext(conversation_id=cid, user_message="second")
+    lifecycle.open(ctx2)
+    assert ctx1.turn_id != ctx2.turn_id
+
+
 def test_open_blocks_when_spent_meets_budget(in_memory_db, lifecycle, settings):
     cid = _seed_conversation(in_memory_db)
     settings.set("max_conversation_budget_usd", 1.0)
@@ -127,11 +151,13 @@ def test_close_writes_three_rows_atomically(in_memory_db, lifecycle):
     assert asst_rows[0]["content"] == "reply"
 
     usage = in_memory_db.fetchall(
-        "SELECT cost_usd, model FROM token_usage WHERE conversation_id = ?",
+        "SELECT cost_usd, model, turn_id FROM token_usage WHERE conversation_id = ?",
         (cid,),
     )
     assert len(usage) == 1
     assert usage[0]["cost_usd"] == pytest.approx(0.05)
+    # Layer C1: token_usage row carries the per-turn correlation id.
+    assert usage[0]["turn_id"] == ctx.turn_id
 
 
 def test_close_rolls_back_on_mid_transaction_error(in_memory_db, lifecycle, monkeypatch):

@@ -860,6 +860,18 @@ _MIGRATIONS = [
         )""",
         "CREATE INDEX IF NOT EXISTS idx_prompt_templates_kind ON prompt_templates(kind)",
     ]),
+
+    # ── Layer C1: per-turn correlation id ────────────────────────────────────
+    # Adds turn_id to token_usage + router_log so analytics can group all
+    # per-phase rows for a single chat turn (reader + actor + voting
+    # samples + escalation rescue). Existing rows keep NULL; new rows
+    # always populated from ctx.turn_id (set in TurnLifecycle.open).
+    ("layer_c1.turn_id", [
+        "ALTER TABLE token_usage ADD COLUMN turn_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_token_usage_turn_id ON token_usage(turn_id)",
+        "ALTER TABLE router_log ADD COLUMN turn_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_router_log_turn_id ON router_log(turn_id)",
+    ]),
 ]
 
 
