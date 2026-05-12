@@ -21,6 +21,12 @@ Layer 2 wiring (Priority 4 + Priority 6):
     and a startup pass that marks orphaned provisional rows abandoned.
   - debate_log — opt-in adversarial challenger fires after each committed
     step and the synthesizer sees the critique alongside the artifact.
+
+SSE event enhancements (UX):
+  - All event payloads gain optional human-readable fields
+    (friendly_label, summary, agent_names, progress_pct, steps_completed)
+    so the frontend can surface plain-language progress to non-technical
+    users.  Existing fields are unchanged; new fields are additive only.
 """
 
 from __future__ import annotations
@@ -277,8 +283,11 @@ class PipelineExecutor:
                 coordinator, user_message, history, pipeline_id, emit, on_token,
             )
 
-        # ── Step 1: Coordinator decomposes ──────────────────────────────────
-        emit("pipeline_decomposing", {"agent": coordinator["name"]})
+        # ── Step 1: Coordinator decomposes ──────────────────────────────────────────
+        emit("pipeline_decomposing", {
+            "agent": coordinator["name"],
+            "friendly_label": f"{coordinator['name']} is analyzing your request and planning a strategy...",
+        })
 
         agent_list = "\n".join(
             f"- {m['name']} (id: {m['id']}, role: {m.get('role') or 'worker'}): "
@@ -309,14 +318,20 @@ class PipelineExecutor:
                 coordinator, user_message, history, pipeline_id, emit, on_token,
             )
 
+        _unique_agents = len({s.agent_name for s in subtasks})
         emit("pipeline_plan", {
             "pipeline_id": pipeline_id,
             "steps": [
                 {"agent": s.agent_name, "task": s.description} for s in subtasks
             ],
+            "summary": (
+                f"Your team of {_unique_agents} agent{'s' if _unique_agents != 1 else ''} "
+                f"will complete {len(subtasks)} task{'s' if len(subtasks) != 1 else ''} in sequence."
+            ),
+            "agent_names": [s.agent_name for s in subtasks],
         })
 
-        # ── Step 2: Execute each sub-task under the saga ────────────────────
+        # ── Step 2: Execute each sub-task under the saga ─────────────────────────────
         # Each sub-task opens a workflow_checkpoints row in 'provisional'.
         # On structural + semantic validation pass we commit it; on failure
         # we roll it back and retry up to MAX_RETRIES_PER_STEP, injecting
@@ -335,6 +350,8 @@ class PipelineExecutor:
                 "total": len(subtasks),
                 "agent": subtask.agent_name,
                 "task": subtask.description,
+                "progress_pct": round((i / max(len(subtasks), 1)) * 100),
+                "friendly_label": f"Step {i + 1} of {len(subtasks)}: {subtask.agent_name} is working...",
             })
 
             specialist_row = _db.fetchone(
@@ -399,8 +416,12 @@ class PipelineExecutor:
             step_summaries.append(summary)
             emit("pipeline_step_complete", summary)
 
-        # ── Step 3: Coordinator synthesises ─────────────────────────────────
-        emit("pipeline_synthesising", {"agent": coordinator["name"]})
+        # ── Step 3: Coordinator synthesises ─────────────────────────────────────────
+        emit("pipeline_synthesising", {
+            "agent": coordinator["name"],
+            "friendly_label": "Pulling your team's work together into a final answer...",
+            "steps_completed": len(step_summaries),
+        })
 
         handoff_blocks = "\n\n".join(h.to_context_block() for h in handoffs)
         challenge_text = "\n\n".join(
@@ -433,6 +454,10 @@ class PipelineExecutor:
             "pipeline_id": pipeline_id,
             "steps_completed": len(step_summaries),
             "total_steps": len(subtasks),
+            "friendly_label": (
+                f"Done — {len(step_summaries)} task"
+                f"{'s' if len(step_summaries) != 1 else ''} completed."
+            ),
         })
 
         total_in = (
@@ -456,7 +481,7 @@ class PipelineExecutor:
             pipeline_id=pipeline_id,
         )
 
-    # ── Helpers ─────────────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────────────
 
     def _run_step_with_saga(
         self,
@@ -739,7 +764,7 @@ class PipelineExecutor:
         except Exception as exc:
             log.debug("handoff_log write failed (non-fatal): %s", exc)
 
-    # ── workflow_checkpoints (saga) ─────────────────────────────────────────
+    # ── workflow_checkpoints (saga) ─────────────────────────────────────────────────────
     #
     # Three states make up the happy and unhappy paths:
     #   provisional → committed   (validation passed)
@@ -843,7 +868,7 @@ class PipelineExecutor:
         except Exception as exc:
             log.debug("workflow_checkpoints rollback failed (non-fatal): %s", exc)
 
-    # ── debate_log (adversarial debate) ─────────────────────────────────────
+    # ── debate_log (adversarial debate) ───────────────────────────────────────────────
 
     def _debate_should_run(self, user_message: str) -> bool:
         """Decide whether the challenger fires this turn.
@@ -1043,6 +1068,7 @@ class PipelineExecutor:
             "pipeline_id": pipeline_id,
             "steps_completed": 0,
             "total_steps": 0,
+            "friendly_label": "Done.",
         })
         return PipelineResult(
             synthesis=result.text,
