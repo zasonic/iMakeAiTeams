@@ -15,12 +15,23 @@ Priority 2 additions (BM25 Hybrid Search):
   - tokenize()               — shared tokeniser (identical at index and query time)
   - ingest_document() updated to also call _bm25_add_document()
 
+contextual retrieval (Anthropic, Sept 2024):
+  - ingest_document() accepts an optional context_prefix parameter.
+    When non-empty, the indexed content is prefix + "\n\n" + content,
+    improving dense-vector and BM25 recall by ~35% on domain-specific
+    corpora without changing the retrieval API. Disabled by default
+    (empty string) so all existing call sites work unchanged.
+
 Usage:
   # Hybrid search (recommended)
   results = search_documents_hybrid("refund policy", top_k=5, method="hybrid")
 
   # Vector-only (original behaviour)
   results = search_documents("refund policy", top_k=5)
+
+  # Contextual ingestion (opt-in)
+  prefix = claude_haiku.chat(system, doc_text, "Summarise context for this chunk")
+  ingest_document(chunk_text, source="my_doc.pdf", context_prefix=prefix)
 
 Requirements addition: rank-bm25>=0.2.2
 """
@@ -43,7 +54,7 @@ _embed_dim: int = 384
 _init_lock = threading.Lock()
 _initialized = False
 
-# ── Priority 2: BM25 module-level state ──────────────────────────────────────
+# ── Priority 2: BM25 module-level state ────────────────────────────────────────────
 
 _bm25_lock       = threading.Lock()
 _bm25_index      = None   # BM25Okapi instance or None
@@ -89,7 +100,7 @@ def _serialize(vec: list[float]) -> bytes:
 RRF_K = 60  # standard dampening constant (Cormack et al. 2009)
 
 
-# ── Initialisation (unchanged) ────────────────────────────────────────────────
+# ── Initialisation (unchanged) ────────────────────────────────────────────────────────────────
 
 def init_vector_store(embedder=None, vector_dir=None, shared_model=None) -> bool:
     """
@@ -154,7 +165,7 @@ def document_count() -> int:
         return 0
 
 
-# ── Priority 2: BM25 helpers ─────────────────────────────────────────────────
+# ── Priority 2: BM25 helpers ────────────────────────────────────────────────────────────────
 
 def tokenize(text: str) -> list[str]:
     """Consistent tokeniser: lowercase → word tokens → strip stopwords."""
@@ -307,15 +318,15 @@ def search_documents_hybrid(
     bm25_results:   list[tuple[str, float]] = []
     vector_results: list[dict]              = []
 
-    # ── BM25 candidates ──────────────────────────────────────────────────────
+    # ── BM25 candidates ──────────────────────────────────────────────────────────────────
     if method in ("hybrid", "bm25"):
         bm25_results = _bm25_search(query_text, n=top_k * 5)
 
-    # ── Vector candidates ─────────────────────────────────────────────────────
+    # ── Vector candidates ─────────────────────────────────────────────────────────────────────
     if method in ("hybrid", "vector"):
         vector_results = search_documents(query_text, top_k=top_k * 5, doc_type=doc_type)
 
-    # ── Vector-only: return as-is ─────────────────────────────────────────────
+    # ── Vector-only: return as-is ────────────────────────────────────────────────────────────────
     if method == "vector":
         for r in vector_results:
             r["result_source"] = "vector"
@@ -324,7 +335,7 @@ def search_documents_hybrid(
             r["rrf_score"]     = None
         return vector_results[:top_k]
 
-    # ── BM25-only ─────────────────────────────────────────────────────────────
+    # ── BM25-only ───────────────────────────────────────────────────────────────────────────
     if method == "bm25":
         out = []
         for rank, (doc_id, score) in enumerate(bm25_results[:top_k], 1):
@@ -342,7 +353,7 @@ def search_documents_hybrid(
             })
         return out
 
-    # ── Hybrid: RRF fusion ────────────────────────────────────────────────────
+    # ── Hybrid: RRF fusion ─────────────────────────────────────────────────────────────────────
     bm25_ids   = [doc_id for doc_id, _ in bm25_results]
     vector_ids = [r["doc_id"] for r in vector_results]
 
@@ -395,7 +406,7 @@ def search_documents_hybrid(
     return out
 
 
-# ── Background embedding indexer (unchanged) ──────────────────────────────────
+# ── Background embedding indexer (unchanged) ────────────────────────────────────────────────
 
 def _index_dirty_documents(batch_size: int = 50) -> int:
     if not _initialized:
@@ -545,22 +556,54 @@ def start_background_indexer(interval_seconds: int = 60) -> threading.Thread:
     return t
 
 
-# ── Document ingestion (updated to also sync BM25) ────────────────────────────
+# ── Document ingestion (updated: contextual prefix support) ────────────────────────────────
 
-def ingest_document(content: str, source: str, doc_type: str = "text",
-                    metadata: dict | None = None) -> None:
+def ingest_document(
+    content: str,
+    source: str,
+    doc_type: str = "text",
+    metadata: dict | None = None,
+    context_prefix: str = "",
+) -> None:
     """
     Write a document chunk to the documents table for embedding.
-    Priority 2: also syncs BM25 corpus immediately (not waiting for dirty-indexer cycle).
+    Also syncs the BM25 corpus immediately (Priority 2 — does not wait
+    for the dirty-indexer background cycle).
+
+    context_prefix
+        Optional context summary to prepend before indexing, following
+        Anthropic's contextual retrieval technique (Sept 2024).  When
+        provided, the text stored and indexed is::
+
+            {context_prefix}\n\n{content}
+
+        This enriches both dense-vector embeddings and BM25 keyword tokens
+        with whole-document context, reducing retrieval failures by ~35% on
+        domain-specific corpora.
+
+        Generate the prefix via a fast model (e.g. Claude Haiku) using a
+        prompt such as::
+
+            "Given this document, write 2-3 sentences of context that would
+            help someone find this specific chunk via search."
+
+        Pass "" (default) to skip — all existing call sites are unaffected.
     """
     import json as _json
+
+    # Apply contextual prefix when provided (Anthropic contextual retrieval)
+    indexed_content = f"{context_prefix}\n\n{content}" if context_prefix else content
+
     now = datetime.now(timezone.utc).isoformat()
-    row = db.fetchone("SELECT id FROM documents WHERE content = ? AND source = ?", (content, source))
+    row = db.fetchone(
+        "SELECT id FROM documents WHERE content = ? AND source = ?",
+        (indexed_content, source),
+    )
     if row:
         db.execute(
             "UPDATE documents SET content = ?, doc_type = ?, metadata = ?, "
             "updated_at = ?, embedding_status = 'dirty' WHERE id = ?",
-            (content, doc_type, _json.dumps(metadata or {}), now, row["id"]),
+            (indexed_content, doc_type, _json.dumps(metadata or {}), now, row["id"]),
         )
         doc_id = row["id"]
     else:
@@ -568,12 +611,16 @@ def ingest_document(content: str, source: str, doc_type: str = "text",
         db.execute(
             "INSERT INTO documents (id, content, source, doc_type, metadata, "
             "embedding_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'dirty', ?, ?)",
-            (doc_id, content, source, doc_type, _json.dumps(metadata or {}), now, now),
+            (doc_id, indexed_content, source, doc_type, _json.dumps(metadata or {}), now, now),
         )
     db.commit()
 
-    # ── Priority 2: sync BM25 immediately ────────────────────────────────────
-    _bm25_add_document(doc_id, content, {"source": source, "doc_type": doc_type, **(metadata or {})})
+    # ── Priority 2: sync BM25 immediately ──────────────────────────────────────────
+    _bm25_add_document(
+        doc_id,
+        indexed_content,
+        {"source": source, "doc_type": doc_type, **(metadata or {})},
+    )
 
 
 def ingest_memory(content: str, session_id: str = "", tags: list[str] | None = None) -> str:
@@ -590,7 +637,7 @@ def ingest_memory(content: str, session_id: str = "", tags: list[str] | None = N
     return entry_id
 
 
-# ── Search (original vector search — unchanged) ───────────────────────────────
+# ── Search (original vector search — unchanged) ────────────────────────────────────────────────
 
 def search_documents(
     query_text: str,
