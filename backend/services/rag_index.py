@@ -32,6 +32,41 @@ log = logging.getLogger("iMakeAiTeams.rag_index")
 # (the MemoryManager decides whether to include them).
 _SCORE_THRESHOLD = 0.0  # RAGIndex itself does not filter — MemoryManager does
 
+# Maximum characters of the source document sent to the LLM when generating
+# a contextual prefix.  Keeps Haiku cost predictable; the chunk itself is
+# already present in full so the truncation rarely matters in practice.
+_CTX_DOC_CHARS = 3_000
+
+
+def _contextual_prefix(client, document: str, chunk: str) -> str:
+    """
+    Ask an LLM to produce a 1-2 sentence retrieval context for *chunk*
+    within *document*.  Returns '' on any failure so ingestion always
+    proceeds regardless of LLM availability.
+
+    client: any object with a .chat(user_message, system, max_tokens) -> str
+            method (typically a ClaudeClient / claude_client.py instance).
+    """
+    try:
+        prompt = (
+            "<document>\n"
+            + document[:_CTX_DOC_CHARS]
+            + "\n</document>\n\n<chunk>\n"
+            + chunk[:800]
+            + "\n</chunk>\n\n"
+            "In 1-2 sentences, describe what this chunk discusses and how it fits "
+            "within the broader document. Be concise and factual."
+        )
+        result = client.chat(
+            user_message=prompt,
+            system="You are a document indexing assistant. Output only the context description, no preamble.",
+            max_tokens=120,
+        )
+        return result.strip() if isinstance(result, str) else ""
+    except Exception as exc:  # noqa: BLE001
+        log.debug("_contextual_prefix generation failed: %s", exc)
+        return ""
+
 
 class RAGIndex:
     """
@@ -48,6 +83,12 @@ class RAGIndex:
     All storage is delegated to semantic_search.py / ChromaDB.
     The SentenceTransformer model is shared via the module-level
     _shared_st_model set in api.py.
+
+    Optional contextual RAG:
+      Pass a `contextual_rag_client` (any object with a .chat() method,
+      e.g. a ClaudeClient) to __init__ to enable automatic context-prefix
+      generation when documents are ingested via add_text().  When the
+      client is None (the default) behaviour is identical to before.
     """
 
     DEFAULT_EXTENSIONS = [
@@ -57,13 +98,19 @@ class RAGIndex:
         ".r", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".rb",
     ]
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2", model=None):
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2", model=None,
+                 contextual_rag_client=None):
         """
         model: optional pre-loaded SentenceTransformer instance (shared from api.py).
         model_name: ignored when model is provided; kept for API compatibility.
+        contextual_rag_client: optional LLM client used to generate per-chunk
+            context prefixes (Anthropic contextual retrieval technique).
+            Must expose .chat(user_message, system, max_tokens) -> str.
+            None disables the feature entirely (default).
         """
         self._model = model  # may be None if semantic_search is not initialised yet
         self._semantic = None  # set lazily when semantic_search is available
+        self._ctx_client = contextual_rag_client
 
     def _get_semantic(self):
         """Lazy import so that the module can be imported without chromadb installed."""
@@ -77,7 +124,7 @@ class RAGIndex:
             pass
         return self._semantic
 
-    # ── Index construction ────────────────────────────────────────────────────
+    # ── Index construction ───────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _split_chunks(text: str, chunk_size: int = 800, overlap: int = 200) -> list[str]:
@@ -102,6 +149,10 @@ class RAGIndex:
         """
         Walk folder recursively, read matching files, chunk and ingest into ChromaDB.
         on_progress: optional callable(status_str, pct_int) for UI feedback.
+
+        Note: if contextual_rag_client is set, each chunk triggers one Haiku
+        API call.  For large folders this can be slow; consider setting
+        contextual_rag_client only when indexing user-uploaded key documents.
         """
         if extensions is None:
             extensions = self.DEFAULT_EXTENSIONS
@@ -167,6 +218,11 @@ class RAGIndex:
         handed to the indexer. The original text on the filesystem is left
         untouched — only the indexed copy gets redacted, so embeddings and
         retrieval results never carry an API key or token.
+
+        When the instance was created with a `contextual_rag_client`, each
+        chunk also receives an LLM-generated context prefix (Anthropic
+        contextual retrieval, Sept 2024).  Prefix generation failures are
+        silently swallowed so ingestion always completes.
         """
         if not text.strip():
             return 0
@@ -176,13 +232,16 @@ class RAGIndex:
             return 0
         chunks = self._split_chunks(text)
         header = f"[{source}]\n"
+        use_ctx = self._ctx_client is not None
         count = 0
         for chunk in chunks:
             try:
+                prefix = _contextual_prefix(self._ctx_client, text, chunk) if use_ctx else ""
                 ss.ingest_document(
                     content=redact(header + chunk),
                     source=source,
                     doc_type="file",
+                    context_prefix=prefix,
                 )
                 count += 1
             except Exception as exc:
@@ -214,7 +273,7 @@ class RAGIndex:
         except Exception:
             return 0
 
-    # ── Search ────────────────────────────────────────────────────────────────
+    # ── Search ────────────────────────────────────────────────────────────────────────────
 
     def search(self, query: str, top_k: int = 5) -> list:
         """
@@ -239,7 +298,7 @@ class RAGIndex:
             log.debug(f"RAGIndex.search failed: {exc}")
             return []
 
-    # ── Persistence (legacy compatibility) ───────────────────────────────────
+    # ── Persistence (legacy compatibility) ────────────────────────────────────────────
 
     def save(self, path: Path) -> None:
         """
@@ -252,6 +311,9 @@ class RAGIndex:
         """
         Migrate a legacy .npz + _chunks.json index into ChromaDB on first call,
         then delete the old files so they are not re-ingested on subsequent starts.
+
+        Contextual prefixes are intentionally skipped during migration to keep
+        the one-time import fast and cheap.
         """
         path = Path(path)
         chunks_path = path.parent / (path.stem + "_chunks.json")
