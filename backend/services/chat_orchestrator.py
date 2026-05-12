@@ -108,44 +108,31 @@ def _detect_compound(msg: str) -> bool:
     """Detect messages containing multiple independent requests."""
     return len(_COMPOUND_SIGNALS.findall(msg)) >= 2 or msg.count("?") >= 3
 
-# Per-million-token pricing defaults. Users can override in Settings
-# to keep cost tracking accurate when Anthropic changes prices.
-_DEFAULT_MODEL_PRICES: dict[str, tuple[float, float]] = {
-    "haiku":  (0.80,  4.0),
-    "sonnet": (3.0,  15.0),
-    "opus":  (15.0,  75.0),
-}
-
-
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int,
                    settings=None) -> float:
+    """Estimate per-turn USD cost.
+
+    Delegates to ``core.model_catalog`` so the catalog file is the
+    single source of truth — adding a model requires editing
+    ``backend/config/models.json`` and nothing else. Users can still
+    override prices via the ``model_prices`` setting; ModelCatalog
+    threads that dict through before falling back to catalog defaults.
+    """
     if not model or "claude" not in model.lower():
         return 0.0
 
-    # Allow user-configured price overrides
-    prices = dict(_DEFAULT_MODEL_PRICES)
+    from core.model_catalog import get_catalog
+
+    user_overrides: dict[str, tuple[float, float]] | None = None
     if settings:
         custom = settings.get("model_prices", None)
         if custom and isinstance(custom, dict):
+            user_overrides = {}
             for key, val in custom.items():
                 if isinstance(val, (list, tuple)) and len(val) == 2:
-                    prices[key] = (float(val[0]), float(val[1]))
+                    user_overrides[key] = (float(val[0]), float(val[1]))
 
-    # Deterministic family detection. The previous code did a substring
-    # search over `prices.items()` and took the first match, which depended
-    # on dict iteration order — a model named e.g. `claude-haiku-with-opus-
-    # fallback` could resolve to `opus` (75x output cost) or `haiku`
-    # depending on Python version. Pick the family explicitly.
-    m = model.lower()
-    family: str | None = None
-    for candidate in ("opus", "sonnet", "haiku"):
-        if candidate in m:
-            family = candidate
-            break
-    if family and family in prices:
-        price_in, price_out = prices[family]
-    else:
-        price_in, price_out = (3.0, 15.0)
+    price_in, price_out = get_catalog().prices_for_model(model, user_overrides)
     return (tokens_in * price_in + tokens_out * price_out) / 1_000_000
 
 
@@ -162,8 +149,16 @@ def _log_router_event(
     mast_category: str | None = None,
     agent_role: str = "monolithic",
     voting_samples_json: str | None = None,
+    turn_id: str = "",
 ) -> None:
-    """Append one row to the router_log table. Non-fatal — never raises."""
+    """Append one row to the router_log table. Non-fatal — never raises.
+
+    Layer C1: ``turn_id`` is the per-turn correlation id from
+    ``TurnContext.turn_id``. Every per-phase row (reader, actor,
+    voting samples, escalation rescue, monolithic summary, CaMeL turn)
+    carries it so analytics can reassemble the timeline of a single
+    chat turn with one indexed query.
+    """
     try:
         with _db.transaction() as conn:
             conn.execute(
@@ -171,8 +166,8 @@ def _log_router_event(
                 INSERT INTO router_log
                     (id, conversation_id, message_preview, route_taken, complexity,
                      reasoning, tokens_out, had_error, response_empty, model_used,
-                     mast_category, agent_role, voting_samples_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mast_category, agent_role, voting_samples_json, turn_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()),
@@ -188,6 +183,7 @@ def _log_router_event(
                     mast_category,
                     agent_role,
                     voting_samples_json,
+                    turn_id or None,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -214,6 +210,7 @@ class ChatOrchestrator:
         from services.turn_router import TurnRouter
         from services.security_gate import SecurityGate
         from services.escalation_ladder import EscalationLadder
+        from services.worker_dispatch import WorkerDispatch
         self._memory_recall = MemoryRecall(memory, settings, mcp_registry)
         # TurnLifecycle owns the open/close transaction boundary that
         # Layer 1's Bug 5 + Bug 6 fixes hardened. Auto-title uses the local
@@ -245,6 +242,10 @@ class ChatOrchestrator:
         self._escalation_ladder = self._EscalationLadder(
             self.hub_router, self._local_client_ref,
         )
+        # WorkerDispatch wraps RoutingDecision construction + hub_router.invoke
+        # so the orchestrator stops re-implementing the same shell at every
+        # call site (per-turn dispatch, reader phase, actor phase).
+        self._worker_dispatch = WorkerDispatch(self.hub_router)
 
     # ── Conversation management ──────────────────────────────────────────────
 
@@ -660,6 +661,7 @@ class ChatOrchestrator:
         agent_id: str | None,
         history: list,
         mem,
+        turn_id: str = "",
     ) -> ReaderOutput:
         """Reader: analyze the request and propose tools. No tool execution."""
         reader_system = self._load_prompt_template(
@@ -698,8 +700,8 @@ class ChatOrchestrator:
             + "Return JSON now."
         )
 
-        decision = self._build_decision_for_role(agent_id, user_message)
-        worker = self.hub_router.invoke(
+        decision = self._worker_dispatch.build_phase_decision(agent_id, user_message)
+        worker = self._worker_dispatch.dispatch(
             decision,
             reader_system,
             [{"role": "user", "content": reader_user}],
@@ -713,6 +715,7 @@ class ChatOrchestrator:
             decision=decision,
             worker=worker,
             agent_role="reader",
+            turn_id=turn_id,
         )
         return ReaderOutput.from_raw(worker.text)
 
@@ -728,6 +731,7 @@ class ChatOrchestrator:
         vote: bool = False,
         voting_message_id: str = "",
         voting_emit=None,
+        turn_id: str = "",
     ) -> tuple[WorkerResult, list[dict] | None]:
         """Actor: execute against the Reader's plan. Never sees raw user text.
 
@@ -781,7 +785,7 @@ class ChatOrchestrator:
             + (f"\n\n{quarantine_block}" if quarantine_block else "")
         )
 
-        decision = self._build_decision_for_role(agent_id, actor_user)
+        decision = self._worker_dispatch.build_phase_decision(agent_id, actor_user)
         actor_messages = [{"role": "user", "content": actor_user}]
         voting_samples: list[dict] | None = None
         if vote and decision.backend == "claude":
@@ -807,7 +811,7 @@ class ChatOrchestrator:
                 except Exception:
                     pass
         else:
-            worker = self.hub_router.invoke(
+            worker = self._worker_dispatch.dispatch(
                 decision,
                 actor_system,
                 actor_messages,
@@ -825,6 +829,7 @@ class ChatOrchestrator:
                 json.dumps(voting_samples) if voting_samples is not None
                 else None
             ),
+            turn_id=turn_id,
         )
         return worker, voting_samples
 
@@ -855,31 +860,6 @@ class ChatOrchestrator:
             had_error=actor_result.had_error,
         )
 
-    def _build_decision_for_role(
-        self, agent_id: str | None, text: str,
-    ) -> RoutingDecision:
-        """Build a RoutingDecision for a single phase invocation.
-
-        Matches the existing send() shape: when an agent is selected we go
-        through ``route_for_agent`` (so authz + agent-pref still apply); when
-        no agent is selected we synthesize a hub-direct decision.
-        """
-        if agent_id:
-            try:
-                return self.hub_router.route_for_agent(
-                    agent_id, TaskDescriptor(text=text, preferred_agent_id=agent_id),
-                )
-            except Exception as exc:
-                log.debug("route_for_agent failed in phase build: %s", exc)
-        return RoutingDecision(
-            agent_id=agent_id or "",
-            backend="claude",
-            score=1.0,
-            reasoning="reader_actor phase",
-            used_fallback=False,
-            skill_matched="",
-        )
-
     def _log_phase_router_event(
         self,
         *,
@@ -889,6 +869,7 @@ class ChatOrchestrator:
         worker: WorkerResult,
         agent_role: str,
         voting_samples_json: str | None = None,
+        turn_id: str = "",
     ) -> None:
         text = worker.text or ""
         _log_router_event(
@@ -903,6 +884,7 @@ class ChatOrchestrator:
             model_used=worker.model_name,
             agent_role=agent_role,
             voting_samples_json=voting_samples_json,
+            turn_id=turn_id,
         )
 
     # ── Phase 8: Symphony-style weighted-vote consensus ─────────────────────
@@ -1227,27 +1209,18 @@ class ChatOrchestrator:
 
         # ── Phase 1: Build routing decision through the HubRouter ────────────
         # The TaskRouter above decided which *backend* to use; the HubRouter
-        # decides which *worker* and authorizes the dispatch. When the caller
-        # specified an agent_id we go through ``route_for_agent`` (which can
-        # raise AuthorizationError); when no agent is specified we synthesize
-        # a hub-direct decision so the chat path keeps working without forcing
-        # every caller to declare a worker.
+        # decides which *worker* and authorizes the dispatch. WorkerDispatch
+        # handles both branches: route_for_agent when agent_id is set
+        # (AuthorizationError still propagates) and hub-direct synthesis
+        # driven by the TurnRouter's RouteOutcome when it isn't.
         task = TaskDescriptor(
             text=user_message,
             preferred_agent_id=agent_id,
             backend_hint=route_model,
         )
-        if agent_id:
-            decision = self.hub_router.route_for_agent(agent_id, task)
-        else:
-            decision = RoutingDecision(
-                agent_id="",
-                backend=route_model,
-                score=1.0,
-                reasoning=route_reason,
-                used_fallback=False,
-                skill_matched="",
-            )
+        decision = self._worker_dispatch.build_turn_decision(
+            agent_id, task, route_outcome,
+        )
 
         # ── Improvement 6: Resolve execution target ──────────────────────────
         target = self._resolve_target(decision.backend, agent)
@@ -1483,6 +1456,7 @@ class ChatOrchestrator:
                     model_used=model_name,
                     agent_role="monolithic",
                     voting_samples_json=json.dumps(voting_samples),
+                    turn_id=ctx.turn_id,
                 )
             return ChatResult(
                 text="Awaiting your review for this action.",
@@ -1585,6 +1559,7 @@ class ChatOrchestrator:
                     agent_id=agent_id,
                     history=messages,
                     mem=mem,
+                    turn_id=ctx.turn_id,
                 )
                 _emit_event("reader_complete", {
                     "intent": reader_output.intent[:200],
@@ -1605,6 +1580,7 @@ class ChatOrchestrator:
                     vote=should_vote,
                     voting_message_id=asst_msg_id,
                     voting_emit=_emit_event,
+                    turn_id=ctx.turn_id,
                 )
                 if actor_voting_samples is not None:
                     voting_samples = actor_voting_samples
@@ -1697,7 +1673,7 @@ class ChatOrchestrator:
                     response_text = f"[Error: {exc}]"
                     had_error = True
             else:
-                worker_result = self.hub_router.invoke(
+                worker_result = self._worker_dispatch.dispatch(
                     decision, full_system, messages,
                     max_tokens=target.max_tokens, on_token=on_token,
                 )
@@ -1818,6 +1794,7 @@ class ChatOrchestrator:
                     json.dumps(voting_samples) if voting_samples is not None
                     else None
                 ),
+                turn_id=ctx.turn_id,
             )
 
         # Layer 3 extraction: TurnLifecycle.close owns the three-INSERT-plus-

@@ -3,11 +3,13 @@ import { useEffect, useState } from "react";
 import {
   Chat,
   Docker,
+  Models,
   PromptTemplates,
   Settings,
   System,
   Voice,
   type DockerStatus,
+  type ModelCatalogEntry,
   type PromptTemplate,
   type SettingsPayload,
   type VoiceAssetsStatus,
@@ -47,6 +49,10 @@ export function SettingsPanel() {
   // PR 17: voice setup modal + asset readiness probe.
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<VoiceAssetsStatus | null>(null);
+  // Layer B1: Claude model dropdown is sourced from
+  // /api/models/catalog so the renderer can't offer an id the backend
+  // price math doesn't know about.
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalogEntry[]>([]);
 
   const reload = async () => {
     try {
@@ -95,12 +101,24 @@ export function SettingsPanel() {
     }
   };
 
+  const reloadModelCatalog = async () => {
+    try {
+      const rsp = await Models.catalog();
+      setModelCatalog(rsp.models);
+    } catch {
+      // Fall back to a free-text input if the catalog can't load — better
+      // than locking the user out of changing the model.
+      setModelCatalog([]);
+    }
+  };
+
   useEffect(() => {
     if (ready) {
       reload();
       refreshDocker();
       reloadRouterStats();
       reloadVoiceStatus();
+      reloadModelCatalog();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
@@ -283,14 +301,44 @@ export function SettingsPanel() {
       <section className="card">
         <h3 className="font-semibold mb-2">Model</h3>
         <label className="label">Claude model</label>
-        <input
-          className="input"
-          value={config.claude_model}
-          onChange={(e) =>
-            setConfig({ ...config, claude_model: e.target.value })
-          }
-          onBlur={() => save("claude_model", config.claude_model)}
-        />
+        {modelCatalog.length > 0 ? (
+          <select
+            className="input"
+            value={config.claude_model}
+            onChange={(e) => {
+              const next = e.target.value;
+              setConfig({ ...config, claude_model: next });
+              save("claude_model", next);
+            }}
+          >
+            {/* If the saved model isn't in the catalog (e.g. older
+                install, custom id), keep it visible at the top so the
+                user isn't silently switched. */}
+            {modelCatalog.find((m) => m.id === config.claude_model)
+              ? null
+              : (
+                <option value={config.claude_model}>
+                  {config.claude_model} (not in catalog)
+                </option>
+              )}
+            {modelCatalog.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.display_name} — ${m.input_price_per_mtok}/${m.output_price_per_mtok} per MTok
+              </option>
+            ))}
+          </select>
+        ) : (
+          // Catalog failed to load — fall back to the legacy free-text
+          // input so a transient API failure doesn't strand the user.
+          <input
+            className="input"
+            value={config.claude_model}
+            onChange={(e) =>
+              setConfig({ ...config, claude_model: e.target.value })
+            }
+            onBlur={() => save("claude_model", config.claude_model)}
+          />
+        )}
       </section>
 
       <section className="card">

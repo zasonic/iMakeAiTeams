@@ -40,6 +40,11 @@ class TurnContext:
 
     # Lifecycle bookkeeping ──────────────────────────────────────────────
     user_msg_id:     str = ""                                  # set by TurnLifecycle on user-msg INSERT
+    # Layer C1: per-turn correlation id. Generated in TurnLifecycle.open()
+    # and echoed onto every SSE payload (via .emit()) + audit_log row +
+    # token_usage row so a single grep across logs reconstructs the full
+    # turn timeline. Stays empty before open() runs.
+    turn_id:         str = ""
     started_at:      str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # Budget bookkeeping (set by TurnLifecycle.open) ──────────────────────
@@ -54,9 +59,17 @@ class TurnContext:
         Mirrors the inline ``_emit_event`` closure that send() uses today —
         having it on TurnContext means the extracted modules don't each
         need to define their own copy.
+
+        Layer C1: when ``self.turn_id`` is set, it's auto-stamped onto the
+        outgoing payload so every SSE event the renderer receives carries
+        the same correlation id without each call site having to remember
+        to thread it through. Caller-supplied ``turn_id`` keys win — we
+        only fill the field when it's absent.
         """
         if self.on_event is None:
             return
+        if self.turn_id and isinstance(data, dict) and "turn_id" not in data:
+            data = {**data, "turn_id": self.turn_id}
         try:
             self.on_event(event_type, data)
         except Exception:

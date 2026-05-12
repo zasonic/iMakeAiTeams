@@ -72,6 +72,12 @@ class TurnLifecycle:
         ctx.budget = self._settings.get("max_conversation_budget_usd", 5.0)
         ctx.warn_pct = self._settings.get("budget_warning_threshold_pct", 80.0)
         ctx.user_msg_id = str(uuid.uuid4())
+        # Layer C1: per-turn correlation id. Generated here so every
+        # downstream emit/audit/persist call site reads the same value
+        # off the context. Distinct from user_msg_id because a single
+        # turn may span multiple messages (e.g. reader/actor split,
+        # high-stakes-voting consensus) but only one correlation id.
+        ctx.turn_id = str(uuid.uuid4())
         ctx.budget_exceeded = False
         now = datetime.now(timezone.utc).isoformat()
 
@@ -148,11 +154,12 @@ class TurnLifecycle:
             )
             conn.execute(
                 "INSERT INTO token_usage (id, conversation_id, model, tokens_in, "
-                "tokens_out, cost_usd, routed_reason, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "tokens_out, cost_usd, routed_reason, created_at, turn_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(uuid.uuid4()), ctx.conversation_id, model_name,
                     tokens_in, tokens_out, cost, route_reason, resp_now,
+                    ctx.turn_id,
                 ),
             )
             if ctx.budget > 0:

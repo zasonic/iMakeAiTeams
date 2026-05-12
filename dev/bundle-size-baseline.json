@@ -1,0 +1,5 @@
+{
+  "_comment": "Layer C6 bundle-size baseline. Update via `node dev/check-bundle-size.cjs --update` and commit the diff alongside the change that moved the number.",
+  "total_bytes": 8191392,
+  "measured_at": "2026-05-11"
+}

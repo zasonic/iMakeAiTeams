@@ -283,6 +283,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
         lifecycle as lifecycle_routes,
         mcp as mcp_routes,
         memory as memory_routes,
+        models as models_routes,
         prompt_templates as prompt_templates_routes,
         prompts as prompts_routes,
         rag as rag_routes,
@@ -302,6 +303,7 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
     app.include_router(agents_routes.router, prefix="/api/agents")
     app.include_router(memory_routes.router, prefix="/api/memory")
     app.include_router(rag_routes.router, prefix="/api/rag")
+    app.include_router(models_routes.router, prefix="/api/models")
     app.include_router(settings_routes.router, prefix="/api/settings")
     app.include_router(mcp_routes.router, prefix="/api/mcp")
     app.include_router(lifecycle_routes.router, prefix="/api/lifecycle")

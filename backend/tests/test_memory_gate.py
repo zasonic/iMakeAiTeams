@@ -103,12 +103,13 @@ class TestMemoryWriteGate:
 
     def test_contradictory_fact_routes_to_pending(self, in_memory_db, tmp_path,
                                                    monkeypatch):
-        from services import memory as memory_svc
-        from services.memory import MemoryWriteGate
+        # Layer B2: _sse_events moved into services.memory.write_gate when
+        # memory.py was split into a package.
+        from services.memory import MemoryWriteGate, write_gate as memory_write_gate
 
         sse_publish = MagicMock()
         fake_sse = MagicMock(publish=sse_publish)
-        monkeypatch.setattr(memory_svc, "_sse_events", fake_sse)
+        monkeypatch.setattr(memory_write_gate, "_sse_events", fake_sse)
 
         conv_id = str(uuid.uuid4())
         _seed_conversation(in_memory_db, conv_id)
@@ -262,11 +263,13 @@ class TestExtractFactsGateIntegration:
     def test_contradictory_fact_routed_to_pending_writes(
         self, in_memory_db, tmp_path, monkeypatch,
     ):
-        from services import memory as memory_svc
+        # Layer B2: _sse_events moved into services.memory.write_gate when
+        # memory.py was split into a package.
+        from services.memory import write_gate as memory_write_gate
 
         sse_publish = MagicMock()
         fake_sse = MagicMock(publish=sse_publish)
-        monkeypatch.setattr(memory_svc, "_sse_events", fake_sse)
+        monkeypatch.setattr(memory_write_gate, "_sse_events", fake_sse)
 
         conv_id = str(uuid.uuid4())
         _seed_conversation(in_memory_db, conv_id)

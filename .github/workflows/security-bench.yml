@@ -1,18 +1,40 @@
 name: security-bench
 
-# Manual trigger + weekly schedule. No `push:` — the bench takes ~30 min
-# of API time and is not meant to gate every commit. Flip to push when
-# the numbers stabilise.
+# Three triggers:
+#   1. workflow_dispatch — manual run for ad-hoc verification.
+#   2. schedule (Mondays 06:00 UTC) — weekly publish-to-main pass that
+#      regenerates BENCHMARKS.md and commits the JSON deltas back.
+#   3. pull_request, path-scoped — Layer 4.4 PR gate. The bench takes
+#      ~30 min of API time, so we can't run it on every PR; we *can* run
+#      it when the PR touches the security/orchestration surface, which
+#      is exactly when ASR regression matters most. ``run_suites.py`` already
+#      exits 1 when the suite ASR exceeds ``benchmarks/thresholds.json``,
+#      so the gate is just a workflow-level wiring change — no harness work.
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * 1"  # Mondays 06:00 UTC
+  pull_request:
+    paths:
+      - "backend/services/security_engine.py"
+      - "backend/services/governance.py"
+      - "backend/services/hub_router.py"
+      - "backend/services/chat_orchestrator.py"
+      - "backend/services/security_gate.py"
+      - "backend/services/turn_lifecycle.py"
+      - "backend/services/turn_router.py"
+      - "backend/services/worker_dispatch.py"
+      - "backend/services/escalation_ladder.py"
+      - "backend/tests/agentdojo/**"
+      - "benchmarks/thresholds.json"
+      - ".github/workflows/security-bench.yml"
 
-# The job commits back to main with [skip ci] so it does not retrigger
-# itself. ``contents: write`` upgrades the default GITHUB_TOKEN from
-# read-only to commit/push for this repo, removing the need for a PAT
-# or deploy key. ANTHROPIC_API_KEY is the only secret an operator has
-# to add by hand.
+# The scheduled / dispatch runs commit BENCHMARKS.md + suite JSON back to
+# main with [skip ci]; PR runs are read-only (the commit-back step is
+# guarded by ``if: github.event_name != 'pull_request'``). ``contents: write``
+# is needed for the publish-to-main path; PR runs only need ``contents: read``
+# but workflow-level permissions can't differ per trigger, so we keep
+# ``contents: write`` and rely on the step guard to keep PR runs safe.
 permissions:
   contents: write
 
@@ -74,10 +96,14 @@ jobs:
 
       # Commit the results + regenerated markdown back into main. ``[skip ci]``
       # in the message keeps GitHub from retriggering the workflow on its own
-      # push. If nothing changed (deterministic-where-possible — utility/ASR
-      # often match the previous run exactly), git commit exits non-zero and
-      # we swallow it so the workflow still goes green.
+      # push. PR runs skip this step entirely — a forked-PR commit-back would
+      # require special tokens we don't want to grant, and even for same-repo
+      # PRs we don't want every PR to mutate main with a fresh bench delta.
+      # If nothing changed (utility/ASR often match the previous run exactly),
+      # git commit exits non-zero and we swallow it so the workflow still
+      # goes green.
       - name: Commit results back to main
+        if: github.event_name != 'pull_request'
         env:
           GIT_AUTHOR_NAME: github-actions[bot]
           GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com

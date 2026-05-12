@@ -1,0 +1,192 @@
+name: tests
+
+# Runs backend pytest + vulture on every push/PR that touches backend/,
+# and ts-prune on every push/PR that touches the renderer / desktop-shell.
+# Without these gates, the 530+ pytest cases pinning Bugs 1/4/5/6/7 +
+# Layer 2 saga + Layer 3 module contracts (plus the renderer's growing
+# desktop-ui surface) only fire when someone remembers to run them
+# locally — which is to say, sometimes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "build-scripts/generate_api_types.py"
+      - "desktop-ui/**"
+      - "desktop-shell/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig*.json"
+      - "electron.vite.config.ts"
+      - "dev/ts-prune-allowlist.txt"
+      - "dev/run-ts-prune.cjs"
+      - "dev/check-bundle-size.cjs"
+      - "dev/bundle-size-baseline.json"
+      - ".github/workflows/tests.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "build-scripts/generate_api_types.py"
+      - "desktop-ui/**"
+      - "desktop-shell/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig*.json"
+      - "electron.vite.config.ts"
+      - "dev/ts-prune-allowlist.txt"
+      - "dev/run-ts-prune.cjs"
+      - "dev/check-bundle-size.cjs"
+      - "dev/bundle-size-baseline.json"
+      - ".github/workflows/tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime + dev dependencies
+        # requirements.txt is the lite production bundle; requirements-dev.txt
+        # adds pytest + hypothesis. We deliberately do NOT install
+        # requirements-bench.txt — AgentDojo runs in its own workflow
+        # (security-bench.yml) which is also wired as a path-scoped PR
+        # gate on the security/orchestration surface (Layer 4.4).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Run backend tests
+        # backend/pytest.ini already excludes tests/agentdojo/ via norecursedirs
+        # and skips slow tests by default. Run from the backend/ dir so
+        # `import db`, `import models`, etc. resolve without sys.path hacks.
+        working-directory: backend
+        run: pytest tests/ -v --tb=short
+
+      - name: Dead-code gate (vulture)
+        # Layer 4.2: fail on new high-confidence dead code anywhere under
+        # backend/. Existing false positives (forward-compat params, chained
+        # ImportError stubs) are documented in dev/vulture_allowlist.py.
+        # Confidence threshold 90 keeps the noise floor low.
+        run: |
+          vulture backend/services backend/models.py backend/db.py \
+                  dev/vulture_allowlist.py --min-confidence 90
+
+  ts-prune:
+    # Layer 4.3: dead-code gate for the renderer + desktop-shell. Symmetric
+    # with the vulture step above. Existing cross-tsconfig false positives
+    # (SidecarManager, ElectronAPI, etc.) are documented in
+    # dev/ts-prune-allowlist.txt.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Node dependencies
+        # `npm ci` requires package-lock.json to be present and in sync.
+        run: npm ci --no-audit --no-fund
+
+      - name: Run ts-prune (dead-code gate)
+        run: node dev/run-ts-prune.cjs
+
+  codegen:
+    # Layer C5: Pydantic → TS codegen drift gate. Regenerates
+    # desktop-ui/api/generated.d.ts from the route-layer BaseModels and
+    # fails when the result differs from the file on disk. Forces
+    # operators to commit the regenerated file alongside the Pydantic
+    # change instead of letting renderer types silently drift.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Python dependencies
+        # Need the production deps (the script imports FastAPI route
+        # modules) plus pydantic-to-typescript from requirements-dev.txt.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Install Node dependencies
+        # json-schema-to-typescript is a devDependency; npm ci installs
+        # it under node_modules/.bin/json2ts where the codegen script
+        # finds it via `npx --no-install json2ts`.
+        run: npm ci --no-audit --no-fund
+
+      - name: Regenerate API types
+        run: python build-scripts/generate_api_types.py
+
+      - name: Fail on drift
+        # If regenerating produced any change to the committed file, the
+        # operator forgot to re-run the codegen after editing a Pydantic
+        # model. `git diff --exit-code` returns non-zero and prints the
+        # delta so the PR author sees exactly what they need to commit.
+        run: |
+          if ! git diff --exit-code -- desktop-ui/api/generated.d.ts; then
+            echo ""
+            echo "::error::desktop-ui/api/generated.d.ts is out of sync with the Pydantic models."
+            echo "Run: python build-scripts/generate_api_types.py"
+            echo "Then commit the regenerated file."
+            exit 1
+          fi
+
+  bundle-size:
+    # Layer C6: renderer bundle-size delta gate. Builds the renderer
+    # via `npm run build` and fails when the rolled-up byte total
+    # grew by more than 10% over the committed baseline. The
+    # first-paint half of the original C6 plan (Lighthouse-CI) is
+    # still deferred because it needs a packaged Electron run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build renderer
+        # Only the renderer side is needed; the sidecar Python bundle
+        # has its own Windows-only smoke (see windows-smoke.yml).
+        # `electron-vite build` emits the main + preload + renderer
+        # outputs into `out/`; we measure `out/renderer/` only.
+        run: npm run build
+
+      - name: Bundle-size gate
+        run: node dev/check-bundle-size.cjs

@@ -33,6 +33,7 @@ import {
 } from "@/api/client";
 import { t } from "@/i18n";
 import { ExecutionCard } from "@/components/ExecutionCard";
+import { MessageBubble, type MessageRow } from "@/components/chat/MessageBubble";
 import { MessageRenderer } from "@/components/MessageRenderer";
 import { useAppStore, type PowerModeRun } from "@/stores/appStore";
 
@@ -40,14 +41,6 @@ interface ConversationRow {
   id: string;
   title?: string;
   updated_at?: string;
-}
-
-interface MessageRow {
-  id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-  model_used?: string;
-  cost_usd?: number;
 }
 
 type ChatItem =
@@ -1726,35 +1719,7 @@ function ChatListRow({ index, style, data }: ListChildComponentProps<ChatRowData
   );
 }
 
-function MessageBubble({
-  msg,
-  voiceOutputEnabled,
-}: {
-  msg: MessageRow;
-  voiceOutputEnabled: boolean;
-}) {
-  return (
-    <div
-      className={`max-w-[80%] rounded-xl px-4 py-2 text-sm ${
-        msg.role === "user"
-          ? "ml-auto bg-accent/15 text-ink border border-accent/20"
-          : "bg-bg-2 text-ink border border-line"
-      }`}
-    >
-      <MessageRenderer
-        content={msg.content}
-        role={msg.role}
-        voiceOutputEnabled={voiceOutputEnabled}
-      />
-      {msg.model_used && (
-        <div className="text-[11px] text-ink-faint mt-2">
-          {msg.model_used}
-          {typeof msg.cost_usd === "number" && ` · $${msg.cost_usd.toFixed(4)}`}
-        </div>
-      )}
-    </div>
-  );
-}
+// MessageBubble extracted to components/chat/MessageBubble.tsx (Layer C2).
 
 // ── Power Mode message bubble ───────────────────────────────────────────────
 
