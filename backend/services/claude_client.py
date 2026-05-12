@@ -15,8 +15,6 @@ v4.3 — System-prompt caching in multi-turn paths:
     stream_multi_turn, call_with_tools) now benefit from the same
     90%-token-discount on repeated system prompts that single-turn calls
     already got via _build_content().
-  - Cache TTL is 5 minutes (Anthropic ephemeral default). Turns within that
-    window share a cached prompt; longer gaps fall back to a full token read.
   - Blocks below Anthropic's 1,024-token minimum are silently passed through
     uncached, so short prompts degrade safely.
 
@@ -31,6 +29,18 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — Configurable cache TTL:
+  - New cache_ttl parameter (default "1h") adds {"ttl": "1h"} to every
+    ephemeral cache_control block via the new _make_cache_control() helper.
+    Multi-agent sessions longer than 5 minutes were hitting mid-session cache
+    misses with the old hard-coded ephemeral default; the 1-hour TTL eliminates
+    that for the vast majority of pipelines while keeping the same 90% discount
+    on cache reads.
+  - SDK versions that pre-date the ttl field silently ignore the extra key,
+    falling back to the 5-minute API default — no breakage on older installs.
+  - update_config() accepts cache_ttl via _UNSET sentinel so callers can
+    change just the TTL without touching api_key, model, or use_caching.
 """
 
 from pathlib import Path
@@ -39,6 +49,8 @@ from typing import Callable
 from anthropic import Anthropic
 
 from services.llm_interface import LLMClient
+
+_UNSET = object()  # sentinel meaning "caller did not pass this argument"
 
 
 class ClaudeClient(LLMClient):
@@ -54,28 +66,71 @@ class ClaudeClient(LLMClient):
       - Extended thinking chat
     """
 
-    def __init__(self, api_key: str, model: str, use_caching: bool = True):
+    def __init__(self, api_key: str, model: str, use_caching: bool = True,
+                 cache_ttl: str | None = "1h"):
+        """
+        Parameters
+        ----------
+        api_key     : Anthropic API key.
+        model       : Model ID (e.g. "claude-sonnet-4-6").
+        use_caching : Enable prompt caching (ephemeral cache_control blocks).
+        cache_ttl   : TTL string injected into cache_control.
+                      "1h"  — 1-hour TTL (Anthropic 2026 feature); best for
+                             multi-agent sessions longer than 5 minutes.
+                             Write cost is ~2× base; read cost is 0.1× base.
+                      None / "" — omits the ttl field so the API uses its
+                             5-minute default (write 1.25× base).
+                      SDK versions that pre-date the ttl field ignore it and
+                      use the 5-minute default automatically.
+        """
         self._client = Anthropic(api_key=api_key)
         self._model = model
         self._use_caching = use_caching
+        self._cache_ttl: str | None = cache_ttl or None  # "" → None
         self._file_cache: dict[str, str] = {}  # file_path -> file_id
 
-    # ── Configuration ────────────────────────────────────────────────────────────
+    # ── Configuration ────────────────────────────────────────────────────────────────────
 
     def update_config(
         self,
         api_key: str | None = None,
         model: str | None = None,
         use_caching: bool | None = None,
+        cache_ttl=_UNSET,
     ) -> None:
+        """
+        Update client config in-place. Omitted arguments are left unchanged.
+
+        cache_ttl accepts:
+          "1h"  — switch to 1-hour TTL
+          None  — switch to 5-minute API default (omits ttl field)
+          (not passed) — leave current setting unchanged
+        """
         if api_key is not None and api_key != getattr(self._client, "api_key", None):
             self._client = Anthropic(api_key=api_key)
         if model is not None:
             self._model = model
         if use_caching is not None:
             self._use_caching = use_caching
+        if cache_ttl is not _UNSET:
+            self._cache_ttl = cache_ttl or None
 
-    # ── Content helpers ──────────────────────────────────────────────────────────
+    # ── Cache helpers ───────────────────────────────────────────────────────────────────
+
+    def _make_cache_control(self) -> dict:
+        """
+        Build a cache_control dict for an ephemeral caching block.
+
+        When cache_ttl is set (e.g. "1h"), injects the ttl field so the API
+        uses the longer TTL window. SDK versions that pre-date the ttl field
+        silently ignore the extra key and apply the 5-minute default.
+        """
+        cc: dict = {"type": "ephemeral"}
+        if self._cache_ttl:
+            cc["ttl"] = self._cache_ttl
+        return cc
+
+    # ── Content helpers ──────────────────────────────────────────────────────────────────
 
     def _build_content(self, project_summary: str, user_message: str) -> list:
         """
@@ -88,7 +143,7 @@ class ClaudeClient(LLMClient):
             content.append({
                 "type": "text",
                 "text": project_summary,
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": self._make_cache_control(),
             })
         content.append({"type": "text", "text": user_message})
         return content
@@ -99,15 +154,14 @@ class ClaudeClient(LLMClient):
 
         When prompt caching is enabled and the system string is non-empty, the
         prompt is wrapped in an ephemeral cache_control block.  This lets the
-        API cache the compiled token representation for up to 5 minutes, so
-        consecutive turns that share the same system prompt pay only 0.1× the
-        normal input-token rate on cache reads (90% savings, which translates
-        to roughly 50–80% lower input-token cost on a typical multi-turn
-        conversation that re-sends the same system prompt every turn).
+        API cache the compiled token representation so consecutive turns that
+        share the same system prompt pay only 0.1× the normal input-token rate
+        on cache reads (90% savings, which translates to roughly 50–80% lower
+        input-token cost on a typical multi-turn conversation).
 
-        The Messages API accepts both string and list-of-content-blocks forms
-        for `system`, so this is transparent to callers — no behavioural
-        change beyond reduced cost.
+        With cache_ttl="1h" (default), the cache persists for one hour so
+        multi-agent sessions that run longer than 5 minutes stay warm across
+        all specialist and synthesis calls rather than expiring mid-pipeline.
 
         Falls back to a plain string when:
           - _use_caching is False (user toggled caching off in Settings)
@@ -116,10 +170,10 @@ class ClaudeClient(LLMClient):
             silently ignores cache_control in that case, so no error occurs)
         """
         if self._use_caching and system:
-            return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+            return [{"type": "text", "text": system, "cache_control": self._make_cache_control()}]
         return system
 
-    # ── Single-turn chat ─────────────────────────────────────────────────────────
+    # ── Single-turn chat ───────────────────────────────────────────────────────────────────
 
     def chat(self, system: str, project_summary: str, user_message: str,
              max_tokens: int = 4096) -> str:
@@ -134,7 +188,7 @@ class ClaudeClient(LLMClient):
         response = self._client.messages.create(**kwargs)
         return response.content[0].text
 
-    # ── Single-turn streaming ────────────────────────────────────────────────────
+    # ── Single-turn streaming ───────────────────────────────────────────────────────────────────
 
     def stream_chat(
         self,
@@ -162,7 +216,7 @@ class ClaudeClient(LLMClient):
                 full_text += token
         return full_text
 
-    # ── Multi-turn chat ──────────────────────────────────────────────────────────
+    # ── Multi-turn chat ────────────────────────────────────────────────────────────────────
 
     def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096) -> dict:
         """
@@ -173,9 +227,8 @@ class ClaudeClient(LLMClient):
         Returns dict with "text", "input_tokens", "output_tokens".
 
         The system prompt is routed through _build_system_with_cache() so that
-        repeated turns within the 5-minute cache window are billed at the
-        cache-read rate (90% input-token discount on the system prompt
-        portion of the request).
+        repeated turns within the cache window are billed at the cache-read rate
+        (90% input-token discount on the system prompt portion of the request).
         """
         kwargs = {
             "model": self._model,
@@ -205,8 +258,8 @@ class ClaudeClient(LLMClient):
         and .output_tokens attributes (or None if unavailable).
 
         The system prompt is routed through _build_system_with_cache() so that
-        repeated turns within the 5-minute cache window are billed at the
-        cache-read rate, reducing input-token cost on follow-up turns.
+        repeated turns within the cache window are billed at the cache-read rate,
+        reducing input-token cost on follow-up turns.
 
         Callers must unpack the tuple:
             text, usage = claude.stream_multi_turn(...)
@@ -229,7 +282,7 @@ class ClaudeClient(LLMClient):
                 pass  # usage unavailable — caller handles gracefully
         return full_text, usage
 
-    # ── LLMClient interface ─────────────────────────────────────────────────
+    # ── LLMClient interface ───────────────────────────────────────────────────────────
 
     def chat_unified(self, system, messages, max_tokens=4096):
         result = self.chat_multi_turn(system, messages, max_tokens=max_tokens)
@@ -253,7 +306,7 @@ class ClaudeClient(LLMClient):
     def client_name(self) -> str:
         return self._model
 
-    # ── Tool use (agentic loop) ──────────────────────────────────────────────────
+    # ── Tool use (agentic loop) ───────────────────────────────────────────────────────────────────
 
     def call_with_tools(
         self,
@@ -297,7 +350,7 @@ class ClaudeClient(LLMClient):
             },
         }
 
-    # ── File upload ──────────────────────────────────────────────────────────────
+    # ── File upload ────────────────────────────────────────────────────────────────────────
 
     def upload_file(self, file_path: Path, mime_type: str) -> str:
         """
@@ -315,7 +368,7 @@ class ClaudeClient(LLMClient):
         self._file_cache[key] = file_id
         return file_id
 
-    # ── Chat with uploaded file ──────────────────────────────────────────────────
+    # ── Chat with uploaded file ──────────────────────────────────────────────────────────────────
 
     def chat_with_file(self, system: str, file_id: str, user_message: str) -> str:
         """
@@ -336,7 +389,7 @@ class ClaudeClient(LLMClient):
         )
         return response.content[0].text
 
-    # ── Extended thinking ────────────────────────────────────────────────────────
+    # ── Extended thinking ───────────────────────────────────────────────────────────────────
 
     def extended_thinking_chat(
         self,
@@ -369,7 +422,7 @@ class ClaudeClient(LLMClient):
                 answer_text = block.text
         return {"thinking": thinking_text, "answer": answer_text}
 
-    # ── Streaming extended thinking ──────────────────────────────────────────────
+    # ── Streaming extended thinking ──────────────────────────────────────────────────────────────────
 
     def stream_extended_thinking_chat(
         self,

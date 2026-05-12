@@ -16,9 +16,9 @@
       "id":                    "claude-opus-4-7",
       "family":                "opus",
       "display_name":          "Claude Opus 4.7",
-      "input_price_per_mtok":  15.0,
-      "output_price_per_mtok": 75.0,
-      "context_window_tokens": 200000,
+      "input_price_per_mtok":  5.0,
+      "output_price_per_mtok": 25.0,
+      "context_window_tokens": 1000000,
       "vision":                true,
       "available_via":         ["claude_api"]
     },
@@ -26,8 +26,8 @@
       "id":                    "claude-opus-4-6",
       "family":                "opus",
       "display_name":          "Claude Opus 4.6",
-      "input_price_per_mtok":  15.0,
-      "output_price_per_mtok": 75.0,
+      "input_price_per_mtok":  5.0,
+      "output_price_per_mtok": 25.0,
       "context_window_tokens": 200000,
       "vision":                true,
       "available_via":         ["claude_api"]
@@ -38,7 +38,7 @@
       "display_name":          "Claude Sonnet 4.6",
       "input_price_per_mtok":  3.0,
       "output_price_per_mtok": 15.0,
-      "context_window_tokens": 200000,
+      "context_window_tokens": 1000000,
       "vision":                true,
       "available_via":         ["claude_api"]
     },
@@ -46,8 +46,8 @@
       "id":                    "claude-haiku-4-5-20251001",
       "family":                "haiku",
       "display_name":          "Claude Haiku 4.5",
-      "input_price_per_mtok":  0.80,
-      "output_price_per_mtok": 4.0,
+      "input_price_per_mtok":  1.0,
+      "output_price_per_mtok": 5.0,
       "context_window_tokens": 200000,
       "vision":                true,
       "available_via":         ["claude_api"]
@@ -55,8 +55,8 @@
   ],
   "family_fallback_prices": {
     "_comment": "Used by ModelCatalog.prices_for_model() when an id is not in the catalog but matches a family substring. Mirrors the orchestrator's pre-catalog _DEFAULT_MODEL_PRICES so unknown models don't silently get the wrong family's prices.",
-    "opus":   {"input_price_per_mtok": 15.0, "output_price_per_mtok": 75.0},
+    "opus":   {"input_price_per_mtok": 5.0,  "output_price_per_mtok": 25.0},
     "sonnet": {"input_price_per_mtok": 3.0,  "output_price_per_mtok": 15.0},
-    "haiku":  {"input_price_per_mtok": 0.80, "output_price_per_mtok": 4.0}
+    "haiku":  {"input_price_per_mtok": 1.0,  "output_price_per_mtok": 5.0}
   }
 }
