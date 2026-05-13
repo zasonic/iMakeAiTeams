@@ -17,6 +17,7 @@ Stage 2 consolidation:
 Dependencies:
   fastembed >= 0.4.0
   sqlite-vec >= 0.1.6
+  rank-bm25 >= 0.2.2  (optional — degrades to vector-only if absent)
 """
 
 import json
@@ -218,7 +219,16 @@ class RAGIndex:
 
     def search(self, query: str, top_k: int = 5) -> list:
         """
-        Return the top_k most semantically similar chunks.
+        Return the top_k most relevant chunks using hybrid search
+        (BM25 keyword + sqlite-vec vector similarity + Reciprocal Rank Fusion).
+
+        Hybrid search surfaces both exact keyword matches (function names,
+        error messages, config keys) and semantically similar passages in the
+        same ranked list, reducing misses that pure vector search produces on
+        keyword-heavy queries.
+
+        Falls back to vector-only automatically when rank-bm25 is not installed
+        (search_documents_hybrid degrades via its method="vector" branch).
 
         Return type:
           list[(text: str, score: float)]   — when semantic_search is available
@@ -233,7 +243,7 @@ class RAGIndex:
         if not query.strip():
             return []
         try:
-            results = ss.search_documents(query, top_k=top_k)
+            results = ss.search_documents_hybrid(query, top_k=top_k)
             return [(r["content"], r["score"]) for r in results]
         except Exception as exc:
             log.debug(f"RAGIndex.search failed: {exc}")
