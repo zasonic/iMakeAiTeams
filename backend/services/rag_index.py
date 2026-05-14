@@ -77,20 +77,56 @@ class RAGIndex:
             pass
         return self._semantic
 
-    # ── Index construction ────────────────────────────────────────────────────
+    # ── Index construction ──────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _split_chunks(text: str, chunk_size: int = 800, overlap: int = 200) -> list[str]:
-        """Split text into overlapping character-level chunks."""
+        """
+        Split text into overlapping chunks, preferring paragraph and sentence
+        boundaries over arbitrary character positions.
+
+        Strategy (best to worst break point, tried in priority order):
+          1. Paragraph boundary (\n\n)
+          2. Sentence boundary (.  !  ?)
+          3. Word boundary (\s+)
+          4. Character position (fallback)
+
+        Coherent chunks improve retrieval precision because the embedding model
+        captures complete semantic units rather than mid-sentence fragments.
+        Source: 2023-2025 RAG research consensus (NVIDIA multi-dataset benchmark,
+        MDPI Bioengineering clinical NLP study).
+        """
+        import re
+
+        if len(text) <= chunk_size:
+            return [text]
+
+        _PARA = re.compile(r'\n\n+')
+        _SENT = re.compile(r'(?<=[.!?])\s+')
+        _WORD = re.compile(r'\s+')
+
         chunks: list[str] = []
         start = 0
-        length = len(text)
-        while start < length:
-            end = min(start + chunk_size, length)
+
+        while start < len(text):
+            end = min(start + chunk_size, len(text))
+
+            if end < len(text):
+                # Search the last 25% of the window for a clean break point.
+                window_start = end - chunk_size // 4
+                segment = text[window_start:end]
+
+                for pattern in (_PARA, _SENT, _WORD):
+                    matches = list(pattern.finditer(segment))
+                    if matches:
+                        end = window_start + matches[-1].end()
+                        break
+
             chunks.append(text[start:end])
-            if end == length:
+            if end >= len(text):
                 break
-            start = end - overlap
+            start = max(start + 1, end - overlap)
+
         return chunks
 
     def build_from_folder(
@@ -214,7 +250,7 @@ class RAGIndex:
         except Exception:
             return 0
 
-    # ── Search ────────────────────────────────────────────────────────────────
+    # ── Search ─────────────────────────────────────────────────────────────────────────────
 
     def search(self, query: str, top_k: int = 5) -> list:
         """
@@ -239,7 +275,7 @@ class RAGIndex:
             log.debug(f"RAGIndex.search failed: {exc}")
             return []
 
-    # ── Persistence (legacy compatibility) ───────────────────────────────────
+    # ── Persistence (legacy compatibility) ───────────────────────────────────────────
 
     def save(self, path: Path) -> None:
         """
