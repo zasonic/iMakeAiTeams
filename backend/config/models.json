@@ -8,7 +8,8 @@
     "output_price_per_mtok":   "USD per million output tokens",
     "context_window_tokens":   "max context window the API will accept",
     "vision":                  "true if the model accepts image content blocks",
-    "available_via":           "['claude_api'] — kept as a list so future entries can declare 'local_bundled' or 'local_byo'"
+    "available_via":           "['claude_api'] — kept as a list so future entries can declare 'local_bundled' or 'local_byo'",
+    "deprecated":              "true when Anthropic has retired the model; the API will reject new requests. UI should hide or warn."
   },
   "default_claude_id": "claude-sonnet-4-6",
   "models": [
@@ -25,12 +26,13 @@
     {
       "id":                    "claude-opus-4-6",
       "family":                "opus",
-      "display_name":          "Claude Opus 4.6",
+      "display_name":          "Claude Opus 4.6 (Retired Apr 2026)",
       "input_price_per_mtok":  15.0,
       "output_price_per_mtok": 75.0,
       "context_window_tokens": 200000,
       "vision":                true,
-      "available_via":         ["claude_api"]
+      "available_via":         ["claude_api"],
+      "deprecated":            true
     },
     {
       "id":                    "claude-sonnet-4-6",
