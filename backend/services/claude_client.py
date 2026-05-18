@@ -31,6 +31,15 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — Cache token metrics:
+  - chat_multi_turn now returns cache_read_input_tokens and
+    cache_creation_input_tokens from the API response usage object.
+  - chat_unified and stream_unified forward these fields so the
+    orchestrator can accurately calculate the cost savings from
+    prompt caching (cache reads are billed at ~10% of normal input cost).
+  - All new fields default to 0 via getattr so callers that don't
+    consume them are unaffected.
 """
 
 from pathlib import Path
@@ -60,7 +69,7 @@ class ClaudeClient(LLMClient):
         self._use_caching = use_caching
         self._file_cache: dict[str, str] = {}  # file_path -> file_id
 
-    # ── Configuration ────────────────────────────────────────────────────────────
+    # ── Configuration ────────────────────────────────────────────────────────────────────
 
     def update_config(
         self,
@@ -75,7 +84,7 @@ class ClaudeClient(LLMClient):
         if use_caching is not None:
             self._use_caching = use_caching
 
-    # ── Content helpers ──────────────────────────────────────────────────────────
+    # ── Content helpers ──────────────────────────────────────────────────────────────────
 
     def _build_content(self, project_summary: str, user_message: str) -> list:
         """
@@ -119,7 +128,7 @@ class ClaudeClient(LLMClient):
             return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         return system
 
-    # ── Single-turn chat ─────────────────────────────────────────────────────────
+    # ── Single-turn chat ───────────────────────────────────────────────────────────────────
 
     def chat(self, system: str, project_summary: str, user_message: str,
              max_tokens: int = 4096) -> str:
@@ -134,7 +143,7 @@ class ClaudeClient(LLMClient):
         response = self._client.messages.create(**kwargs)
         return response.content[0].text
 
-    # ── Single-turn streaming ────────────────────────────────────────────────────
+    # ── Single-turn streaming ────────────────────────────────────────────────────────────────
 
     def stream_chat(
         self,
@@ -162,7 +171,7 @@ class ClaudeClient(LLMClient):
                 full_text += token
         return full_text
 
-    # ── Multi-turn chat ──────────────────────────────────────────────────────────
+    # ── Multi-turn chat ──────────────────────────────────────────────────────────────────
 
     def chat_multi_turn(self, system: str, messages: list, max_tokens: int = 4096) -> dict:
         """
@@ -170,7 +179,8 @@ class ClaudeClient(LLMClient):
         ``content`` may be a plain string or a list of Anthropic content
         blocks (e.g. ``[{"type": "image", "source": {...}}, {"type": "text", ...}]``).
         Both shapes are passed through to the SDK unchanged.
-        Returns dict with "text", "input_tokens", "output_tokens".
+        Returns dict with "text", "input_tokens", "output_tokens",
+        "cache_read_input_tokens", and "cache_creation_input_tokens".
 
         The system prompt is routed through _build_system_with_cache() so that
         repeated turns within the 5-minute cache window are billed at the
@@ -188,6 +198,8 @@ class ClaudeClient(LLMClient):
             "text": response.content[0].text,
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
+            "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+            "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
         }
 
     def stream_multi_turn(
@@ -229,7 +241,7 @@ class ClaudeClient(LLMClient):
                 pass  # usage unavailable — caller handles gracefully
         return full_text, usage
 
-    # ── LLMClient interface ─────────────────────────────────────────────────
+    # ── LLMClient interface ──────────────────────────────────────────────────────────────────
 
     def chat_unified(self, system, messages, max_tokens=4096):
         result = self.chat_multi_turn(system, messages, max_tokens=max_tokens)
@@ -237,6 +249,8 @@ class ClaudeClient(LLMClient):
             "text": result.get("text", ""),
             "input_tokens": int(result.get("input_tokens", 0)),
             "output_tokens": int(result.get("output_tokens", 0)),
+            "cache_read_input_tokens": int(result.get("cache_read_input_tokens", 0)),
+            "cache_creation_input_tokens": int(result.get("cache_creation_input_tokens", 0)),
         }
 
     def stream_unified(self, system, messages, on_token, max_tokens=4096):
@@ -245,6 +259,8 @@ class ClaudeClient(LLMClient):
             "text": text or "",
             "input_tokens": (getattr(usage, "input_tokens", 0) or 0) if usage else 0,
             "output_tokens": (getattr(usage, "output_tokens", 0) or 0) if usage else 0,
+            "cache_read_input_tokens": (getattr(usage, "cache_read_input_tokens", 0) or 0) if usage else 0,
+            "cache_creation_input_tokens": (getattr(usage, "cache_creation_input_tokens", 0) or 0) if usage else 0,
         }
 
     def is_available(self) -> bool:
@@ -253,7 +269,7 @@ class ClaudeClient(LLMClient):
     def client_name(self) -> str:
         return self._model
 
-    # ── Tool use (agentic loop) ──────────────────────────────────────────────────
+    # ── Tool use (agentic loop) ─────────────────────────────────────────────────────────────
 
     def call_with_tools(
         self,
@@ -297,7 +313,7 @@ class ClaudeClient(LLMClient):
             },
         }
 
-    # ── File upload ──────────────────────────────────────────────────────────────
+    # ── File upload ──────────────────────────────────────────────────────────────────────
 
     def upload_file(self, file_path: Path, mime_type: str) -> str:
         """
@@ -315,7 +331,7 @@ class ClaudeClient(LLMClient):
         self._file_cache[key] = file_id
         return file_id
 
-    # ── Chat with uploaded file ──────────────────────────────────────────────────
+    # ── Chat with uploaded file ────────────────────────────────────────────────────────────
 
     def chat_with_file(self, system: str, file_id: str, user_message: str) -> str:
         """
@@ -336,7 +352,7 @@ class ClaudeClient(LLMClient):
         )
         return response.content[0].text
 
-    # ── Extended thinking ────────────────────────────────────────────────────────
+    # ── Extended thinking ────────────────────────────────────────────────────────────────
 
     def extended_thinking_chat(
         self,
@@ -369,7 +385,7 @@ class ClaudeClient(LLMClient):
                 answer_text = block.text
         return {"thinking": thinking_text, "answer": answer_text}
 
-    # ── Streaming extended thinking ──────────────────────────────────────────────
+    # ── Streaming extended thinking ────────────────────────────────────────────────────────
 
     def stream_extended_thinking_chat(
         self,
