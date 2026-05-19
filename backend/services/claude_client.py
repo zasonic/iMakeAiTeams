@@ -31,6 +31,20 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — Cache hit reporting + extended thinking budget:
+  - chat_multi_turn, chat_unified, stream_unified, and call_with_tools now
+    include cache_read_input_tokens and cache_creation_input_tokens in their
+    returned usage dicts, mapped directly from the Anthropic API's usage
+    fields. The cost-tracker can surface actual caching savings to users
+    rather than only showing total input tokens. Falls back to 0 on any
+    SDK version that doesn't yet populate these fields.
+  - Extended thinking max_tokens raised from 16 000 to 32 000 in both
+    extended_thinking_chat() and stream_extended_thinking_chat(). Research
+    on long chain-of-thought (Claude extended thinking blog, DeepSeek-R1,
+    QwQ) consistently shows that larger output budgets allow more complete
+    answers after extended reasoning chains — the model no longer has to
+    truncate its response to fit the previous ceiling.
 """
 
 from pathlib import Path
@@ -188,6 +202,8 @@ class ClaudeClient(LLMClient):
             "text": response.content[0].text,
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
+            "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+            "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
         }
 
     def stream_multi_turn(
@@ -237,6 +253,8 @@ class ClaudeClient(LLMClient):
             "text": result.get("text", ""),
             "input_tokens": int(result.get("input_tokens", 0)),
             "output_tokens": int(result.get("output_tokens", 0)),
+            "cache_read_input_tokens": int(result.get("cache_read_input_tokens", 0)),
+            "cache_creation_input_tokens": int(result.get("cache_creation_input_tokens", 0)),
         }
 
     def stream_unified(self, system, messages, on_token, max_tokens=4096):
@@ -245,6 +263,8 @@ class ClaudeClient(LLMClient):
             "text": text or "",
             "input_tokens": (getattr(usage, "input_tokens", 0) or 0) if usage else 0,
             "output_tokens": (getattr(usage, "output_tokens", 0) or 0) if usage else 0,
+            "cache_read_input_tokens": (getattr(usage, "cache_read_input_tokens", 0) or 0) if usage else 0,
+            "cache_creation_input_tokens": (getattr(usage, "cache_creation_input_tokens", 0) or 0) if usage else 0,
         }
 
     def is_available(self) -> bool:
@@ -294,6 +314,8 @@ class ClaudeClient(LLMClient):
             "usage": {
                 "input_tokens": response.usage.input_tokens,
                 "output_tokens": response.usage.output_tokens,
+                "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
             },
         }
 
@@ -352,7 +374,7 @@ class ClaudeClient(LLMClient):
         thinking_model = model or self._model
         response = self._client.messages.create(
             model=thinking_model,
-            max_tokens=16000,
+            max_tokens=32000,
             system=system,
             thinking={
                 "type": "enabled",
@@ -417,7 +439,7 @@ class ClaudeClient(LLMClient):
             answer_text = ""
             with self._client.messages.stream(
                 model=thinking_model,
-                max_tokens=16000,
+                max_tokens=32000,
                 system=system,
                 thinking={
                     "type": "enabled",
