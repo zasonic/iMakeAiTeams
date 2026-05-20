@@ -77,20 +77,46 @@ class RAGIndex:
             pass
         return self._semantic
 
-    # ── Index construction ────────────────────────────────────────────────────
+    # ── Index construction ──────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _split_chunks(text: str, chunk_size: int = 800, overlap: int = 200) -> list[str]:
-        """Split text into overlapping character-level chunks."""
+        """
+        Split text into overlapping chunks that respect natural boundaries.
+
+        Splits are extended forward by up to 120 characters to land on a
+        paragraph break (\n\n), sentence end (. ), line break (\n), or word
+        boundary ( ) rather than cutting mid-word or mid-sentence.  The
+        chunk_size cap and overlap semantics are unchanged from the previous
+        character-level implementation so all call-sites remain compatible.
+        """
+        _LOOKAHEAD = 120  # chars to scan past the target boundary for a cleaner split
+
         chunks: list[str] = []
         start = 0
         length = len(text)
+
         while start < length:
             end = min(start + chunk_size, length)
-            chunks.append(text[start:end])
-            if end == length:
+
+            if end < length:
+                # Prefer splitting at a natural boundary just past the target end.
+                # Priority: paragraph > sentence > line > word.
+                window_end = min(end + _LOOKAHEAD, length)
+                for sep in ("\n\n", ". ", "\n", " "):
+                    idx = text.find(sep, end, window_end)
+                    if idx != -1:
+                        end = idx + len(sep)
+                        break
+
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= length:
                 break
-            start = end - overlap
+            # Advance start, keeping `overlap` chars of context from current chunk.
+            start = max(start + 1, end - overlap)
+
         return chunks
 
     def build_from_folder(
@@ -214,7 +240,7 @@ class RAGIndex:
         except Exception:
             return 0
 
-    # ── Search ────────────────────────────────────────────────────────────────
+    # ── Search ────────────────────────────────────────────────────────────────────────────
 
     def search(self, query: str, top_k: int = 5) -> list:
         """
@@ -239,7 +265,7 @@ class RAGIndex:
             log.debug(f"RAGIndex.search failed: {exc}")
             return []
 
-    # ── Persistence (legacy compatibility) ───────────────────────────────────
+    # ── Persistence (legacy compatibility) ─────────────────────────────────────────────────
 
     def save(self, path: Path) -> None:
         """
