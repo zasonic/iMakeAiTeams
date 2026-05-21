@@ -15,6 +15,15 @@ Priority 2 additions (BM25 Hybrid Search):
   - tokenize()               — shared tokeniser (identical at index and query time)
   - ingest_document() updated to also call _bm25_add_document()
 
+Performance improvements (v2):
+  - _bm25_add_document: replaced O(n) list.index() lookup with O(1) dict
+    (_bm25_id_to_idx). Cuts per-document update cost from O(n) to O(1).
+  - Lazy BM25Okapi rebuild: the in-memory BM25Okapi is no longer rebuilt on
+    every document add. _bm25_dirty is set True when the corpus changes and
+    the rebuild runs once inside _bm25_search() before the first query after
+    each batch. This reduces batch-ingest cost from O(n²) to O(n) for the
+    50-document cycles the background indexer runs.
+
 Usage:
   # Hybrid search (recommended)
   results = search_documents_hybrid("refund policy", top_k=5, method="hybrid")
@@ -51,6 +60,16 @@ _bm25_doc_ids:   list[str]       = []
 _bm25_corpus:    list[list[str]] = []   # parallel list of token arrays
 _bm25_contents:  dict[str, str]  = {}   # doc_id → raw content
 _bm25_available  = False
+
+# O(1) doc_id lookup: maps doc_id → its index in _bm25_doc_ids / _bm25_corpus.
+# Kept in sync by _bm25_rebuild_index_locked() and _bm25_add_document().
+_bm25_id_to_idx: dict[str, int] = {}
+
+# Lazy rebuild flag: set True when the corpus changes; cleared inside
+# _bm25_search() after the O(n) BM25Okapi rebuild runs. This amortises the
+# rebuild cost over all documents added since the last search instead of
+# rebuilding once per added document (O(n²) → O(n) for batch ingest).
+_bm25_dirty: bool = False
 
 try:
     from rank_bm25 import BM25Okapi  # type: ignore
@@ -166,7 +185,7 @@ def tokenize(text: str) -> list[str]:
 def _bm25_load_from_db() -> None:
     """Load BM25 corpus from SQLite bm25_corpus table and rebuild the in-memory index."""
     import json as _json
-    global _bm25_doc_ids, _bm25_corpus, _bm25_contents, _bm25_index
+    global _bm25_doc_ids, _bm25_corpus, _bm25_contents, _bm25_index, _bm25_id_to_idx, _bm25_dirty
 
     if not _bm25_available:
         return
@@ -181,14 +200,17 @@ def _bm25_load_from_db() -> None:
         _bm25_doc_ids  = [r["doc_id"] for r in rows]
         _bm25_corpus   = [_json.loads(r["tokens"]) for r in rows]
         _bm25_contents = {r["doc_id"]: r["content"] for r in rows}
-        _bm25_rebuild_index_locked()
+        _bm25_dirty    = False  # corpus just loaded; rebuild runs fresh below
+        _bm25_rebuild_index_locked()  # also rebuilds _bm25_id_to_idx
 
     log.info("BM25: loaded %d documents from corpus.", len(_bm25_doc_ids))
 
 
 def _bm25_rebuild_index_locked() -> None:
-    """Rebuild BM25Okapi. Must be called with _bm25_lock held."""
-    global _bm25_index
+    """Rebuild BM25Okapi and the doc_id→index map. Must be called with _bm25_lock held."""
+    global _bm25_index, _bm25_id_to_idx
+    # Rebuild the O(1) lookup map in sync with the corpus list.
+    _bm25_id_to_idx = {doc_id: i for i, doc_id in enumerate(_bm25_doc_ids)}
     if not _bm25_available or not _bm25_corpus:
         _bm25_index = None
         return
@@ -198,7 +220,15 @@ def _bm25_rebuild_index_locked() -> None:
 def _bm25_add_document(doc_id: str, content: str, metadata: dict | None = None) -> None:
     """
     Add or replace a document in the BM25 corpus (SQLite + in-memory).
-    Thread-safe. Rebuilds the in-memory index after mutation.
+    Thread-safe.
+
+    The in-memory BM25Okapi is NOT rebuilt here — _bm25_dirty is set True
+    and the rebuild is deferred to the next _bm25_search() call. This cuts
+    batch-ingestion cost from O(n²) (one full rebuild per doc) to O(n)
+    (one rebuild per search request after a batch).
+
+    The _bm25_id_to_idx dict is updated in O(1) so searches can still find
+    the doc's position without a linear scan.
     """
     import json as _json
     if not _bm25_available:
@@ -225,22 +255,31 @@ def _bm25_add_document(doc_id: str, content: str, metadata: dict | None = None) 
         return
 
     with _bm25_lock:
-        if doc_id in _bm25_contents:
-            idx = _bm25_doc_ids.index(doc_id)
-            _bm25_corpus[idx] = tokens
+        global _bm25_dirty
+        if doc_id in _bm25_id_to_idx:
+            # Update existing entry in O(1) — no list.index() scan needed.
+            _bm25_corpus[_bm25_id_to_idx[doc_id]] = tokens
         else:
+            # New entry: record its index before appending so the dict stays
+            # in sync without a rebuild (O(1) total).
+            _bm25_id_to_idx[doc_id] = len(_bm25_doc_ids)
             _bm25_doc_ids.append(doc_id)
             _bm25_corpus.append(tokens)
         _bm25_contents[doc_id] = content
-        _bm25_rebuild_index_locked()
+        # Defer the O(n) BM25Okapi rebuild to the next search call.
+        _bm25_dirty = True
 
 
 def _bm25_search(query: str, n: int = 50) -> list[tuple[str, float]]:
     """
     BM25 search. Returns (doc_id, score) tuples sorted descending.
     Returns empty list if BM25 unavailable or corpus is empty.
+
+    Lazy index rebuild: if _bm25_dirty is True (documents were added since
+    the last search), BM25Okapi is rebuilt once before scoring. This is the
+    O(n) cost that was previously paid on every document add.
     """
-    if not _bm25_available or _bm25_index is None or not _bm25_doc_ids:
+    if not _bm25_available or not _bm25_doc_ids:
         return []
 
     query_tokens = tokenize(query)
@@ -248,6 +287,12 @@ def _bm25_search(query: str, n: int = 50) -> list[tuple[str, float]]:
         return []
 
     with _bm25_lock:
+        global _bm25_dirty
+        if _bm25_dirty:
+            _bm25_rebuild_index_locked()
+            _bm25_dirty = False
+        if _bm25_index is None:
+            return []
         scores  = _bm25_index.get_scores(query_tokens)
         doc_ids = list(_bm25_doc_ids)
 

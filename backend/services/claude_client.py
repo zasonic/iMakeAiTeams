@@ -31,6 +31,13 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — Resilience improvement:
+  - Raised max_retries from the SDK default (2) to 4. The Anthropic Python SDK
+    retries APIConnectionError, APITimeoutError, and rate-limit (429) errors
+    with exponential backoff automatically. Agentic sessions that chain many
+    API calls are far more likely to hit transient rate limits; 4 retries gives
+    the quota window time to reset without surfacing an error to the user.
 """
 
 from pathlib import Path
@@ -55,7 +62,10 @@ class ClaudeClient(LLMClient):
     """
 
     def __init__(self, api_key: str, model: str, use_caching: bool = True):
-        self._client = Anthropic(api_key=api_key)
+        # max_retries=4: the SDK retries rate-limit (429), connection, and
+        # timeout errors with exponential backoff. Default is 2; 4 retries
+        # keeps agentic multi-step sessions alive through brief quota windows.
+        self._client = Anthropic(api_key=api_key, max_retries=4)
         self._model = model
         self._use_caching = use_caching
         self._file_cache: dict[str, str] = {}  # file_path -> file_id
@@ -69,7 +79,8 @@ class ClaudeClient(LLMClient):
         use_caching: bool | None = None,
     ) -> None:
         if api_key is not None and api_key != getattr(self._client, "api_key", None):
-            self._client = Anthropic(api_key=api_key)
+            # Preserve max_retries=4 when the key is rotated.
+            self._client = Anthropic(api_key=api_key, max_retries=4)
         if model is not None:
             self._model = model
         if use_caching is not None:
