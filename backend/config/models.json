@@ -8,6 +8,7 @@
     "output_price_per_mtok":   "USD per million output tokens",
     "context_window_tokens":   "max context window the API will accept",
     "vision":                  "true if the model accepts image content blocks",
+    "extended_thinking":       "true if the model accepts thinking: {type: 'enabled', budget_tokens: N}",
     "available_via":           "['claude_api'] — kept as a list so future entries can declare 'local_bundled' or 'local_byo'"
   },
   "default_claude_id": "claude-sonnet-4-6",
@@ -20,6 +21,7 @@
       "output_price_per_mtok": 75.0,
       "context_window_tokens": 200000,
       "vision":                true,
+      "extended_thinking":     true,
       "available_via":         ["claude_api"]
     },
     {
@@ -30,6 +32,7 @@
       "output_price_per_mtok": 75.0,
       "context_window_tokens": 200000,
       "vision":                true,
+      "extended_thinking":     true,
       "available_via":         ["claude_api"]
     },
     {
@@ -40,6 +43,7 @@
       "output_price_per_mtok": 15.0,
       "context_window_tokens": 200000,
       "vision":                true,
+      "extended_thinking":     true,
       "available_via":         ["claude_api"]
     },
     {
@@ -50,6 +54,7 @@
       "output_price_per_mtok": 4.0,
       "context_window_tokens": 200000,
       "vision":                true,
+      "extended_thinking":     false,
       "available_via":         ["claude_api"]
     }
   ],

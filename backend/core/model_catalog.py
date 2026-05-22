@@ -47,6 +47,7 @@ class ModelEntry:
     output_price_per_mtok:    float
     context_window_tokens:    int
     vision:                   bool
+    extended_thinking:        bool      # true if thinking:{type:"enabled"} is accepted
     available_via:            tuple[str, ...]
 
     def to_dict(self) -> dict:
@@ -58,6 +59,7 @@ class ModelEntry:
             "output_price_per_mtok":    self.output_price_per_mtok,
             "context_window_tokens":    self.context_window_tokens,
             "vision":                   self.vision,
+            "extended_thinking":        self.extended_thinking,
             "available_via":            list(self.available_via),
         }
 
@@ -141,6 +143,11 @@ def _parse_catalog(raw: dict, source: Path) -> Catalog:
                 output_price_per_mtok=    float(row["output_price_per_mtok"]),
                 context_window_tokens=    int(row["context_window_tokens"]),
                 vision=                   bool(row["vision"]),
+                # Older catalog files without the field default to opus/sonnet=True,
+                # haiku=False so pre-existing installs degrade safely.
+                extended_thinking=        bool(
+                    row.get("extended_thinking", str(row.get("family", "")).lower() != "haiku")
+                ),
                 available_via=            tuple(str(v) for v in (row.get("available_via") or [])),
             ))
         except (KeyError, TypeError, ValueError) as exc:
