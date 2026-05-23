@@ -350,9 +350,13 @@ class ClaudeClient(LLMClient):
         Returns a dict with keys "thinking" and "answer".
         """
         thinking_model = model or self._model
+        # Anthropic requires max_tokens > budget_tokens.
+        # Reserve 2 000 tokens for the answer after thinking; cap at 32 000
+        # so this stays within every current model's limit.
+        max_tokens = min(32000, max(16000, budget_tokens + 2000))
         response = self._client.messages.create(
             model=thinking_model,
-            max_tokens=16000,
+            max_tokens=max_tokens,
             system=system,
             thinking={
                 "type": "enabled",
@@ -411,13 +415,16 @@ class ClaudeClient(LLMClient):
         gracefully rather than hard-fail.
         """
         thinking_model = model or self._model
+        # Same max_tokens guard as extended_thinking_chat — Anthropic requires
+        # max_tokens > budget_tokens; cap at 32 000 for cross-model safety.
+        max_tokens = min(32000, max(16000, budget_tokens + 2000))
 
         try:
             thinking_text = ""
             answer_text = ""
             with self._client.messages.stream(
                 model=thinking_model,
-                max_tokens=16000,
+                max_tokens=max_tokens,
                 system=system,
                 thinking={
                     "type": "enabled",
