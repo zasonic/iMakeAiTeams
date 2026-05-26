@@ -111,7 +111,6 @@ class RAGIndex:
             log.warning("RAGIndex.build_from_folder: semantic_search not available; skipping.")
             return
 
-        # First pass: count files for progress reporting
         all_files = []
         for root, _dirs, files in os.walk(folder):
             for filename in sorted(files):
@@ -218,14 +217,17 @@ class RAGIndex:
 
     def search(self, query: str, top_k: int = 5) -> list:
         """
-        Return the top_k most semantically similar chunks.
+        Return the top_k most relevant chunks using hybrid BM25 + vector search.
+
+        Hybrid search combines BM25 keyword matching with semantic vector
+        similarity via Reciprocal Rank Fusion, improving recall for
+        keyword-heavy queries (function names, file paths, specific terms)
+        that pure semantic search underweights. Falls back to vector-only
+        search on any hybrid failure so results never silently go empty.
 
         Return type:
           list[(text: str, score: float)]   — when semantic_search is available
           list[]                             — when unavailable
-
-        memory.py handles both plain strings and (text, score) tuples; returning
-        scored tuples enables the similarity threshold filter in MemoryManager.
         """
         ss = self._get_semantic()
         if ss is None:
@@ -233,11 +235,16 @@ class RAGIndex:
         if not query.strip():
             return []
         try:
-            results = ss.search_documents(query, top_k=top_k)
+            results = ss.search_documents_hybrid(query, top_k=top_k)
             return [(r["content"], r["score"]) for r in results]
         except Exception as exc:
-            log.debug(f"RAGIndex.search failed: {exc}")
-            return []
+            log.debug("RAGIndex.search (hybrid) failed: %s — falling back to vector.", exc)
+            try:
+                results = ss.search_documents(query, top_k=top_k)
+                return [(r["content"], r["score"]) for r in results]
+            except Exception as exc2:
+                log.debug("RAGIndex.search (vector fallback) failed: %s", exc2)
+                return []
 
     # ── Persistence (legacy compatibility) ───────────────────────────────────
 
@@ -282,7 +289,6 @@ class RAGIndex:
                     "RAGIndex: migrated %d legacy chunks into ChromaDB.", len(chunks)
                 )
 
-            # Remove legacy files so we don't re-ingest on next startup
             for legacy_file in (path, chunks_path):
                 try:
                     if legacy_file.exists():
