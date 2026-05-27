@@ -3,34 +3,26 @@ services/claude_client.py
 
 Sole wrapper around the Anthropic SDK.
 
-Fixes applied:
-  - stream_multi_turn returns (text, usage) tuple so callers can track tokens
-  - Removed stale prompt-caching beta header (caching is now GA; cache_control
-    blocks still work without it)
-  - Files API beta header comment updated
+v6.0 — Extended cache TTL + adaptive thinking + streaming tool use:
+  - Extended cache TTL (1 hour): cache_control blocks now use ttl="1h" with
+    the extended-cache-ttl-2025-04-11 beta header. Cache reads stay at 0.1x
+    cost while the longer window covers multi-session agent workloads. The
+    feature is 13+ months old and fully stable.
+  - Adaptive thinking: extended_thinking_chat() and
+    stream_extended_thinking_chat() now detect Sonnet 4.6 / Opus 4.7 and
+    use {"type": "adaptive"} instead of a fixed budget_tokens budget. The
+    model selects the minimal reasoning budget for each turn automatically,
+    which lowers cost on simple sub-tasks while reserving depth for complex
+    ones. budget_tokens is still honoured on older models via the fallback
+    path so this is strictly additive.
+  - stream_with_tools(): new method that streams text tokens from a tool-use
+    request via on_text_token, then returns the same dict shape as
+    call_with_tools(). The agentic loop sees streaming output during the
+    "thinking-before-tool" phase instead of a frozen spinner. Falls back
+    transparently to call_with_tools() on any stream error.
 
-v4.3 — System-prompt caching in multi-turn paths:
-  - _build_system_with_cache() wraps the system parameter in a cache_control
-    block when use_caching=True. Multi-turn calls (chat_multi_turn,
-    stream_multi_turn, call_with_tools) now benefit from the same
-    90%-token-discount on repeated system prompts that single-turn calls
-    already got via _build_content().
-  - Cache TTL is 5 minutes (Anthropic ephemeral default). Turns within that
-    window share a cached prompt; longer gaps fall back to a full token read.
-  - Blocks below Anthropic's 1,024-token minimum are silently passed through
-    uncached, so short prompts degrade safely.
-
-v5.1 — Caching + streaming-thinking enhancements:
-  - System-prompt caching is now applied uniformly across every multi-turn
-    code path, cutting input-token cost on follow-up turns by 50–80% on
-    long system prompts.
-  - New stream_extended_thinking_chat() delivers thinking + answer tokens
-    in real-time via on_thinking_token / on_text_token callbacks, letting
-    the UI render the reasoning timeline as it arrives instead of blocking
-    for a full round-trip. Falls back gracefully to extended_thinking_chat()
-    when the model/API version does not support streaming-thinking events.
-  - Bumped Anthropic SDK requirement to >=0.50.0 for stable
-    thinking_delta / text_delta event types in messages.stream().
+v5.1 — Caching + streaming-thinking enhancements.
+v4.3 — System-prompt caching in multi-turn paths.
 """
 
 from pathlib import Path
@@ -60,6 +52,19 @@ class ClaudeClient(LLMClient):
         self._use_caching = use_caching
         self._file_cache: dict[str, str] = {}  # file_path -> file_id
 
+    # ── API helpers ──────────────────────────────────────────────────────────────
+
+    def _get_cache_beta_headers(self) -> dict:
+        """Return extra headers needed for 1-hour cache TTL when caching is on."""
+        if self._use_caching:
+            return {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
+        return {}
+
+    def _supports_adaptive_thinking(self, model: str | None = None) -> bool:
+        """True for models that support adaptive thinking (Sonnet 4.6+, Opus 4.7+)."""
+        m = (model or self._model).lower()
+        return "opus-4-7" in m or "sonnet-4-6" in m
+
     # ── Configuration ────────────────────────────────────────────────────────────
 
     def update_config(
@@ -88,7 +93,7 @@ class ClaudeClient(LLMClient):
             content.append({
                 "type": "text",
                 "text": project_summary,
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
             })
         content.append({"type": "text", "text": user_message})
         return content
@@ -116,7 +121,7 @@ class ClaudeClient(LLMClient):
             silently ignores cache_control in that case, so no error occurs)
         """
         if self._use_caching and system:
-            return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+            return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
         return system
 
     # ── Single-turn chat ─────────────────────────────────────────────────────────
@@ -131,6 +136,8 @@ class ClaudeClient(LLMClient):
             "system": system,
             "messages": [{"role": "user", "content": content}],
         }
+        if headers := self._get_cache_beta_headers():
+            kwargs["extra_headers"] = headers
         response = self._client.messages.create(**kwargs)
         return response.content[0].text
 
@@ -155,6 +162,8 @@ class ClaudeClient(LLMClient):
             "system": system,
             "messages": [{"role": "user", "content": content}],
         }
+        if headers := self._get_cache_beta_headers():
+            kwargs["extra_headers"] = headers
         full_text = ""
         with self._client.messages.stream(**kwargs) as stream:
             for token in stream.text_stream:
@@ -183,6 +192,8 @@ class ClaudeClient(LLMClient):
             "system": self._build_system_with_cache(system),
             "messages": messages,
         }
+        if headers := self._get_cache_beta_headers():
+            kwargs["extra_headers"] = headers
         response = self._client.messages.create(**kwargs)
         return {
             "text": response.content[0].text,
@@ -217,6 +228,8 @@ class ClaudeClient(LLMClient):
             "system": self._build_system_with_cache(system),
             "messages": messages,
         }
+        if headers := self._get_cache_beta_headers():
+            kwargs["extra_headers"] = headers
         full_text = ""
         usage = None
         with self._client.messages.stream(**kwargs) as stream:
@@ -276,6 +289,8 @@ class ClaudeClient(LLMClient):
             "messages": messages,
             "tools": tools,
         }
+        if headers := self._get_cache_beta_headers():
+            kwargs["extra_headers"] = headers
         response = self._client.messages.create(**kwargs)
         content = []
         for block in response.content:
@@ -296,6 +311,72 @@ class ClaudeClient(LLMClient):
                 "output_tokens": response.usage.output_tokens,
             },
         }
+
+    def stream_with_tools(
+        self,
+        system: str,
+        messages: list,
+        tools: list,
+        on_text_token: Callable[[str], None] | None = None,
+        max_tokens: int = 8192,
+    ) -> dict:
+        """
+        Stream a tool-use request, dispatching text tokens to on_text_token as
+        they arrive, then returning the full structured result once the stream
+        closes.
+
+        The agentic loop sees text output during the "thinking-before-tool"
+        phase instead of a frozen spinner. Tool-use blocks are collected from
+        the final message after the stream ends, so the caller gets complete,
+        parseable tool calls even when the model streams text first.
+
+        Returns the same dict shape as call_with_tools():
+          {"content": [...], "stop_reason": "end_turn"|"tool_use", "usage": {...}}
+
+        Falls back to call_with_tools() on any stream error so the agentic
+        loop always gets a valid response.
+        """
+        kwargs: dict = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "system": self._build_system_with_cache(system),
+            "messages": messages,
+            "tools": tools,
+        }
+        if headers := self._get_cache_beta_headers():
+            kwargs["extra_headers"] = headers
+        try:
+            with self._client.messages.stream(**kwargs) as stream:
+                for token in stream.text_stream:
+                    if on_text_token is not None:
+                        on_text_token(token)
+                final = stream.get_final_message()
+            content = []
+            for block in final.content:
+                if block.type == "text":
+                    content.append({"type": "text", "text": block.text})
+                elif block.type == "tool_use":
+                    content.append({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    })
+            return {
+                "content": content,
+                "stop_reason": final.stop_reason,
+                "usage": {
+                    "input_tokens": final.usage.input_tokens,
+                    "output_tokens": final.usage.output_tokens,
+                },
+            }
+        except Exception:
+            return self.call_with_tools(
+                system=system,
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens,
+            )
 
     # ── File upload ──────────────────────────────────────────────────────────────
 
@@ -350,14 +431,15 @@ class ClaudeClient(LLMClient):
         Returns a dict with keys "thinking" and "answer".
         """
         thinking_model = model or self._model
+        if self._supports_adaptive_thinking(thinking_model):
+            thinking_config: dict = {"type": "adaptive"}
+        else:
+            thinking_config = {"type": "enabled", "budget_tokens": budget_tokens}
         response = self._client.messages.create(
             model=thinking_model,
             max_tokens=16000,
             system=system,
-            thinking={
-                "type": "enabled",
-                "budget_tokens": budget_tokens,
-            },
+            thinking=thinking_config,
             messages=[{"role": "user", "content": user_message}],
         )
         thinking_text = ""
@@ -411,6 +493,10 @@ class ClaudeClient(LLMClient):
         gracefully rather than hard-fail.
         """
         thinking_model = model or self._model
+        if self._supports_adaptive_thinking(thinking_model):
+            thinking_config: dict = {"type": "adaptive"}
+        else:
+            thinking_config = {"type": "enabled", "budget_tokens": budget_tokens}
 
         try:
             thinking_text = ""
@@ -419,10 +505,7 @@ class ClaudeClient(LLMClient):
                 model=thinking_model,
                 max_tokens=16000,
                 system=system,
-                thinking={
-                    "type": "enabled",
-                    "budget_tokens": budget_tokens,
-                },
+                thinking=thinking_config,
                 messages=[{"role": "user", "content": user_message}],
             ) as stream:
                 for event in stream:

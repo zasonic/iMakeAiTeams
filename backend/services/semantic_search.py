@@ -195,10 +195,22 @@ def _bm25_rebuild_index_locked() -> None:
     _bm25_index = BM25Okapi(_bm25_corpus)
 
 
-def _bm25_add_document(doc_id: str, content: str, metadata: dict | None = None) -> None:
+def _bm25_add_document(
+    doc_id: str,
+    content: str,
+    metadata: dict | None = None,
+    *,
+    defer_rebuild: bool = False,
+) -> None:
     """
     Add or replace a document in the BM25 corpus (SQLite + in-memory).
-    Thread-safe. Rebuilds the in-memory index after mutation.
+    Thread-safe.
+
+    defer_rebuild=True skips the O(corpus) index rebuild so bulk ingestion
+    can call this N times and rebuild once at the end.  The caller is
+    responsible for calling ``with _bm25_lock: _bm25_rebuild_index_locked()``
+    after the batch is complete.  Single-document callers should keep the
+    default defer_rebuild=False.
     """
     import json as _json
     if not _bm25_available:
@@ -232,7 +244,8 @@ def _bm25_add_document(doc_id: str, content: str, metadata: dict | None = None) 
             _bm25_doc_ids.append(doc_id)
             _bm25_corpus.append(tokens)
         _bm25_contents[doc_id] = content
-        _bm25_rebuild_index_locked()
+        if not defer_rebuild:
+            _bm25_rebuild_index_locked()
 
 
 def _bm25_search(query: str, n: int = 50) -> list[tuple[str, float]]:
@@ -395,7 +408,7 @@ def search_documents_hybrid(
     return out
 
 
-# ── Background embedding indexer (unchanged) ──────────────────────────────────
+# ── Background embedding indexer ──────────────────────────────────────────────
 
 def _index_dirty_documents(batch_size: int = 50) -> int:
     if not _initialized:
@@ -408,15 +421,27 @@ def _index_dirty_documents(batch_size: int = 50) -> int:
     if not rows:
         return 0
 
-    ids_to_mark = []
-    for r in rows:
-        if not r["content"] or not r["content"].strip():
-            continue
-        doc_id = r["id"]
+    # Filter to non-empty content rows only
+    valid_rows = [r for r in rows if r["content"] and r["content"].strip()]
+    if not valid_rows:
+        return 0
+
+    # Batch-embed all texts in one fastembed call — significantly faster than
+    # one-at-a-time embedding because fastembed batches ONNX inference.
+    try:
+        all_vecs = _embed([r["content"] for r in valid_rows])
+    except Exception as exc:
+        log.error("Batch document embed failed: %s", exc)
+        return 0
+
+    ids_to_mark: list[str] = []
+    bm25_pending: list[tuple[str, str, dict]] = []
+
+    for r, vec in zip(valid_rows, all_vecs):
+        doc_id  = r["id"]
         content = r["content"]
         try:
-            vecs = _embed([content])
-            vec_blob = _serialize(vecs[0])
+            vec_blob = _serialize(vec)
 
             existing = db.fetchone(
                 "SELECT vec_rowid FROM vec_documents_map WHERE doc_id = ?",
@@ -445,12 +470,22 @@ def _index_dirty_documents(batch_size: int = 50) -> int:
                 )
 
             ids_to_mark.append(doc_id)
-
-            meta = {"source": r["source"] or "", "doc_type": r["doc_type"] or "text"}
-            _bm25_add_document(doc_id, content, meta)
+            bm25_pending.append((
+                doc_id, content,
+                {"source": r["source"] or "", "doc_type": r["doc_type"] or "text"},
+            ))
 
         except Exception as exc:
             log.error("Document embed failed for %s: %s", doc_id, exc)
+
+    # BM25 updates: defer per-doc rebuilds and rebuild the index exactly once
+    # for the whole batch — rebuilding BM25Okapi is O(corpus), so doing it once
+    # instead of N times drops indexer cost from O(N²) to O(N).
+    for doc_id, content, meta in bm25_pending:
+        _bm25_add_document(doc_id, content, meta, defer_rebuild=True)
+    if bm25_pending:
+        with _bm25_lock:
+            _bm25_rebuild_index_locked()
 
     if ids_to_mark:
         db.executemany(
@@ -472,15 +507,23 @@ def _index_dirty_memories(batch_size: int = 50) -> int:
     if not rows:
         return 0
 
-    ids_to_mark = []
-    for r in rows:
-        if not r["content"] or not r["content"].strip():
-            continue
+    valid_rows = [r for r in rows if r["content"] and r["content"].strip()]
+    if not valid_rows:
+        return 0
+
+    # Batch embed all memory texts in one call
+    try:
+        all_vecs = _embed([r["content"] for r in valid_rows])
+    except Exception as exc:
+        log.error("Batch memory embed failed: %s", exc)
+        return 0
+
+    ids_to_mark: list[str] = []
+
+    for r, vec in zip(valid_rows, all_vecs):
         memory_id = r["id"]
-        content = r["content"]
         try:
-            vecs = _embed([content])
-            vec_blob = _serialize(vecs[0])
+            vec_blob = _serialize(vec)
 
             existing = db.fetchone(
                 "SELECT vec_rowid FROM vec_memories_map WHERE memory_id = ?",
