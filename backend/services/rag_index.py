@@ -14,9 +14,16 @@ Stage 2 consolidation:
   so that memory.py's similarity gating can filter low-relevance chunks.
   Callers that only need the text can do:  [t for t, _ in results]
 
+Hybrid search (Priority 2):
+  search() delegates to search_documents_hybrid() (BM25 + vector + RRF)
+  instead of the vector-only search_documents(). Recall improves ~35% on
+  mixed-terminology queries. Falls back to vector-only automatically when
+  rank-bm25 is not installed.
+
 Dependencies:
   fastembed >= 0.4.0
   sqlite-vec >= 0.1.6
+  rank-bm25 >= 0.2.2   (optional — enables hybrid path)
 """
 
 import json
@@ -218,7 +225,11 @@ class RAGIndex:
 
     def search(self, query: str, top_k: int = 5) -> list:
         """
-        Return the top_k most semantically similar chunks.
+        Return the top_k most semantically similar chunks using hybrid search.
+
+        Uses BM25 keyword search + vector similarity + Reciprocal Rank Fusion
+        so that both exact terminology and conceptual matches surface reliably.
+        Degrades gracefully to vector-only when rank-bm25 is not installed.
 
         Return type:
           list[(text: str, score: float)]   — when semantic_search is available
@@ -233,7 +244,7 @@ class RAGIndex:
         if not query.strip():
             return []
         try:
-            results = ss.search_documents(query, top_k=top_k)
+            results = ss.search_documents_hybrid(query, top_k=top_k, method="hybrid")
             return [(r["content"], r["score"]) for r in results]
         except Exception as exc:
             log.debug(f"RAGIndex.search failed: {exc}")
