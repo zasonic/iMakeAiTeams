@@ -1,3 +1,18 @@
+> # ⚠️ Deprecated — development has moved to AltoSymbioAgents
+>
+> This repository is one of three divergent copies of the same application.
+> As of **2026-05-29** it has been retired in favour of a single canonical repo:
+>
+> ### → https://github.com/zasonic/AltoSymbioAgents
+>
+> The canonical repo was seeded from `AltoSymbiosisAgents` (the most complete
+> copy). **Note:** this copy's unique "Power Mode" (Docker/OpenClaw task
+> execution) was intentionally **not** carried over; every other feature and fix
+> already exists in the canonical repo. Please use it for all new work. This
+> repository is no longer maintained and will be archived (read-only).
+
+---
+
 # iMakeAiTeams
 
 Build AI teams that work together on your desktop. Chat with Claude and
