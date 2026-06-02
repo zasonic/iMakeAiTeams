@@ -22,7 +22,7 @@ v4.3 — System-prompt caching in multi-turn paths:
 
 v5.1 — Caching + streaming-thinking enhancements:
   - System-prompt caching is now applied uniformly across every multi-turn
-    code path, cutting input-token cost on follow-up turns by 50–80% on
+    code path, cutting input-token cost on follow-up turns by 50-80% on
     long system prompts.
   - New stream_extended_thinking_chat() delivers thinking + answer tokens
     in real-time via on_thinking_token / on_text_token callbacks, letting
@@ -31,6 +31,14 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — Adaptive thinking via effort parameter:
+  - extended_thinking_chat() and stream_extended_thinking_chat() now accept
+    an optional effort="low"|"medium"|"high" keyword that maps to sensible
+    budget_tokens defaults (2 k / 8 k / 20 k), mirroring the ergonomics of
+    the Anthropic API's own effort controls.
+  - Passing effort= overrides budget_tokens; omitting both keeps the existing
+    budget_tokens default so all existing call sites are backward-compatible.
 """
 
 from pathlib import Path
@@ -39,6 +47,10 @@ from typing import Callable
 from anthropic import Anthropic
 
 from services.llm_interface import LLMClient
+
+# Human-friendly effort levels mapped to extended-thinking budget_tokens.
+# Callers that need a precise token count can still pass budget_tokens directly.
+_EFFORT_BUDGET: dict[str, int] = {"low": 2_000, "medium": 8_000, "high": 20_000}
 
 
 class ClaudeClient(LLMClient):
@@ -100,9 +112,9 @@ class ClaudeClient(LLMClient):
         When prompt caching is enabled and the system string is non-empty, the
         prompt is wrapped in an ephemeral cache_control block.  This lets the
         API cache the compiled token representation for up to 5 minutes, so
-        consecutive turns that share the same system prompt pay only 0.1× the
+        consecutive turns that share the same system prompt pay only 0.1x the
         normal input-token rate on cache reads (90% savings, which translates
-        to roughly 50–80% lower input-token cost on a typical multi-turn
+        to roughly 50-80% lower input-token cost on a typical multi-turn
         conversation that re-sends the same system prompt every turn).
 
         The Messages API accepts both string and list-of-content-blocks forms
@@ -344,11 +356,21 @@ class ClaudeClient(LLMClient):
         user_message: str,
         budget_tokens: int = 10000,
         model: str | None = None,
+        effort: str | None = None,
     ) -> dict:
         """
         Run a chat with extended thinking enabled.
+
+        Args:
+            effort: Optional shorthand — "low" (2k), "medium" (8k), "high" (20k).
+                    When provided it overrides budget_tokens, letting callers
+                    express intent without tuning a raw token count.
+
         Returns a dict with keys "thinking" and "answer".
         """
+        if effort is not None:
+            budget_tokens = _EFFORT_BUDGET.get(effort.lower(), budget_tokens)
+
         thinking_model = model or self._model
         response = self._client.messages.create(
             model=thinking_model,
@@ -379,6 +401,7 @@ class ClaudeClient(LLMClient):
         model: str | None = None,
         on_thinking_token: Callable[[str], None] | None = None,
         on_text_token: Callable[[str], None] | None = None,
+        effort: str | None = None,
     ) -> dict:
         """
         Stream an extended-thinking chat, dispatching reasoning and answer
@@ -398,6 +421,9 @@ class ClaudeClient(LLMClient):
             result dict but no per-chunk dispatch happens.
         on_text_token
             Optional callback invoked with each answer-text-delta string.
+        effort
+            Optional shorthand — "low" (2k), "medium" (8k), "high" (20k).
+            Overrides budget_tokens when supplied.
 
         Returns
         -------
@@ -410,6 +436,9 @@ class ClaudeClient(LLMClient):
         models that don't yet emit thinking_delta events will degrade
         gracefully rather than hard-fail.
         """
+        if effort is not None:
+            budget_tokens = _EFFORT_BUDGET.get(effort.lower(), budget_tokens)
+
         thinking_model = model or self._model
 
         try:
