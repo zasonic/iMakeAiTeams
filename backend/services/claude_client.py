@@ -1,5 +1,5 @@
 """
-services/claude_client.py
+backend/services/claude_client.py
 
 Sole wrapper around the Anthropic SDK.
 
@@ -31,6 +31,16 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — Extended system-prompt caching to single-turn paths:
+  - chat() and stream_chat() now route `system` through
+    _build_system_with_cache(), matching the caching already applied by
+    chat_multi_turn / stream_multi_turn since v4.3.
+  - Single-turn calls with long system prompts (agent tool scaffolding,
+    batch jobs, repeated classifier calls) now benefit from the same
+    90% cache-read discount on repeated prompts within the 5-minute TTL.
+  - Degrades silently to a plain string when caching is disabled or the
+    prompt is below Anthropic's 1,024-token minimum — zero risk.
 """
 
 from pathlib import Path
@@ -123,12 +133,19 @@ class ClaudeClient(LLMClient):
 
     def chat(self, system: str, project_summary: str, user_message: str,
              max_tokens: int = 4096) -> str:
-        """Send a single-turn chat and return the response as a plain string."""
+        """Send a single-turn chat and return the response as a plain string.
+
+        The system prompt is routed through _build_system_with_cache() so that
+        repeated single-turn calls with the same system prompt within the
+        5-minute cache window pay the cache-read rate (90% input-token savings
+        on the system-prompt portion). Matches the caching already applied to
+        multi-turn paths since v4.3.
+        """
         content = self._build_content(project_summary, user_message)
         kwargs: dict = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._build_system_with_cache(system),
             "messages": [{"role": "user", "content": content}],
         }
         response = self._client.messages.create(**kwargs)
@@ -147,12 +164,18 @@ class ClaudeClient(LLMClient):
         """
         Stream a chat response, calling on_token for each text token.
         Returns the full concatenated response string when done.
+
+        The system prompt is routed through _build_system_with_cache() so that
+        repeated streaming calls with the same system prompt within the
+        5-minute cache window pay the cache-read rate (90% input-token savings
+        on the system-prompt portion). Matches the caching already applied to
+        stream_multi_turn since v4.3.
         """
         content = self._build_content(project_summary, user_message)
         kwargs: dict = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": self._build_system_with_cache(system),
             "messages": [{"role": "user", "content": content}],
         }
         full_text = ""
