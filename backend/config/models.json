@@ -13,9 +13,19 @@
   "default_claude_id": "claude-sonnet-4-6",
   "models": [
     {
+      "id":                    "claude-opus-4-8",
+      "family":                "opus",
+      "display_name":          "Claude Opus 4.8",
+      "input_price_per_mtok":  15.0,
+      "output_price_per_mtok": 75.0,
+      "context_window_tokens": 200000,
+      "vision":                true,
+      "available_via":         ["claude_api"]
+    },
+    {
       "id":                    "claude-opus-4-7",
       "family":                "opus",
-      "display_name":          "Claude Opus 4.7",
+      "display_name":          "Claude Opus 4.7 (superseded)",
       "input_price_per_mtok":  15.0,
       "output_price_per_mtok": 75.0,
       "context_window_tokens": 200000,
@@ -25,7 +35,7 @@
     {
       "id":                    "claude-opus-4-6",
       "family":                "opus",
-      "display_name":          "Claude Opus 4.6",
+      "display_name":          "Claude Opus 4.6 (superseded)",
       "input_price_per_mtok":  15.0,
       "output_price_per_mtok": 75.0,
       "context_window_tokens": 200000,

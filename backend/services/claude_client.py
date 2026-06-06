@@ -336,6 +336,46 @@ class ClaudeClient(LLMClient):
         )
         return response.content[0].text
 
+    # ── Extended thinking helpers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _uses_adaptive_thinking(model_id: str) -> bool:
+        """
+        Return True for models that require adaptive thinking (type="adaptive",
+        effort=) instead of the legacy budget_tokens API.
+
+        Anthropic deprecated budget_tokens on Opus 4.7 and 4.8; passing it
+        returns a 400 error. All Opus 4.7+ models use adaptive thinking.
+        Sonnet 4.6 and Opus 4.6 still accept budget_tokens.
+        """
+        m = (model_id or "").lower()
+        _ADAPTIVE = ("opus-4-7", "opus-4-8", "opus-4-9", "opus-5")
+        return any(tag in m for tag in _ADAPTIVE)
+
+    @staticmethod
+    def _budget_to_effort(budget_tokens: int) -> str:
+        """Map a legacy budget_tokens value to the nearest adaptive effort level."""
+        if budget_tokens >= 16000:
+            return "high"
+        if budget_tokens >= 5000:
+            return "medium"
+        return "low"
+
+    def _thinking_params(self, model_id: str, budget_tokens: int) -> tuple[dict, int]:
+        """
+        Return (thinking_kwargs, max_tokens) for a given model and budget.
+
+        Opus 4.7/4.8 → adaptive thinking + 32k max_tokens (supports 128k output,
+        but 32k is a conservative default that avoids runaway latency).
+        All other models → legacy budget_tokens + 16k max_tokens.
+        """
+        if self._uses_adaptive_thinking(model_id):
+            return (
+                {"type": "adaptive", "effort": self._budget_to_effort(budget_tokens)},
+                32000,
+            )
+        return {"type": "enabled", "budget_tokens": budget_tokens}, 16000
+
     # ── Extended thinking ────────────────────────────────────────────────────────
 
     def extended_thinking_chat(
@@ -348,16 +388,19 @@ class ClaudeClient(LLMClient):
         """
         Run a chat with extended thinking enabled.
         Returns a dict with keys "thinking" and "answer".
+
+        Automatically selects the correct thinking API for the model:
+        - Opus 4.7/4.8+: adaptive thinking (type="adaptive", effort=)
+        - Sonnet 4.6 / Opus 4.6: legacy budget_tokens
+        Passing budget_tokens to newer Opus models previously caused a 400 error.
         """
         thinking_model = model or self._model
+        thinking_kwargs, max_tok = self._thinking_params(thinking_model, budget_tokens)
         response = self._client.messages.create(
             model=thinking_model,
-            max_tokens=16000,
+            max_tokens=max_tok,
             system=system,
-            thinking={
-                "type": "enabled",
-                "budget_tokens": budget_tokens,
-            },
+            thinking=thinking_kwargs,
             messages=[{"role": "user", "content": user_message}],
         )
         thinking_text = ""
@@ -411,18 +454,16 @@ class ClaudeClient(LLMClient):
         gracefully rather than hard-fail.
         """
         thinking_model = model or self._model
+        thinking_kwargs, max_tok = self._thinking_params(thinking_model, budget_tokens)
 
         try:
             thinking_text = ""
             answer_text = ""
             with self._client.messages.stream(
                 model=thinking_model,
-                max_tokens=16000,
+                max_tokens=max_tok,
                 system=system,
-                thinking={
-                    "type": "enabled",
-                    "budget_tokens": budget_tokens,
-                },
+                thinking=thinking_kwargs,
                 messages=[{"role": "user", "content": user_message}],
             ) as stream:
                 for event in stream:
