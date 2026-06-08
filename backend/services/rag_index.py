@@ -218,7 +218,12 @@ class RAGIndex:
 
     def search(self, query: str, top_k: int = 5) -> list:
         """
-        Return the top_k most semantically similar chunks.
+        Return the top_k most relevant chunks using BM25+vector hybrid search.
+
+        Uses reciprocal rank fusion of BM25 keyword results and dense vector
+        results so exact keyword matches and semantic matches are both surfaced.
+        Falls back to vector-only when BM25 is unavailable (rank-bm25 not
+        installed or corpus is empty).
 
         Return type:
           list[(text: str, score: float)]   — when semantic_search is available
@@ -233,10 +238,15 @@ class RAGIndex:
         if not query.strip():
             return []
         try:
-            results = ss.search_documents(query, top_k=top_k)
+            results = ss.search_documents_hybrid(query, top_k=top_k, method="hybrid")
             return [(r["content"], r["score"]) for r in results]
         except Exception as exc:
-            log.debug(f"RAGIndex.search failed: {exc}")
+            log.debug("RAGIndex.search hybrid failed (%s), falling back to vector-only", exc)
+            try:
+                results = ss.search_documents(query, top_k=top_k)
+                return [(r["content"], r["score"]) for r in results]
+            except Exception as exc2:
+                log.debug(f"RAGIndex.search fallback also failed: {exc2}")
             return []
 
     # ── Persistence (legacy compatibility) ───────────────────────────────────

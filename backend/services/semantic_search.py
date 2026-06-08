@@ -395,6 +395,58 @@ def search_documents_hybrid(
     return out
 
 
+# ── HyDE: Hypothetical Document Embeddings (Gao et al. 2022) ─────────────────
+#
+# Precise Zero-Shot Dense Retrieval without Relevance Labels (ACL 2023).
+# Instead of embedding the raw query, ask a language model to generate a
+# hypothetical document that would answer the query, then embed that.
+# BEIR benchmarks show 10–40% nDCG@10 improvement over direct query embedding
+# in zero-shot retrieval scenarios.
+#
+# Safe fallback: if hypothesis_fn is None or raises, falls back to standard
+# hybrid search — behavior is identical to pre-HyDE for all failure paths.
+
+
+def search_documents_hyde(
+    query_text: str,
+    hypothesis_fn: "Callable[[str], str] | None",
+    top_k: int = 10,
+    doc_type: str | None = None,
+) -> list[dict]:
+    """
+    HyDE retrieval: generate a hypothetical answer document, embed it, search.
+
+    Parameters
+    ----------
+    query_text    : The user's raw query string.
+    hypothesis_fn : Callable that takes the query and returns a short hypothetical
+                    document (1-3 sentences) that would answer it. Typically a
+                    local LLM call. Pass None to skip HyDE and use hybrid search.
+    top_k         : Number of results to return.
+    doc_type      : Optional filter (passed to search_documents_hybrid).
+
+    Returns
+    -------
+    Same shape as search_documents_hybrid(). Falls back to hybrid search on
+    any failure — never raises.
+    """
+    if not query_text.strip():
+        return []
+
+    if hypothesis_fn is None:
+        return search_documents_hybrid(query_text, top_k=top_k, doc_type=doc_type)
+
+    try:
+        hypothesis = hypothesis_fn(query_text)
+        if hypothesis and hypothesis.strip():
+            log.debug("HyDE: using hypothesis for query %r", query_text[:60])
+            return search_documents_hybrid(hypothesis.strip(), top_k=top_k, doc_type=doc_type)
+    except Exception as exc:
+        log.debug("HyDE hypothesis_fn raised %s — falling back to direct search", exc)
+
+    return search_documents_hybrid(query_text, top_k=top_k, doc_type=doc_type)
+
+
 # ── Background embedding indexer (unchanged) ──────────────────────────────────
 
 def _index_dirty_documents(batch_size: int = 50) -> int:
