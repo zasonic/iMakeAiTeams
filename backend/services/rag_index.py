@@ -77,20 +77,41 @@ class RAGIndex:
             pass
         return self._semantic
 
-    # ── Index construction ────────────────────────────────────────────────────
+    # ── Index construction ──────────────────────────────────────────────────────
 
     @staticmethod
     def _split_chunks(text: str, chunk_size: int = 800, overlap: int = 200) -> list[str]:
-        """Split text into overlapping character-level chunks."""
+        """Split text into overlapping chunks, snapping to sentence boundaries.
+
+        Scans back up to 80 chars from the nominal chunk end to find a
+        sentence-ending character (. ! ?) followed by whitespace. Falls back
+        to the hard character boundary for code and data files that contain
+        no natural sentence endings — preserving the original behaviour in
+        those cases.
+        """
+        SNAP_BACK = 80
         chunks: list[str] = []
         start = 0
-        length = len(text)
-        while start < length:
-            end = min(start + chunk_size, length)
+        n = len(text)
+
+        while start < n:
+            end = min(start + chunk_size, n)
+
+            # Try to snap end to the nearest sentence boundary within SNAP_BACK
+            if end < n:
+                lo = max(start + overlap + 1, end - SNAP_BACK)
+                for i in range(end - 1, lo - 1, -1):
+                    if text[i] in '.!?' and text[i + 1] in ' \t\n\r':
+                        end = i + 1
+                        break
+
             chunks.append(text[start:end])
-            if end == length:
+            if end >= n:
                 break
-            start = end - overlap
+            new_start = end - overlap
+            # Guarantee forward progress even when snap lands near start
+            start = new_start if new_start > start else start + (chunk_size - overlap)
+
         return chunks
 
     def build_from_folder(
@@ -239,7 +260,7 @@ class RAGIndex:
             log.debug(f"RAGIndex.search failed: {exc}")
             return []
 
-    # ── Persistence (legacy compatibility) ───────────────────────────────────
+    # ── Persistence (legacy compatibility) ──────────────────────────────────────
 
     def save(self, path: Path) -> None:
         """
