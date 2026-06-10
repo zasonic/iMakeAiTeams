@@ -165,6 +165,19 @@ class TaskRouter:
                                 reasoning="user requested local",
                                 confidence=1.0)
 
+        # Fast heuristic pre-routing: skip the local-model call for obvious cases.
+        # Calling the local classifier for "hi" or a 300-word code review request
+        # both cost ~200 ms and a small amount of tokens. We only skip when the
+        # heuristic is high-confidence — ambiguous messages still go to the slow path.
+        fast_route = self._fast_prefilter(lower, message)
+        if fast_route is not None:
+            log.info(
+                "Fast pre-route -> %s (%s, conf=%.2f): %s",
+                fast_route.model, fast_route.complexity,
+                fast_route.confidence, fast_route.reasoning,
+            )
+            return fast_route
+
         # Slow path: ask local model to classify with confidence
         try:
             context = ""
@@ -350,6 +363,39 @@ class TaskRouter:
             bool(re.search(r'\b(if|else|for|while|def|class|function)\b', message)),
         ]
         return sum(indicators) >= 2
+
+    @staticmethod
+    def _fast_prefilter(lower: str, original: str) -> "RouteDecision | None":
+        """Skip the local-model call for obviously simple or obviously complex messages.
+
+        Returns None when the message is ambiguous — the caller falls through to
+        the slow path (local-model classification). Criteria are kept narrow on
+        purpose so we never misroute anything that warrants LLM judgement.
+
+        - Definite simple: regex greeting match AND ≤ 15 chars → local, conf 0.90
+        - Definite complex: strong complexity keyword AND message > 200 chars → claude, conf 0.80
+        """
+        stripped = lower.strip()
+
+        # Short greeting: any competent local model handles this; no LLM call needed.
+        if len(stripped) <= 15 and _SIMPLE_PATTERNS.match(stripped):
+            return RouteDecision(
+                model="local",
+                complexity="simple",
+                reasoning="fast pre-route: short greeting",
+                confidence=0.90,
+            )
+
+        # Long message with unambiguous complexity signals: go straight to Claude.
+        if len(original) > 200 and _COMPLEX_SIGNALS.search(original):
+            return RouteDecision(
+                model="claude",
+                complexity="complex",
+                reasoning="fast pre-route: complexity signal in long message",
+                confidence=0.80,
+            )
+
+        return None
 
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = enabled
