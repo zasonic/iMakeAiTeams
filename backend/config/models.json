@@ -2,9 +2,9 @@
   "_comment": "Single source of truth for Claude model metadata. The orchestrator's price math, the renderer's Settings dropdown, and the GET /api/models/catalog route all read this file. To add a model, add an entry below — nothing else needs to change. JSON (not YAML) so the catalog ships in the lite installer bundle without pulling PyYAML into requirements.txt.",
   "_schema": {
     "id":                      "the full Anthropic model id (e.g. 'claude-sonnet-4-6') — what the API expects",
-    "family":                  "'opus' | 'sonnet' | 'haiku' — used for substring fallback when id lookup misses",
+    "family":                  "'fable' | 'opus' | 'sonnet' | 'haiku' — used for substring fallback when id lookup misses",
     "display_name":            "what the renderer shows in dropdowns",
-    "input_price_per_mtok":    "USD per million input tokens",
+    "input_price_per_mtok":    "USD per million input tokens (verify at console.anthropic.com/settings/billing)",
     "output_price_per_mtok":   "USD per million output tokens",
     "context_window_tokens":   "max context window the API will accept",
     "vision":                  "true if the model accepts image content blocks",
@@ -12,6 +12,26 @@
   },
   "default_claude_id": "claude-sonnet-4-6",
   "models": [
+    {
+      "id":                    "claude-fable-5",
+      "family":                "fable",
+      "display_name":          "Claude Fable 5 (Flagship)",
+      "input_price_per_mtok":  15.0,
+      "output_price_per_mtok": 75.0,
+      "context_window_tokens": 200000,
+      "vision":                true,
+      "available_via":         ["claude_api"]
+    },
+    {
+      "id":                    "claude-opus-4-8",
+      "family":                "opus",
+      "display_name":          "Claude Opus 4.8",
+      "input_price_per_mtok":  15.0,
+      "output_price_per_mtok": 75.0,
+      "context_window_tokens": 200000,
+      "vision":                true,
+      "available_via":         ["claude_api"]
+    },
     {
       "id":                    "claude-opus-4-7",
       "family":                "opus",
@@ -55,6 +75,7 @@
   ],
   "family_fallback_prices": {
     "_comment": "Used by ModelCatalog.prices_for_model() when an id is not in the catalog but matches a family substring. Mirrors the orchestrator's pre-catalog _DEFAULT_MODEL_PRICES so unknown models don't silently get the wrong family's prices.",
+    "fable":  {"input_price_per_mtok": 15.0, "output_price_per_mtok": 75.0},
     "opus":   {"input_price_per_mtok": 15.0, "output_price_per_mtok": 75.0},
     "sonnet": {"input_price_per_mtok": 3.0,  "output_price_per_mtok": 15.0},
     "haiku":  {"input_price_per_mtok": 0.80, "output_price_per_mtok": 4.0}
