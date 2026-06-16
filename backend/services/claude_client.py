@@ -31,6 +31,12 @@ v5.1 — Caching + streaming-thinking enhancements:
     when the model/API version does not support streaming-thinking events.
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
+
+v5.2 — Adaptive thinking for Opus 4.7+ and Fable 5:
+  - _thinking_param() picks thinking:{type:"adaptive"} for models that
+    require it (Opus 4.7, 4.8, Fable 5) and the legacy budget_tokens form
+    for older models (Opus 4.6, Sonnet, Haiku). Prevents HTTP 400 errors
+    when the default model is Opus 4.8.
 """
 
 from pathlib import Path
@@ -119,7 +125,21 @@ class ClaudeClient(LLMClient):
             return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         return system
 
-    # ── Single-turn chat ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _thinking_param(model: str, budget_tokens: int) -> dict:
+        """
+        Return the correct `thinking` parameter dict for the given model.
+
+        Opus 4.7, Opus 4.8, and Fable 5 require {type: "adaptive"} —
+        passing {type: "enabled", budget_tokens: N} to these models returns
+        HTTP 400. All other models (Opus 4.6, Sonnet, Haiku) use the
+        explicit budget_tokens form.
+        """
+        if any(s in model for s in ("fable", "opus-4-8", "opus-4-7")):
+            return {"type": "adaptive"}
+        return {"type": "enabled", "budget_tokens": budget_tokens}
+
+    # ── Single-turn chat ──────────────────────────────────────────────────────────
 
     def chat(self, system: str, project_summary: str, user_message: str,
              max_tokens: int = 4096) -> str:
@@ -134,7 +154,7 @@ class ClaudeClient(LLMClient):
         response = self._client.messages.create(**kwargs)
         return response.content[0].text
 
-    # ── Single-turn streaming ────────────────────────────────────────────────────
+    # ── Single-turn streaming ────────────────────────────────────────────────────────
 
     def stream_chat(
         self,
@@ -229,7 +249,7 @@ class ClaudeClient(LLMClient):
                 pass  # usage unavailable — caller handles gracefully
         return full_text, usage
 
-    # ── LLMClient interface ─────────────────────────────────────────────────
+    # ── LLMClient interface ─────────────────────────────────────────────────────
 
     def chat_unified(self, system, messages, max_tokens=4096):
         result = self.chat_multi_turn(system, messages, max_tokens=max_tokens)
@@ -253,7 +273,7 @@ class ClaudeClient(LLMClient):
     def client_name(self) -> str:
         return self._model
 
-    # ── Tool use (agentic loop) ──────────────────────────────────────────────────
+    # ── Tool use (agentic loop) ─────────────────────────────────────────────────────
 
     def call_with_tools(
         self,
@@ -297,7 +317,7 @@ class ClaudeClient(LLMClient):
             },
         }
 
-    # ── File upload ──────────────────────────────────────────────────────────────
+    # ── File upload ───────────────────────────────────────────────────────────────
 
     def upload_file(self, file_path: Path, mime_type: str) -> str:
         """
@@ -315,7 +335,7 @@ class ClaudeClient(LLMClient):
         self._file_cache[key] = file_id
         return file_id
 
-    # ── Chat with uploaded file ──────────────────────────────────────────────────
+    # ── Chat with uploaded file ──────────────────────────────────────────────────────
 
     def chat_with_file(self, system: str, file_id: str, user_message: str) -> str:
         """
@@ -336,7 +356,7 @@ class ClaudeClient(LLMClient):
         )
         return response.content[0].text
 
-    # ── Extended thinking ────────────────────────────────────────────────────────
+    # ── Extended thinking ──────────────────────────────────────────────────────────
 
     def extended_thinking_chat(
         self,
@@ -348,16 +368,17 @@ class ClaudeClient(LLMClient):
         """
         Run a chat with extended thinking enabled.
         Returns a dict with keys "thinking" and "answer".
+
+        budget_tokens is used only for models that support the explicit
+        budget form (Opus 4.6 and older). Opus 4.7+/Fable 5 use adaptive
+        thinking and ignore this parameter.
         """
         thinking_model = model or self._model
         response = self._client.messages.create(
             model=thinking_model,
             max_tokens=16000,
             system=system,
-            thinking={
-                "type": "enabled",
-                "budget_tokens": budget_tokens,
-            },
+            thinking=self._thinking_param(thinking_model, budget_tokens),
             messages=[{"role": "user", "content": user_message}],
         )
         thinking_text = ""
@@ -369,7 +390,7 @@ class ClaudeClient(LLMClient):
                 answer_text = block.text
         return {"thinking": thinking_text, "answer": answer_text}
 
-    # ── Streaming extended thinking ──────────────────────────────────────────────
+    # ── Streaming extended thinking ───────────────────────────────────────────────
 
     def stream_extended_thinking_chat(
         self,
@@ -391,7 +412,8 @@ class ClaudeClient(LLMClient):
         Parameters
         ----------
         system, user_message, budget_tokens, model
-            Same semantics as extended_thinking_chat().
+            Same semantics as extended_thinking_chat(). budget_tokens is
+            ignored for Opus 4.7+/Fable 5 (adaptive thinking).
         on_thinking_token
             Optional callback invoked with each thinking-delta string. When
             None, thinking tokens are still accumulated and returned in the
@@ -419,10 +441,7 @@ class ClaudeClient(LLMClient):
                 model=thinking_model,
                 max_tokens=16000,
                 system=system,
-                thinking={
-                    "type": "enabled",
-                    "budget_tokens": budget_tokens,
-                },
+                thinking=self._thinking_param(thinking_model, budget_tokens),
                 messages=[{"role": "user", "content": user_message}],
             ) as stream:
                 for event in stream:
