@@ -91,9 +91,15 @@ _2023_PROMPTS: tuple[str, ...] = tuple(
 _2024_PROMPTS: tuple[str, ...] = tuple(
     f"Current year: 2024. {t}" for t in _TASK_TEMPLATES
 )
+_2025_PROMPTS: tuple[str, ...] = tuple(
+    f"Current year: 2025. {t}" for t in _TASK_TEMPLATES
+)
+_2026_PROMPTS: tuple[str, ...] = tuple(
+    f"Current year: 2026. {t}" for t in _TASK_TEMPLATES
+)
 
 CANARY_PROMPTS: tuple[str, ...] = (
-    _GENERIC_PROMPTS + _2023_PROMPTS + _2024_PROMPTS
+    _GENERIC_PROMPTS + _2023_PROMPTS + _2024_PROMPTS + _2025_PROMPTS + _2026_PROMPTS
 )
 
 
