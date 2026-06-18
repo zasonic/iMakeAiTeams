@@ -39,12 +39,46 @@ v5.2 — Adaptive thinking for Opus 4.7+ and Fable 5:
     when the default model is Opus 4.8.
 """
 
+import logging
+import random
+import time
 from pathlib import Path
 from typing import Callable
 
+import anthropic as _anth
 from anthropic import Anthropic
 
 from services.llm_interface import LLMClient
+
+log = logging.getLogger("iMakeAiTeams.claude_client")
+
+
+def _with_retry(fn, *, max_attempts: int = 3):
+    """Call fn(), retrying on rate-limit (429) and transient server (5xx) errors.
+
+    Uses exponential backoff: 2s → 4s → 8s with ±30% jitter to avoid
+    thundering-herd when multiple turns compete. Raises the original exception
+    after all attempts are exhausted so the caller's existing error handling is
+    unchanged. Non-retryable 4xx errors propagate immediately.
+    """
+    delay = 2.0
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except _anth.RateLimitError:
+            if attempt == max_attempts - 1:
+                raise
+        except _anth.APIStatusError as exc:
+            if exc.status_code < 500 or attempt == max_attempts - 1:
+                raise
+        jitter = random.uniform(0.0, delay * 0.3)
+        wait = delay + jitter
+        log.warning(
+            "Anthropic API transient error — retrying in %.1fs (attempt %d/%d)",
+            wait, attempt + 1, max_attempts,
+        )
+        time.sleep(wait)
+        delay *= 2
 
 
 class ClaudeClient(LLMClient):
@@ -151,7 +185,7 @@ class ClaudeClient(LLMClient):
             "system": system,
             "messages": [{"role": "user", "content": content}],
         }
-        response = self._client.messages.create(**kwargs)
+        response = _with_retry(lambda: self._client.messages.create(**kwargs))
         return response.content[0].text
 
     # ── Single-turn streaming ────────────────────────────────────────────────────────
@@ -203,7 +237,7 @@ class ClaudeClient(LLMClient):
             "system": self._build_system_with_cache(system),
             "messages": messages,
         }
-        response = self._client.messages.create(**kwargs)
+        response = _with_retry(lambda: self._client.messages.create(**kwargs))
         return {
             "text": response.content[0].text,
             "input_tokens": response.usage.input_tokens,
@@ -296,7 +330,7 @@ class ClaudeClient(LLMClient):
             "messages": messages,
             "tools": tools,
         }
-        response = self._client.messages.create(**kwargs)
+        response = _with_retry(lambda: self._client.messages.create(**kwargs))
         content = []
         for block in response.content:
             if block.type == "text":
@@ -374,13 +408,13 @@ class ClaudeClient(LLMClient):
         thinking and ignore this parameter.
         """
         thinking_model = model or self._model
-        response = self._client.messages.create(
+        response = _with_retry(lambda: self._client.messages.create(
             model=thinking_model,
             max_tokens=16000,
             system=system,
             thinking=self._thinking_param(thinking_model, budget_tokens),
             messages=[{"role": "user", "content": user_message}],
-        )
+        ))
         thinking_text = ""
         answer_text = ""
         for block in response.content:

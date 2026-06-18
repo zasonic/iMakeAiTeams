@@ -27,6 +27,11 @@ from dataclasses import dataclass
 from models import RoutingDecision
 from services.turn_context import TurnContext
 
+try:
+    import sse_events as _sse
+except ImportError:
+    _sse = None
+
 log = logging.getLogger("iMakeAiTeams.escalation_ladder")
 
 # Threshold below which a local response is considered "empty enough" to
@@ -192,6 +197,11 @@ class EscalationLadder:
         outcome.model_name = esc_result.model_name
         outcome.escalated = True
         outcome.escalation_reason = reason
+        if _sse is not None:
+            try:
+                _sse.publish("escalation_fired", {"reason": reason})
+            except Exception:
+                pass
 
     def _quality_score(self, user_message: str, response_text: str):
         """Self-rated local quality score, or None if unparseable.
