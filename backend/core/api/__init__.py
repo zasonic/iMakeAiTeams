@@ -108,7 +108,7 @@ class API:
         # snapshot-only after init completes, so no lock is required.
         self._status: dict[str, dict] = {}
 
-        # ── Claude client (required — no useful app without it) ───────────────
+        # ── Claude client (required — no useful app without it) ────────────────────
         self._claude = self._safe_init(
             "claude_client",
             lambda: ClaudeClient(
@@ -119,13 +119,13 @@ class API:
             required=True,
         )
 
-        # ── Local model client ────────────────────────────────────────────────
+        # ── Local model client ────────────────────────────────────────────────────────
         self._local = self._safe_init(
             "local_client",
             lambda: LocalClient(self._settings),
         )
 
-        # ── Phase 9: Bundled llama.cpp server ─────────────────────────────────
+        # ── Phase 9: Bundled llama.cpp server ───────────────────────────────────────
         # Construction is cheap (no subprocess yet). The wizard kicks off the
         # download + first start; on subsequent launches the auto-start hook
         # below picks it back up if the user previously chose bundled mode.
@@ -173,9 +173,12 @@ class API:
             ),
         )
 
+        # Pass claude_client so TaskRouter can use Haiku for routing when
+        # the local model is offline, giving accurate needs_context signals
+        # instead of falling back to keyword heuristics.
         self._router = self._safe_init(
             "router",
-            lambda: TaskRouter(self._local, self._settings),
+            lambda: TaskRouter(self._local, self._settings, claude_client=self._claude),
         )
 
         # Phase 2: MCP tool registry (catalog only; execution deferred).
@@ -278,7 +281,7 @@ class API:
         entry = self._status.get(name, {})
         self._emit("service_status_update", {"service": name, **entry})
 
-    # ── Public accessors ─────────────────────────────────────────────────────
+    # ── Public accessors ──────────────────────────────────────────────────
     #
     # ``_claude``/``_local`` are conventionally private but are needed by a
     # few collaborators that compose on top of the API (e.g. the execution
@@ -366,7 +369,7 @@ class API:
         """Return a snapshot of per-service init status for the UI."""
         return {name: dict(entry) for name, entry in self._status.items()}
 
-    # ── Event emission ───────────────────────────────────────────────────────
+    # ── Event emission ────────────────────────────────────────────────────────
 
     def _emit(self, event: str, payload: Any = None) -> None:
         """Push an event onto the SSE bus for the renderer's EventSource to drain."""
@@ -375,7 +378,7 @@ class API:
         except Exception as e:
             self._log.debug(f"_emit failed for '{event}': {e}")
 
-    # ── OS notification ──────────────────────────────────────────────────────
+    # ── OS notification ──────────────────────────────────────────────────────────
 
     def _os_notify(self, title: str, message: str) -> None:
         try:
@@ -413,7 +416,7 @@ class API:
         except Exception:
             pass
 
-    # ── File dialogs ─────────────────────────────────────────────────────────
+    # ── File dialogs ───────────────────────────────────────────────────────────
     # File pickers are now an Electron concern. The renderer calls
     # window.electronAPI.selectFolder() / .selectFiles() / .saveFileDialog()
     # directly, then hands the resulting path(s) to backend routes that need
@@ -451,7 +454,7 @@ class API:
             self._log.warning(f"write_file failed: {exc}")
             return {"ok": False, "error": str(exc)}
 
-    # ── Hardware / connection probing ─────────────────────────────────────────
+    # ── Hardware / connection probing ───────────────────────────────────────────
 
     def probe_hardware(self) -> None:
         def _work():
@@ -543,7 +546,7 @@ class API:
         from core.worker import run_in_thread
         run_in_thread(_work)
 
-    # ── Prompt library ────────────────────────────────────────────────────────
+    # ── Prompt library ──────────────────────────────────────────────────────────
 
     def prompt_list(self) -> list:
         return prompt_library.list_prompts()
@@ -574,7 +577,7 @@ class API:
     def prompt_import(self, data: dict) -> dict:
         return prompt_library.import_prompt(data)
 
-    # ── Health check ─────────────────────────────────────────────────────────
+    # ── Health check ────────────────────────────────────────────────────────────
 
     def run_health_check(self, skip_api: bool = False) -> None:
         def _work():
@@ -592,7 +595,7 @@ class API:
         from core.worker import run_in_thread
         run_in_thread(_work)
 
-    # ── Error logs ────────────────────────────────────────────────────────────
+    # ── Error logs ───────────────────────────────────────────────────────────────
 
     def get_error_logs(self, limit: int = 50) -> list:
         return error_classifier.get_recent_errors(limit)
@@ -601,7 +604,7 @@ class API:
         error_classifier.mark_resolved(record_id)
         return {"ok": True}
 
-    # ── Diagnostics export ────────────────────────────────────────────────────
+    # ── Diagnostics export ────────────────────────────────────────────────────────────
 
     def export_diagnostics(self) -> None:
         def _work():
@@ -660,7 +663,7 @@ class API:
         from core.worker import run_in_thread
         run_in_thread(_work)
 
-    # ── Changelog / What's new ────────────────────────────────────────────────
+    # ── Changelog / What's new ──────────────────────────────────────────────────
 
     _CURRENT_VERSION = "1.3.0"
 
@@ -744,7 +747,7 @@ class API:
                 return (0,)
         return _parts(a) > _parts(b)
 
-    # ── Security / firewall ───────────────────────────────────────────────────
+    # ── Security / firewall ─────────────────────────────────────────────────────
 
     def security_get_status(self) -> dict:
         """Return firewall status for the Settings Security panel."""
@@ -759,7 +762,7 @@ class API:
         """Return recent scan log for the Settings Security audit panel."""
         return input_sanitizer.get_scan_log(limit=limit, verdict_filter=verdict_filter)
 
-    # ── Misc ──────────────────────────────────────────────────────────────────
+    # ── Misc ───────────────────────────────────────────────────────────────────
 
     def open_url(self, url: str) -> None:
         # Only allow http/https — prevent arbitrary protocol launches (file://, etc.)
@@ -780,7 +783,7 @@ class API:
                 self._log.warning("bundled_server.stop raised: %s", exc, exc_info=True)
         self._log.info("Shutdown complete.")
 
-    # ── Domain sub-API delegators ─────────────────────────────────────────────
+    # ── Domain sub-API delegators ──────────────────────────────────────────────
     # These exist so PyWebView sees every bridge method directly on API. They
     # forward to the domain-specific sub-API instances, which share facade
     # state via BaseAPI.__getattr__. Preserving the exact surface is what
@@ -962,7 +965,7 @@ class API:
     def studio_mode_set(self, enabled):
         return self._settings_api.studio_mode_set(enabled)
 
-    # ── MCP servers (Phase 2) ─────────────────────────────────────────────────
+    # ── MCP servers (Phase 2) ───────────────────────────────────────────────────
 
     def list_mcp_servers(self):
         return self._mcp_api.list_mcp_servers()
@@ -987,7 +990,7 @@ class API:
     def refresh_mcp_registry(self):
         return self._mcp_api.refresh_mcp_registry()
 
-    # ── Lifecycle (Phase 4) ──────────────────────────────────────────────────
+    # ── Lifecycle (Phase 4) ─────────────────────────────────────────────────────
 
     def confirm_shutdown(self, token):
         return self._lifecycle_api.confirm_shutdown(token)
@@ -1004,7 +1007,7 @@ class API:
             target_id, requester_id, reason,
         )
 
-    # ── Escalation channel (Phase 5) ──────────────────────────────────────────
+    # ── Escalation channel (Phase 5) ────────────────────────────────────────────
 
     def list_pending_escalations(self):
         return self._escalation_api.list_pending()
@@ -1015,7 +1018,7 @@ class API:
     def deny_escalation(self, escalation_id):
         return self._escalation_api.deny(escalation_id)
 
-    # ── Behavior-drift canary (Phase 5) ──────────────────────────────────────
+    # ── Behavior-drift canary (Phase 5) ────────────────────────────────────────
 
     def canary_reset(self, model_id):
         """Reset the canary baseline for ``model_id``; next load re-captures."""

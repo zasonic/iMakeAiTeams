@@ -19,6 +19,13 @@ v4.1 — Uncertainty-Aware Routing (inspired by AUQ/UAR research):
     signal that captures *epistemic uncertainty*, not just task type.
   - The confidence threshold adapts based on observed router error rates:
     if local routes are producing errors, the threshold tightens.
+
+v4.2 — Haiku routing fallback:
+  - When the local model is offline, classification falls back to
+    claude-haiku-4-5-20251001 (if a ClaudeClient is wired in) instead of
+    the keyword heuristic. Haiku accurately detects needs_context signals
+    that the keyword classifier misses entirely, enabling proper RAG
+    retrieval for users without a local model.
 """
 
 import logging
@@ -28,7 +35,7 @@ from models import RouteDecision
 
 log = logging.getLogger("iMakeAiTeams.router")
 
-# ── Deterministic keyword fallback ────────────────────────────────────────
+# ── Deterministic keyword fallback ─────────────────────────────────────────────────────
 # Used when no local model is available for routing classification.
 
 import re as _re
@@ -90,7 +97,7 @@ def _keyword_classify(message: str) -> RouteDecision:
     )
 
 
-# ── Confidence thresholds ─────────────────────────────────────────────────────
+# ── Confidence thresholds ──────────────────────────────────────────────────────────────
 # Below this confidence, local routes escalate to Claude.
 ESCALATION_THRESHOLD = 0.6
 # Below this confidence, the orchestrator is told to expand RAG context.
@@ -136,22 +143,28 @@ Route = RouteDecision
 
 
 class TaskRouter:
-    def __init__(self, local_client, settings):
+    def __init__(self, local_client, settings, claude_client=None):
         self.local = local_client
         self._settings = settings
+        self._claude = claude_client  # used for Haiku routing when local is offline
         self._enabled = True  # User can disable routing (always use Claude)
 
     def classify(self, message: str, history: list | None = None,
                  memory_context=None) -> RouteDecision:
         """Classify a message and return a RouteDecision with confidence."""
-        # Deterministic fallback when local model is offline
+        # When local model is offline, prefer Haiku over keyword heuristics:
+        # Haiku accurately detects needs_context signals that _keyword_classify
+        # misses, enabling proper RAG retrieval for users without a local model.
         if not self.local.is_available():
+            if self._claude is not None:
+                log.info("Local model unavailable — using Haiku classifier")
+                return self._haiku_classify(message)
             log.info("Local model unavailable — using keyword classifier")
             return _keyword_classify(message)
-        # If routing is disabled or local unavailable, always use Claude
-        if not self._enabled or not self.local.is_available():
+        # If routing is disabled, always use Claude
+        if not self._enabled:
             return RouteDecision(model="claude", complexity="complex",
-                                reasoning="routing disabled or local unavailable",
+                                reasoning="routing disabled",
                                 confidence=1.0)
 
         # Fast path: explicit user overrides (no model call needed)
@@ -196,7 +209,7 @@ class TaskRouter:
             result = self.local.chat(ROUTER_SYSTEM, prompt, max_tokens=250)
             route = RouteDecision.from_json(result)
 
-            # ── UAR escalation: low confidence local -> Claude ────────────────
+            # ── UAR escalation: low confidence local -> Claude ────────────────────
             # Per-complexity adaptive thresholds: error rates differ sharply
             # between simple/medium/complex buckets, so a single aggregate
             # rate over-tightens simple queries and under-tightens medium ones.
@@ -215,7 +228,7 @@ class TaskRouter:
                     needs_context=route.confidence < CONTEXT_EXPANSION_THRESHOLD,
                 )
 
-            # ── Heuristic safety net (unchanged) ─────────────────────────────
+            # ── Heuristic safety net (unchanged) ───────────────────────────────────
             if route.model == "local" and self._looks_complex(message):
                 log.info("Router override: heuristic says complex, upgrading to Claude")
                 return RouteDecision(
@@ -225,7 +238,7 @@ class TaskRouter:
                     needs_context=route.needs_context,
                 )
 
-            # ── Tag context expansion for any low-confidence route ────────────
+            # ── Tag context expansion for any low-confidence route ─────────────────
             if route.confidence < CONTEXT_EXPANSION_THRESHOLD and not route.needs_context:
                 route = RouteDecision(
                     model=route.model,
@@ -246,6 +259,39 @@ class TaskRouter:
             return RouteDecision(model="claude", complexity="complex",
                                 reasoning=f"router error: {exc}",
                                 confidence=0.0, needs_context=True)
+
+    def _haiku_classify(self, message: str) -> RouteDecision:
+        """
+        Classify using claude-haiku when the local model is offline.
+
+        Haiku (~$0.25/M input tokens, <$0.0001/call) accurately detects
+        needs_context signals that _keyword_classify misses entirely, which
+        enables proper RAG retrieval when users don't have a local model.
+        Any route returned as 'local' is escalated to 'claude' since local
+        is unavailable. Falls back to _keyword_classify on any API error.
+        """
+        try:
+            response = self._claude._client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=250,
+                system=ROUTER_SYSTEM,
+                messages=[{"role": "user", "content": f"User message: {message}"}],
+            )
+            result = response.content[0].text
+            route = RouteDecision.from_json(result)
+            # Local is unavailable — escalate any local route to claude
+            if route.model == "local":
+                return RouteDecision(
+                    model="claude",
+                    complexity=route.complexity,
+                    reasoning=f"Haiku: {route.reasoning} (local unavailable, escalated)",
+                    confidence=route.confidence,
+                    needs_context=route.needs_context,
+                )
+            return route
+        except Exception as exc:
+            log.warning("Haiku classifier failed: %s — falling back to keyword", exc)
+            return _keyword_classify(message)
 
     def _adaptive_threshold_for(self, complexity: str) -> float:
         """

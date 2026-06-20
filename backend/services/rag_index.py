@@ -22,6 +22,7 @@ Dependencies:
 import json
 import logging
 import os
+import re as _re
 from pathlib import Path
 
 from services.redact import redact
@@ -31,6 +32,10 @@ log = logging.getLogger("iMakeAiTeams.rag_index")
 # Similarity threshold below which chunks are still returned but scored
 # (the MemoryManager decides whether to include them).
 _SCORE_THRESHOLD = 0.0  # RAGIndex itself does not filter — MemoryManager does
+
+# Compiled once at module load; splits on sentence-ending punctuation followed
+# by whitespace. Used by _split_chunks for boundary-aware chunking.
+_SENT_BOUNDARY = _re.compile(r'(?<=[.!?])\s+')
 
 
 class RAGIndex:
@@ -77,12 +82,41 @@ class RAGIndex:
             pass
         return self._semantic
 
-    # ── Index construction ────────────────────────────────────────────────────
+    # ── Index construction ──────────────────────────────────────────────────────────────
 
     @staticmethod
     def _split_chunks(text: str, chunk_size: int = 800, overlap: int = 200) -> list[str]:
-        """Split text into overlapping character-level chunks."""
+        """Split text into overlapping chunks, preferring sentence boundaries.
+
+        Sentence-boundary splitting keeps semantic units intact so the embedding
+        for each chunk represents a coherent thought rather than a mid-sentence
+        cut. Falls back to character-level splitting for code, minified text,
+        or any content with no sentence-ending punctuation.
+        """
         chunks: list[str] = []
+
+        # Try sentence-boundary splitting first
+        sentences = _SENT_BOUNDARY.split(text)
+        if len(sentences) > 1:
+            current: list[str] = []
+            current_len = 0
+            for sent in sentences:
+                sent_len = len(sent)
+                if current_len + sent_len > chunk_size and current:
+                    chunks.append(" ".join(current))
+                    # Slide the window back: drop sentences from the front
+                    # until the remaining context fits within overlap chars.
+                    while current and current_len - len(current[0]) - 1 > overlap:
+                        removed = current.pop(0)
+                        current_len -= len(removed) + 1
+                current.append(sent)
+                current_len += sent_len + 1  # +1 for the space rejoining
+            if current:
+                chunks.append(" ".join(current))
+            if chunks:
+                return chunks
+
+        # Fallback: character-level (handles minified code, no punctuation, etc.)
         start = 0
         length = len(text)
         while start < length:
@@ -214,7 +248,7 @@ class RAGIndex:
         except Exception:
             return 0
 
-    # ── Search ────────────────────────────────────────────────────────────────
+    # ── Search ────────────────────────────────────────────────────────────────────
 
     def search(self, query: str, top_k: int = 5) -> list:
         """
@@ -239,7 +273,7 @@ class RAGIndex:
             log.debug(f"RAGIndex.search failed: {exc}")
             return []
 
-    # ── Persistence (legacy compatibility) ───────────────────────────────────
+    # ── Persistence (legacy compatibility) ─────────────────────────────────────────
 
     def save(self, path: Path) -> None:
         """
