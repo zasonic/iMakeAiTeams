@@ -63,7 +63,7 @@
       "available_via":         ["claude_api"]
     },
     {
-      "id":                    "claude-haiku-4-5",
+      "id":                    "claude-haiku-4-5-20251001",
       "family":                "haiku",
       "display_name":          "Claude Haiku 4.5",
       "input_price_per_mtok":  1.0,
