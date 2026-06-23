@@ -22,7 +22,7 @@ v4.3 — System-prompt caching in multi-turn paths:
 
 v5.1 — Caching + streaming-thinking enhancements:
   - System-prompt caching is now applied uniformly across every multi-turn
-    code path, cutting input-token cost on follow-up turns by 50–80% on
+    code path, cutting input-token cost on follow-up turns by 50-80% on
     long system prompts.
   - New stream_extended_thinking_chat() delivers thinking + answer tokens
     in real-time via on_thinking_token / on_text_token callbacks, letting
@@ -37,6 +37,13 @@ v5.2 — Adaptive thinking for Opus 4.7+ and Fable 5:
     require it (Opus 4.7, 4.8, Fable 5) and the legacy budget_tokens form
     for older models (Opus 4.6, Sonnet, Haiku). Prevents HTTP 400 errors
     when the default model is Opus 4.8.
+
+v5.3 — Haiku extended-thinking guard:
+  - _supports_thinking() returns False for Haiku 4.5, which does not support
+    any form of extended thinking. extended_thinking_chat() and
+    stream_extended_thinking_chat() now degrade gracefully: Haiku falls back
+    to a standard chat call so callers always receive a well-formed
+    {"thinking": "", "answer": "..."} dict without an HTTP 400 error.
 """
 
 import logging
@@ -56,7 +63,7 @@ log = logging.getLogger("iMakeAiTeams.claude_client")
 def _with_retry(fn, *, max_attempts: int = 3):
     """Call fn(), retrying on rate-limit (429) and transient server (5xx) errors.
 
-    Uses exponential backoff: 2s → 4s → 8s with ±30% jitter to avoid
+    Uses exponential backoff: 2s -> 4s -> 8s with +-30% jitter to avoid
     thundering-herd when multiple turns compete. Raises the original exception
     after all attempts are exhausted so the caller's existing error handling is
     unchanged. Non-retryable 4xx errors propagate immediately.
@@ -140,9 +147,9 @@ class ClaudeClient(LLMClient):
         When prompt caching is enabled and the system string is non-empty, the
         prompt is wrapped in an ephemeral cache_control block.  This lets the
         API cache the compiled token representation for up to 5 minutes, so
-        consecutive turns that share the same system prompt pay only 0.1× the
+        consecutive turns that share the same system prompt pay only 0.1x the
         normal input-token rate on cache reads (90% savings, which translates
-        to roughly 50–80% lower input-token cost on a typical multi-turn
+        to roughly 50-80% lower input-token cost on a typical multi-turn
         conversation that re-sends the same system prompt every turn).
 
         The Messages API accepts both string and list-of-content-blocks forms
@@ -158,6 +165,16 @@ class ClaudeClient(LLMClient):
         if self._use_caching and system:
             return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         return system
+
+    @staticmethod
+    def _supports_thinking(model: str) -> bool:
+        """Return True if the model supports extended thinking in any form.
+
+        Haiku 4.5 does not accept thinking:{type:enabled} or thinking:{type:adaptive}
+        and returns HTTP 400. All other current models (Sonnet, Opus, Fable) support
+        at least one thinking mode.
+        """
+        return "haiku" not in model.lower()
 
     @staticmethod
     def _thinking_param(model: str, budget_tokens: int) -> dict:
@@ -403,11 +420,18 @@ class ClaudeClient(LLMClient):
         Run a chat with extended thinking enabled.
         Returns a dict with keys "thinking" and "answer".
 
+        Models that do not support thinking (Haiku 4.5) fall back to a
+        standard chat call so callers always receive a well-formed dict
+        without an HTTP 400 error.
+
         budget_tokens is used only for models that support the explicit
         budget form (Opus 4.6 and older). Opus 4.7+/Fable 5 use adaptive
         thinking and ignore this parameter.
         """
         thinking_model = model or self._model
+        if not self._supports_thinking(thinking_model):
+            answer = self.chat(system, "", user_message, max_tokens=16000)
+            return {"thinking": "", "answer": answer}
         response = _with_retry(lambda: self._client.messages.create(
             model=thinking_model,
             max_tokens=16000,
@@ -461,12 +485,28 @@ class ClaudeClient(LLMClient):
         by extended_thinking_chat() so callers can switch implementations
         without changing downstream code.
 
+        Models that do not support thinking (Haiku 4.5) degrade to a
+        streaming plain chat call so the on_text_token callback still fires
+        and the caller still gets a well-formed dict.
+
         Falls back to the blocking extended_thinking_chat() if the SDK
         raises while opening the stream — older Anthropic SDK versions or
         models that don't yet emit thinking_delta events will degrade
         gracefully rather than hard-fail.
         """
         thinking_model = model or self._model
+
+        if not self._supports_thinking(thinking_model):
+            answer = ""
+
+            def _collect(chunk: str) -> None:
+                nonlocal answer
+                answer += chunk
+                if on_text_token is not None:
+                    on_text_token(chunk)
+
+            self.stream_chat(system, "", user_message, on_token=_collect, max_tokens=16000)
+            return {"thinking": "", "answer": answer}
 
         try:
             thinking_text = ""
