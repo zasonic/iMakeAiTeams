@@ -37,6 +37,12 @@ v5.2 — Adaptive thinking for Opus 4.7+ and Fable 5:
     require it (Opus 4.7, 4.8, Fable 5) and the legacy budget_tokens form
     for older models (Opus 4.6, Sonnet, Haiku). Prevents HTTP 400 errors
     when the default model is Opus 4.8.
+
+v5.3 — Tool-definition caching in agentic loops:
+  - call_with_tools() now caches the tools array via cache_control on the
+    last tool entry when use_caching=True. The API tokenises tool schemas
+    on every request; caching them cuts input-token cost by ~50-80% across
+    repeated agentic turns that reuse the same tool set (5-min TTL).
 """
 
 import logging
@@ -323,6 +329,13 @@ class ClaudeClient(LLMClient):
         Each content block is {"type":"text","text":...} or
         {"type":"tool_use","id":..."name":..."input":...}.
         """
+        # Cache tool definitions: the API tokenises them on every request;
+        # marking the last entry ephemeral caches the entire tools array for
+        # up to 5 minutes, cutting input-token cost on repeated agentic turns.
+        if self._use_caching and tools:
+            tools = list(tools)  # shallow copy — don't mutate caller's list
+            tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
