@@ -37,6 +37,11 @@ v5.2 — Adaptive thinking for Opus 4.7+ and Fable 5:
     require it (Opus 4.7, 4.8, Fable 5) and the legacy budget_tokens form
     for older models (Opus 4.6, Sonnet, Haiku). Prevents HTTP 400 errors
     when the default model is Opus 4.8.
+
+v5.3 — Sonnet 5 adaptive thinking:
+  - claude-sonnet-5 removed {type:"enabled", budget_tokens:N} — sending it
+    returns HTTP 400. Added "sonnet-5" to the adaptive-thinking model list
+    in _thinking_param() so extended-thinking calls work correctly.
 """
 
 import logging
@@ -164,12 +169,13 @@ class ClaudeClient(LLMClient):
         """
         Return the correct `thinking` parameter dict for the given model.
 
-        Opus 4.7, Opus 4.8, and Fable 5 require {type: "adaptive"} —
+        Opus 4.7+, Fable 5, and Sonnet 5 require {type: "adaptive"} —
         passing {type: "enabled", budget_tokens: N} to these models returns
-        HTTP 400. All other models (Opus 4.6, Sonnet, Haiku) use the
-        explicit budget_tokens form.
+        HTTP 400 (removed in Sonnet 5, deprecated in Sonnet 4.6).
+        Older models (Opus 4.6, Sonnet 4.6, Haiku) use the explicit
+        budget_tokens form.
         """
-        if any(s in model for s in ("fable", "opus-4-8", "opus-4-7")):
+        if any(s in model for s in ("fable", "opus-4-8", "opus-4-7", "sonnet-5")):
             return {"type": "adaptive"}
         return {"type": "enabled", "budget_tokens": budget_tokens}
 
