@@ -57,10 +57,11 @@ class RAGIndex:
         ".r", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".rb",
     ]
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2", model=None):
+    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5", model=None):
         """
         model: optional pre-loaded SentenceTransformer instance (shared from api.py).
         model_name: ignored when model is provided; kept for API compatibility.
+        The actual embedding model is configured in semantic_search.init_vector_store().
         """
         self._model = model  # may be None if semantic_search is not initialised yet
         self._semantic = None  # set lazily when semantic_search is available

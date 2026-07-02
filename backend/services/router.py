@@ -111,8 +111,9 @@ Return ONLY a JSON object:
 Classification rules:
 - simple -> local: greetings, simple Q&A, summarization, formatting, data extraction,
   classification, translation, simple math, definitions, list generation
-- medium -> local (if 13B+ model available) or claude: multi-step analysis,
-  code generation, moderate reasoning, comparisons
+- medium -> local (if your model can handle it) or claude: multi-step analysis,
+  code generation, moderate reasoning, comparisons. If you are uncertain whether
+  your local model can handle it well, route to claude with confidence < 0.7.
 - complex -> claude: planning, evaluation, creative writing, nuanced judgment,
   multi-document synthesis, debugging complex code, anything requiring deep reasoning
 - If the user says "use Claude" or "@claude", always return "claude".
