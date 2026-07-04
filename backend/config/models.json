@@ -23,6 +23,16 @@
       "available_via":         ["claude_api"]
     },
     {
+      "id":                    "claude-sonnet-5",
+      "family":                "sonnet",
+      "display_name":          "Claude Sonnet 5",
+      "input_price_per_mtok":  3.0,
+      "output_price_per_mtok": 15.0,
+      "context_window_tokens": 1000000,
+      "vision":                true,
+      "available_via":         ["claude_api"]
+    },
+    {
       "id":                    "claude-opus-4-8",
       "family":                "opus",
       "display_name":          "Claude Opus 4.8",

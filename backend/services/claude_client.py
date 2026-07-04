@@ -32,11 +32,11 @@ v5.1 — Caching + streaming-thinking enhancements:
   - Bumped Anthropic SDK requirement to >=0.50.0 for stable
     thinking_delta / text_delta event types in messages.stream().
 
-v5.2 — Adaptive thinking for Opus 4.7+ and Fable 5:
+v5.2 — Adaptive thinking for Opus 4.7+, Fable 5, and Sonnet 5:
   - _thinking_param() picks thinking:{type:"adaptive"} for models that
-    require it (Opus 4.7, 4.8, Fable 5) and the legacy budget_tokens form
-    for older models (Opus 4.6, Sonnet, Haiku). Prevents HTTP 400 errors
-    when the default model is Opus 4.8.
+    require it (Opus 4.7, 4.8, Fable 5, Sonnet 5) and the legacy budget_tokens
+    form for older models (Opus 4.6, Sonnet 4.x, Haiku). Prevents HTTP 400
+    errors when using Opus 4.8 or Sonnet 5 as the active model.
 """
 
 import logging
@@ -164,12 +164,12 @@ class ClaudeClient(LLMClient):
         """
         Return the correct `thinking` parameter dict for the given model.
 
-        Opus 4.7, Opus 4.8, and Fable 5 require {type: "adaptive"} —
+        Opus 4.7, Opus 4.8, Fable 5, and Sonnet 5 require {type: "adaptive"} —
         passing {type: "enabled", budget_tokens: N} to these models returns
-        HTTP 400. All other models (Opus 4.6, Sonnet, Haiku) use the
+        HTTP 400. All other models (Opus 4.6, Sonnet 4.x, Haiku) use the
         explicit budget_tokens form.
         """
-        if any(s in model for s in ("fable", "opus-4-8", "opus-4-7")):
+        if any(s in model for s in ("fable", "opus-4-8", "opus-4-7", "sonnet-5")):
             return {"type": "adaptive"}
         return {"type": "enabled", "budget_tokens": budget_tokens}
 
@@ -404,8 +404,8 @@ class ClaudeClient(LLMClient):
         Returns a dict with keys "thinking" and "answer".
 
         budget_tokens is used only for models that support the explicit
-        budget form (Opus 4.6 and older). Opus 4.7+/Fable 5 use adaptive
-        thinking and ignore this parameter.
+        budget form (Opus 4.6 and older). Opus 4.7+/Fable 5/Sonnet 5 use
+        adaptive thinking and ignore this parameter.
         """
         thinking_model = model or self._model
         response = _with_retry(lambda: self._client.messages.create(
@@ -447,7 +447,7 @@ class ClaudeClient(LLMClient):
         ----------
         system, user_message, budget_tokens, model
             Same semantics as extended_thinking_chat(). budget_tokens is
-            ignored for Opus 4.7+/Fable 5 (adaptive thinking).
+            ignored for Opus 4.7+/Fable 5/Sonnet 5 (adaptive thinking).
         on_thinking_token
             Optional callback invoked with each thinking-delta string. When
             None, thinking tokens are still accumulated and returned in the
