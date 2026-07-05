@@ -29,7 +29,7 @@ from core.model_catalog import (
 )
 
 
-# ── Fixtures ─────────────────────────────────────────────────────────────────
+# ── Fixtures ────────────────────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +47,7 @@ def _shipped_catalog() -> Catalog:
     return get_catalog(force_reload=True)
 
 
-# ── Schema + parsing ─────────────────────────────────────────────────────────
+# ── Schema + parsing ─────────────────────────────────────────────────────────────────────────
 
 
 def test_shipped_catalog_loads_cleanly():
@@ -57,7 +57,7 @@ def test_shipped_catalog_loads_cleanly():
     assert cat.models, "shipped catalog must declare at least one model"
     for entry in cat.models:
         assert entry.id.startswith("claude-"), f"non-Claude entry: {entry.id}"
-        assert entry.family in ("opus", "sonnet", "haiku")
+        assert entry.family in ("fable", "opus", "sonnet", "haiku")
         assert entry.input_price_per_mtok >= 0
         assert entry.output_price_per_mtok >= 0
         assert entry.context_window_tokens > 0
@@ -83,13 +83,13 @@ def test_settings_default_matches_catalog_default():
     )
 
 
-# ── Family detection (Bug 12 invariant) ──────────────────────────────────────
+# ── Family detection (Bug 12 invariant) ─────────────────────────────────────────────────────
 
 
 def test_detect_family_prefers_opus_over_other_substrings():
     """A name like 'claude-haiku-with-opus-fallback' must resolve to
     'opus' deterministically — the family scan iterates in the fixed
-    order opus → sonnet → haiku, so the first substring match wins.
+    order fable → opus → sonnet → haiku, so the first substring match wins.
 
     Pre-catalog code iterated a dict and the result depended on Python's
     dict iteration order. Bug 12 was a downstream symptom.
@@ -104,7 +104,7 @@ def test_detect_family_returns_none_for_non_claude():
     assert cat.detect_family("") is None
 
 
-# ── prices_for_model: catalog-id ↔ _estimate_cost consistency ────────────────
+# ── prices_for_model: catalog-id ↔ _estimate_cost consistency ────────────────────────────
 
 
 def test_prices_for_model_returns_exact_match_when_id_in_catalog():
@@ -137,7 +137,7 @@ def test_prices_for_model_default_when_non_claude():
     assert cat.prices_for_model("gpt-4o-mini") == (3.0, 15.0)
 
 
-# ── _estimate_cost integration (the actual orchestrator entry point) ─────────
+# ── _estimate_cost integration (the actual orchestrator entry point) ───────────────────
 
 
 def test_estimate_cost_matches_catalog_prices_for_every_entry():
@@ -180,7 +180,7 @@ def test_estimate_cost_returns_zero_for_non_claude_model():
     assert _estimate_cost("", 1000, 1000) == 0.0
 
 
-# ── Schema-violation rejection ───────────────────────────────────────────────
+# ── Schema-violation rejection ──────────────────────────────────────────────────────────────────────
 
 
 def test_catalog_rejects_malformed_models_entry(tmp_path):
