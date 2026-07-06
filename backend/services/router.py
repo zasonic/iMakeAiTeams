@@ -148,10 +148,10 @@ class TaskRouter:
         if not self.local.is_available():
             log.info("Local model unavailable — using keyword classifier")
             return _keyword_classify(message)
-        # If routing is disabled or local unavailable, always use Claude
-        if not self._enabled or not self.local.is_available():
+        # If routing is disabled, always use Claude
+        if not self._enabled:
             return RouteDecision(model="claude", complexity="complex",
-                                reasoning="routing disabled or local unavailable",
+                                reasoning="routing disabled",
                                 confidence=1.0)
 
         # Fast path: explicit user overrides (no model call needed)
