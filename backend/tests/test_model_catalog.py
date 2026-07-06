@@ -57,7 +57,7 @@ def test_shipped_catalog_loads_cleanly():
     assert cat.models, "shipped catalog must declare at least one model"
     for entry in cat.models:
         assert entry.id.startswith("claude-"), f"non-Claude entry: {entry.id}"
-        assert entry.family in ("opus", "sonnet", "haiku")
+        assert entry.family in ("fable", "opus", "sonnet", "haiku")
         assert entry.input_price_per_mtok >= 0
         assert entry.output_price_per_mtok >= 0
         assert entry.context_window_tokens > 0
