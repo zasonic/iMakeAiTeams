@@ -80,8 +80,8 @@ class RAGIndex:
     # ── Index construction ────────────────────────────────────────────────────
 
     @staticmethod
-    def _split_chunks(text: str, chunk_size: int = 800, overlap: int = 200) -> list[str]:
-        """Split text into overlapping character-level chunks."""
+    def _split_chunks_char(text: str, chunk_size: int = 800, overlap: int = 200) -> list[str]:
+        """Character-level chunking fallback for flat/unstructured text."""
         chunks: list[str] = []
         start = 0
         length = len(text)
@@ -91,6 +91,34 @@ class RAGIndex:
             if end == length:
                 break
             start = end - overlap
+        return chunks
+
+    @staticmethod
+    def _split_chunks(text: str, chunk_size: int = 800, overlap: int = 200) -> list[str]:
+        """Split text on paragraph boundaries, falling back to character chunks.
+
+        Paragraph splitting preserves semantic units (a sentence or code block
+        is never cut mid-way).  When the text has no double-newlines (flat
+        prose, minified JSON, etc.) we fall back to character-level chunking
+        so the caller always gets non-empty output.
+        """
+        import re
+        paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+        if len(paragraphs) <= 1:
+            # No paragraph structure — use character-level chunking
+            return RAGIndex._split_chunks_char(text, chunk_size, overlap)
+
+        chunks: list[str] = []
+        current = ""
+        for para in paragraphs:
+            candidate = (current + "\n\n" + para).strip() if current else para
+            if len(candidate) > chunk_size and current:
+                chunks.append(current)
+                current = para
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
         return chunks
 
     def build_from_folder(
