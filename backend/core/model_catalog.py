@@ -41,7 +41,7 @@ _cached_path: Optional[Path] = None
 class ModelEntry:
     """One row in the catalog. Mirrors the JSON schema 1:1."""
     id:                       str
-    family:                   str       # "opus" | "sonnet" | "haiku"
+    family:                   str       # "fable" | "opus" | "sonnet" | "haiku"
     display_name:             str
     input_price_per_mtok:     float
     output_price_per_mtok:    float
@@ -81,11 +81,11 @@ class Catalog:
         Pre-catalog ``_estimate_cost`` iterated a dict and took the first
         substring match, which depended on dict iteration order — a name
         like ``claude-haiku-with-opus-fallback`` could resolve either
-        way. Pick families in fixed order opus → sonnet → haiku so the
+        way. Pick families in fixed order fable → opus → sonnet → haiku so the
         result is reproducible.
         """
         m = (model_id or "").lower()
-        for candidate in ("opus", "sonnet", "haiku"):
+        for candidate in ("fable", "opus", "sonnet", "haiku"):
             if candidate in m:
                 return candidate
         return None
