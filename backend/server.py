@@ -52,7 +52,7 @@ import db as _db_module  # noqa: E402
 log = logging.getLogger("sidecar")
 
 
-# ── Auth middleware ──────────────────────────────────────────────────────────
+# ── Auth middleware ────────────────────────────────────────────
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     """Reject any request that doesn't carry the right Bearer token.
@@ -97,7 +97,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-# ── App container ────────────────────────────────────────────────────────────
+# ── App container ────────────────────────────────────────────
 
 class _AppContainer:
     """Holds the shared services that route handlers reach into."""
@@ -132,7 +132,7 @@ class _AppContainer:
         self.bus = EventBus()
         self.api = API(self.settings, self.bus, _HERE, log)
 
-        # ── Power Mode (v3) — additive OpenClaw delegation ────────────────
+        # ── Power Mode (v3) — additive OpenClaw delegation ──────────────────
         # All three handles are constructed unconditionally; their lifecycle
         # work is gated by the user's `power_mode_enabled` setting so v2 users
         # never touch Docker. Failure to construct is non-fatal: routes/docker
@@ -219,7 +219,7 @@ class _AppContainer:
             log.warning("api.shutdown raised: %s", exc, exc_info=True)
 
 
-# ── FastAPI factory ──────────────────────────────────────────────────────────
+# ── FastAPI factory ────────────────────────────────────────────
 
 def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContainer]:
     container = _AppContainer(user_data)
@@ -325,14 +325,16 @@ def build_app(token: str, user_data: Path | None) -> tuple[FastAPI, _AppContaine
     return app, container
 
 
-# ── Port discovery ───────────────────────────────────────────────────────────
+# ── Port discovery ─────────────────────────────────────────────
 
 def _bind_free_port() -> tuple[socket.socket, int]:
     """Bind a TCP socket on 127.0.0.1:0 and return (socket, assigned_port).
 
-    Uvicorn 0.30+ accepts an `fd=` kwarg so we can hand it the bound socket
-    directly, sidestepping the race where another process grabs the port
-    between us calling getsockname() and uvicorn calling bind().
+    We keep the socket open and pass it to uvicorn via server.serve(sockets=)
+    so the port is held continuously — no TOCTOU window between getsockname()
+    and serve(). Using sockets= (not fd=) avoids uvicorn's fd-path which
+    unconditionally calls socket.fromfd(..., AF_UNIX, ...) and breaks on
+    Windows where AF_UNIX may not exist.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -342,7 +344,7 @@ def _bind_free_port() -> tuple[socket.socket, int]:
     return sock, port
 
 
-# ── Entrypoint ───────────────────────────────────────────────────────────────
+# ── Entrypoint ─────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="server")
@@ -361,14 +363,12 @@ def main(argv: list[str] | None = None) -> int:
     # write would deadlock the handshake.
     print(f"PORT={port}", flush=True)
 
-    # Hand uvicorn the already-bound socket via fd= so we never release the
-    # port between getsockname() and serve(). Closing + rebinding (the old
-    # behavior) had a brief TOCTOU window where another local process could
-    # claim the port; advertising a port we no longer hold then made
-    # Electron poll a stranger's /health.
+    # Pass host/port to Config for logging; the actual socket is supplied via
+    # server.serve(sockets=[sock]) below so uvicorn never calls bind() itself.
     config = uvicorn.Config(
         app,
-        fd=sock.fileno(),
+        host="127.0.0.1",
+        port=port,
         log_level="info",
         access_log=False,
         loop="asyncio",
@@ -396,7 +396,10 @@ def main(argv: list[str] | None = None) -> int:
         ready_task = asyncio.create_task(_emit_ready())
         shutdown_task = asyncio.create_task(app.state.shutdown_event.wait())
 
-        serve_task = asyncio.create_task(server.serve())
+        # Pass the pre-bound socket directly; uvicorn's sockets= path calls
+        # loop.create_server() with the socket object and skips any AF_UNIX
+        # reconstruction, making this work on Windows as well as POSIX.
+        serve_task = asyncio.create_task(server.serve(sockets=[sock]))
 
         # If POST /shutdown fires, ask uvicorn to exit cleanly. If uvicorn
         # exits on its own (parent killed us), we just fall through.
