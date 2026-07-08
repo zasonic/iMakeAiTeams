@@ -65,14 +65,16 @@ jobs:
           cache: npm
 
       - name: Install Python dependencies
-        # PyInstaller bakes whatever's installed at build time into the
-        # exe, so requirements.txt is the production-shipped bundle.
-        # PyInstaller itself comes from requirements-dev.txt (kept off
-        # the lite installer footprint).
+        # build-sidecar.bat expects backend\.venv\Scripts\python.exe, so we
+        # create the venv there before installing. PyInstaller bakes whatever's
+        # installed at build time into the exe, so requirements.txt is the
+        # production-shipped bundle. PyInstaller itself comes from
+        # requirements-dev.txt (kept off the lite installer footprint).
         run: |
-          python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt
-          pip install pyinstaller
+          python -m venv backend\.venv
+          backend\.venv\Scripts\python -m pip install --upgrade pip
+          backend\.venv\Scripts\pip install -r backend\requirements.txt
+          backend\.venv\Scripts\pip install pyinstaller
 
       - name: Install Node dependencies
         run: npm ci --no-audit --no-fund
