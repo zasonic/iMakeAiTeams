@@ -15,9 +15,21 @@ Priority 2 additions (BM25 Hybrid Search):
   - tokenize()               — shared tokeniser (identical at index and query time)
   - ingest_document() updated to also call _bm25_add_document()
 
+Priority 3 additions (MMR Diversification):
+  - maximal_marginal_relevance() — greedy reranking that balances relevance
+    vs. inter-result diversity (Carbonell & Goldstein 1998). Prevents
+    near-duplicate overlapping chunks from consuming all top-k slots in the
+    LLM context window.
+  - search_documents_hybrid() updated with mmr=False parameter; pass mmr=True
+    to activate MMR on any result set before returning.
+  - RAGIndex.search() now calls search_documents_hybrid(..., mmr=True).
+
 Usage:
-  # Hybrid search (recommended)
-  results = search_documents_hybrid("refund policy", top_k=5, method="hybrid")
+  # Hybrid search with MMR (recommended)
+  results = search_documents_hybrid("refund policy", top_k=5, mmr=True)
+
+  # Hybrid search (BM25+vector+RRF only, no MMR)
+  results = search_documents_hybrid("refund policy", top_k=5)
 
   # Vector-only (original behaviour)
   results = search_documents("refund policy", top_k=5)
@@ -276,21 +288,91 @@ def reciprocal_rank_fusion(
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
 
+# ── Priority 3: MMR Diversification ──────────────────────────────────────────
+
+def maximal_marginal_relevance(
+    query_text: str,
+    candidates: list[dict],
+    k: int = 10,
+    lambda_param: float = 0.5,
+) -> list[dict]:
+    """
+    MMR-based reranking: select k diverse, relevant documents.
+
+    Carbonell & Goldstein (1998). Each greedy step picks the candidate that
+    maximises:
+        lambda * sim(query, d) - (1 - lambda) * max_{s in selected} sim(d, s)
+
+    Prevents near-duplicate overlapping chunks (common with 800-char / 200-char
+    overlap windows) from consuming all top-k slots in the LLM context window.
+
+    Falls back to plain top-k slice when:
+      - k >= len(candidates): nothing to diversify
+      - embedding function unavailable
+      - any embedding call raises
+    """
+    if not candidates or k >= len(candidates):
+        return candidates[:k]
+    if not _initialized or _embed_fn is None:
+        return candidates[:k]
+
+    try:
+        import numpy as np
+
+        texts    = [query_text] + [c["content"][:512] for c in candidates]
+        vecs_raw = _embed_fn(texts)
+        vecs     = np.array(vecs_raw, dtype=np.float32)
+        norms    = np.linalg.norm(vecs, axis=1, keepdims=True).clip(min=1e-9)
+        vecs     = vecs / norms
+
+        query_vec  = vecs[0]
+        doc_vecs   = vecs[1:]
+        query_sims = (doc_vecs @ query_vec).tolist()
+
+        selected:  list[int] = []
+        remaining: list[int] = list(range(len(candidates)))
+
+        while len(selected) < k and remaining:
+            if not selected:
+                best = max(remaining, key=lambda i: query_sims[i])
+            else:
+                sel_mat = doc_vecs[selected]
+                scores  = [
+                    lambda_param * query_sims[i]
+                    - (1.0 - lambda_param) * float((doc_vecs[i] @ sel_mat.T).max())
+                    for i in remaining
+                ]
+                best = remaining[int(np.argmax(scores))]
+
+            selected.append(best)
+            remaining.remove(best)
+
+        return [candidates[i] for i in selected]
+
+    except Exception as exc:
+        log.debug("MMR reranking failed (%s) — using top-k slice.", exc)
+        return candidates[:k]
+
+
 def search_documents_hybrid(
     query_text: str,
     top_k: int = 10,
     doc_type: str | None = None,
     method: str = "hybrid",
+    mmr: bool = False,
 ) -> list[dict]:
     """
-    Hybrid document search: BM25 + ChromaDB vector search + Reciprocal Rank Fusion.
+    Hybrid document search: BM25 + sqlite-vec vector search + Reciprocal Rank Fusion.
 
     Parameters
     ----------
     query_text : Search query
     top_k      : Results to return
-    doc_type   : Optional ChromaDB filter
-    method     : "hybrid" (default) | "vector" (ChromaDB only) | "bm25" (BM25 only)
+    doc_type   : Optional doc-type filter
+    method     : "hybrid" (default) | "vector" (vector-only) | "bm25" (BM25 only)
+    mmr        : If True, apply Maximal Marginal Relevance reranking on a pool of
+                 top_k*3 candidates before returning top_k. Increases diversity and
+                 prevents near-duplicate overlapping chunks from dominating results.
 
     Returns
     -------
@@ -304,16 +386,19 @@ def search_documents_hybrid(
     if method == "hybrid" and not _bm25_available:
         method = "vector"
 
+    # When MMR is requested, fetch a larger candidate pool for diversity selection
+    pool = top_k * 3 if mmr else top_k
+
     bm25_results:   list[tuple[str, float]] = []
     vector_results: list[dict]              = []
 
     # ── BM25 candidates ──────────────────────────────────────────────────────
     if method in ("hybrid", "bm25"):
-        bm25_results = _bm25_search(query_text, n=top_k * 5)
+        bm25_results = _bm25_search(query_text, n=pool * 5)
 
     # ── Vector candidates ─────────────────────────────────────────────────────
     if method in ("hybrid", "vector"):
-        vector_results = search_documents(query_text, top_k=top_k * 5, doc_type=doc_type)
+        vector_results = search_documents(query_text, top_k=pool * 5, doc_type=doc_type)
 
     # ── Vector-only: return as-is ─────────────────────────────────────────────
     if method == "vector":
@@ -322,6 +407,8 @@ def search_documents_hybrid(
             r["bm25_rank"]     = None
             r["vector_rank"]   = r.get("vector_rank", None)
             r["rrf_score"]     = None
+        if mmr and len(vector_results) > top_k:
+            return maximal_marginal_relevance(query_text, vector_results, k=top_k)
         return vector_results[:top_k]
 
     # ── BM25-only ─────────────────────────────────────────────────────────────
@@ -356,7 +443,7 @@ def search_documents_hybrid(
     out = []
     seen: set[str] = set()
 
-    for doc_id, rrf_score in fused[:top_k]:
+    for doc_id, rrf_score in fused[:pool]:
         if doc_id in seen:
             continue
         seen.add(doc_id)
@@ -392,6 +479,8 @@ def search_documents_hybrid(
             "vector_score": vscore,
         })
 
+    if mmr and len(out) > top_k:
+        return maximal_marginal_relevance(query_text, out, k=top_k)
     return out
 
 
