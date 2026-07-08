@@ -224,8 +224,11 @@ class RAGIndex:
           list[(text: str, score: float)]   — when semantic_search is available
           list[]                             — when unavailable
 
-        memory.py handles both plain strings and (text, score) tuples; returning
-        scored tuples enables the similarity threshold filter in MemoryManager.
+        Uses BM25+vector hybrid search with MMR diversification. Overlapping
+        chunk windows produce near-duplicate top results; MMR prevents them
+        from dominating the LLM's context window.
+
+        Falls back to vector-only search on any error from the hybrid path.
         """
         ss = self._get_semantic()
         if ss is None:
@@ -233,11 +236,20 @@ class RAGIndex:
         if not query.strip():
             return []
         try:
-            results = ss.search_documents(query, top_k=top_k)
+            results = ss.search_documents_hybrid(
+                query, top_k=top_k, method="hybrid", mmr=True
+            )
             return [(r["content"], r["score"]) for r in results]
         except Exception as exc:
-            log.debug(f"RAGIndex.search failed: {exc}")
-            return []
+            log.debug(
+                "RAGIndex.search (hybrid+mmr) failed: %s — falling back to vector-only", exc
+            )
+            try:
+                results = ss.search_documents(query, top_k=top_k)
+                return [(r["content"], r["score"]) for r in results]
+            except Exception as exc2:
+                log.debug("RAGIndex.search (vector-only) failed: %s", exc2)
+                return []
 
     # ── Persistence (legacy compatibility) ───────────────────────────────────
 
